@@ -76,7 +76,7 @@ if (!ownerGuess) {
 if (!ownerGuess) {
   fail('无法推断 GitHub owner：设置 GITHUB_OWNER，或把 package.json 的 repository 改成你的真实地址')
 }
-if (/REPLACE_WITH_YOUR_ACCOUNT/u.test(String(pkg.repository?.url ?? ''))) {
+if (String(pkg.repository?.url ?? '').toUpperCase().includes('REPLACE')) {
   log(`⚠ package.json 里的 repository 仍是占位符；发布前请改成 https://github.com/${ownerGuess}/${repo}.git`)
 }
 

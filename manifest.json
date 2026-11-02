@@ -27,7 +27,7 @@
     "graft_resume_session"
   ],
   "engines": {
-    "dsh": ">=0.2.1-rc.4",
+    "dsh": ">=0.2.1-rc.5",
     "node": ">=20"
   },
   "redLines": {

@@ -39,6 +39,32 @@
 | 回读 | 指针 1,860 处；可回读索引 1,982 条 |
 | 结果 | 新会话**零澄清提问**接上工作，并自行发现 pending 与断点的矛盾 |
 
+## 安装与准入校验
+
+本插件是 **DSH bundle**：加载器只认 `package.json` 里的 `dsh.bundle.patch`，普通依赖会被静默忽略。
+
+```bash
+# 用户安装（dsh CLI）
+dsh plugin --profile <name> add dsh-graft-slice
+dsh --profile <name> --dump-config        # 配置树里应出现 dsh-graft-slice 条目
+```
+
+仓库自带的契约校验器（不依赖 dsh CLI，可在 CI 里跑）：
+
+```bash
+node scripts/verify-bundle.mjs   # 27 项：bundle 声明 / files 白名单 / ESM / manifest 一致 / patch 形状 / 来源审计 / 脱敏
+```
+
+三条高频致命错误，本仓库都用校验器兜住：
+
+| 错误 | 后果 | 本仓库 |
+|---|---|---|
+| 只声明 `main`/`exports`，漏 `dsh.bundle` | 被当成普通依赖，静默不激活 | `dsh.bundle.patch` 已声明并校验 |
+| `files` 漏 `cordis.patch.yml` | 装上了但没有配置层，挂载失败 | 白名单含 patch + `index.js` + `manifest.json` |
+| 未设 `type: "module"` | CJS 引 ESM 核心包，启动即崩 | `type: "module"` 已校验 |
+
+`cordis.patch.yml` 用**包名**引用（`name: dsh-graft-slice`），不写相对路径——相对路径只在本机成立。
+
 ## v7.4.0（P0/P1 修复）：断点优先、进行中轮次不丢、两阶段审核
 
 **事故**：一个 41 轮的真实会话在 75% 水位命中时正处于实施中途。auto-graft 在 `turn-stopping` 触发，比该轮的 `turn/end` 早了一个事件；`autoGraftIfNeeded` 把快照截断在「最后一个它看得见的 `turn/end`」——也就是**上一轮**的末尾。结果整轮（用户的决定 + 83 步实施）从磁带里凭空消失，target 把**再上一轮**读成「这个会话的任务」，并重做了磁盘上早已存在的工作。

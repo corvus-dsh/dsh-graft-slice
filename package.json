@@ -32,7 +32,8 @@
     "LICENSE",
     "RELEASE_NOTES.md",
     "ANALYSIS-BRIEF.md",
-    "scripts/publish.mjs"
+    "scripts/publish.mjs",
+    "scripts/verify-bundle.mjs"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -40,11 +41,12 @@
     "check:docs": "node scripts/check-docs.mjs",
     "test": "node --test test/*.test.mjs",
     "demo": "node scripts/demo.mjs",
-    "publish": "node scripts/publish.mjs"
+    "publish": "node scripts/publish.mjs",
+    "verify": "node scripts/verify-bundle.mjs"
   },
   "engines": {
     "node": ">=20",
-    "dsh": ">=0.2.1-rc.4"
+    "dsh": ">=0.2.1-rc.5"
   },
   "keywords": [
     "dsh",
@@ -62,10 +64,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/REPLACE_WITH_YOUR_ACCOUNT/dsh-graft-slice.git"
+    "url": "git+https://github.com/corvus-dsh/dsh-graft-slice.git"
   },
-  "homepage": "https://github.com/REPLACE_WITH_YOUR_ACCOUNT/dsh-graft-slice#readme",
+  "homepage": "https://github.com/corvus-dsh/dsh-graft-slice#readme",
   "bugs": {
-    "url": "https://github.com/REPLACE_WITH_YOUR_ACCOUNT/dsh-graft-slice/issues"
+    "url": "https://github.com/corvus-dsh/dsh-graft-slice/issues"
   }
 }
