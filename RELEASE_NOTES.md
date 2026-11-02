@@ -1,4 +1,4 @@
-# dsh-graft-slice v0.7.5 — 让长会话活着交班
+# dsh-graft-slice v0.8.0 — 让长会话活着交班
 
 > **自我切片 · 跨代审计 · 崩溃可恢复**
 >
@@ -89,7 +89,7 @@ v7.4 在 pending 第一行钉一个锚点：
 
 ```
 node scripts/build.mjs         # 生成 index.js（397,206 B）
-node --test test/*.test.mjs    # 255/255
+node --test test/*.test.mjs    # 265/265
 node scripts/check-docs.mjs    # 文档与代码 22 项事实一致
 node ../graft-e2e/crash/run.mjs # L1-L5 崩溃注入 7/7
 ```

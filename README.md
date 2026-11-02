@@ -2,7 +2,7 @@
 
 **DSH 日志切片与最小注入插件。** 在源会话最后一个 `turn/end` 处切取高保真磁带，创建一个零继承、可冷恢复的交接会话；不 fork，不引入 SQLite，不单独注入 `tool/result`。
 
-> 当前版本 **0.7.5（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
+> 当前版本 **0.8.0（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
 > 目标运行时：DeepSeek Harness **0.2.1-rc.5**（当前桌面端）。
 > 规格书 v2.1 写的是 rc.4；本实现已按 rc.5 的真实源码校正了两处会导致冷恢复失败的问题。
 
@@ -64,6 +64,22 @@ node scripts/verify-bundle.mjs   # 27 项：bundle 声明 / files 白名单 / ES
 | 未设 `type: "module"` | CJS 引 ESM 核心包，启动即崩 | `type: "module"` 已校验 |
 
 `cordis.patch.yml` 用**包名**引用（`name: dsh-graft-slice`），不写相对路径——相对路径只在本机成立。
+
+## v0.8.0：Phase Roadmap（节点计划）
+
+长任务需要一个比 todo 更粗、比 goal 更具体的层级：**整体阶段 → 当前节点 → 卡点**。
+
+| 动作 | 实现 |
+|---|---|
+| 提取 | 三层降级：`阶段 N:`/`Phase N`/`第 N 步` 前缀（确定性）→ assistant 句首编号列表（启发式）→ ≥4 条普通 todo 退化为「节点」 |
+| 不编造 | 三层都没有 → **不产出该块** |
+| 优先级 | `[Phase Roadmap]` 排在 `[Task Status]` **之前**（状态回答“还剩什么”，路线图回答“我在哪、卡在哪”） |
+| 卡点 | 取最近失败；若之后有成功调用则丢弃（不把已解决的错误当现状） |
+| 唤醒 | pre-step `messages` 注入一行提示：**每轮最多一次 + 3 轮冷却**，且已有阶段前缀时不打扰 |
+
+**约定**：写 todo 时用 `阶段 1: …` 前缀，切片会原样带走并确定性分组。
+
+回归测试：`test/v75-phase-roadmap.test.mjs`（10 条）。
 
 ## v7.4.0（P0/P1 修复）：断点优先、进行中轮次不丢、两阶段审核
 
@@ -234,7 +250,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 255 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯 |
+| `test/*.test.mjs` | 265 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯 |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -896,7 +912,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 255 个测试
+# 2) 265 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）

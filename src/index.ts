@@ -259,6 +259,7 @@ export interface GraftInjectionChunk {
     | 'omitted-turns'
     | 'readback-index'
     | 'open-work'
+    | 'phase-roadmap'
   text: string
   turn?: number
   truncated: boolean
@@ -1064,6 +1065,279 @@ export function extractTaskState(events: readonly SessionEventLike[]): TaskState
     ...(ageEvents === undefined ? {} : { todoAgeEvents: ageEvents }),
     ...(ageTurns === undefined ? {} : { todoAgeTurns: ageTurns }),
   }
+}
+
+/**
+ * v7.5: the node plan — a coarser layer than the todo list.
+ *
+ * WHY IT EXISTS
+ *
+ * `[Task Status]` is a snapshot the model wrote itself: it drifts, it gets
+ * forgotten, and when it is 4,000 events old it still reads as "the plan". What a
+ * resumed window needs first is not "12 items left" but "I am in phase 2, blocked
+ * on X". That sentence is recoverable even from a stale todo list plus the most
+ * recent failure, and it is the one thing a reader cannot reconstruct cheaply.
+ *
+ * SOURCE DISCIPLINE
+ *
+ * Three descending layers, and **no layer means no block**:
+ *   L1  阶段 N: / Phase N / 第 N 步 prefixes in `todo_write`  (deterministic)
+ *   L2  a ≥3-item numbered list in the assistant's own text  (heuristic)
+ *   L3  ≥4 plain todos, rendered as 节点 (not 阶段)          (coarse fallback)
+ * Inventing a roadmap is worse than omitting one: the reader acts on it.
+ */
+export interface RoadmapPhase {
+  label: string
+  status: 'done' | 'active' | 'pending'
+}
+
+export interface PhaseRoadmap {
+  /** What the items are called. L3 says 节点 because it did not find phases. */
+  unit: '阶段' | '节点'
+  phases: RoadmapPhase[]
+  currentNode?: string
+  blocker?: { tool?: string; text: string; seq?: number }
+  origin: 'todos' | 'assistant-plan' | 'mixed'
+  capturedAtSeq: number
+  ageEvents?: number
+  ageTurns?: number
+}
+
+const PHASE_PREFIX = /^(?:阶段|Phase)\s*([0-9]+)\s*[:：]\s*(.+)$/iu
+const STEP_CN = /^第\s*([0-9]+)\s*步\s*[:：]?\s*(.+)$/u
+const STEP_EN = /^Step\s*([0-9]+)\s*[:：]\s*(.+)$/iu
+const TODO_LINE = /^- \[(x| )\]\s*(.+)$/u
+const PLAN_ITEM = /^\s*(?:(?:[0-9]+)[.)、]|[-*•])\s+(\S.*)$/u
+const CARDINAL_ORDER: readonly RegExp[] = [PHASE_PREFIX, STEP_CN, STEP_EN]
+
+/** Split one rendered todo line back into `{ done, text }`. */
+export function parseTodoLine(line: string): { done: boolean; text: string } | undefined {
+  const match = TODO_LINE.exec(line.trim())
+  if (match === null) return undefined
+  return { done: match[1] === 'x', text: match[2].trim() }
+}
+
+/** `阶段 2: 补测试` → `{ n: 2, label: '补测试' }`; undefined when unprefixed. */
+export function phaseKeyOf(text: string): { n: number; label: string } | undefined {
+  for (const pattern of CARDINAL_ORDER) {
+    const match = pattern.exec(text.trim())
+    if (match === null) continue
+    const n = Number(match[1])
+    if (!Number.isFinite(n)) continue
+    return { n, label: match[2].trim() }
+  }
+  return undefined
+}
+
+/** Numbered/bulleted runs of ≥3 consecutive lines in one assistant message. */
+function planBlocksOf(events: readonly SessionEventLike[]): Array<{ seq: number; labels: string[] }> {
+  const blocks: Array<{ seq: number; labels: string[] }> = []
+  for (const event of events) {
+    if (event?.type !== 'assistant/message') continue
+    const text = textOfMessage(event.data?.message)
+    if (text.length === 0) continue
+    let inFence = false
+    let run: string[] = []
+    const flush = (): void => {
+      if (run.length >= 3) blocks.push({ seq: Number(event.seq), labels: run.slice(0, 5) })
+      run = []
+    }
+    for (const raw of text.split(/\r?\n/u)) {
+      const line = raw.trimEnd()
+      if (/^\s*```/u.test(line)) {
+        inFence = !inFence
+        flush()
+        continue
+      }
+      if (inFence) continue
+      const match = PLAN_ITEM.exec(line)
+      if (match === null) {
+        flush()
+        continue
+      }
+      const label = match[1].replace(/\*\*/gu, '').trim()
+      if (label.length === 0) {
+        flush()
+        continue
+      }
+      run.push(label.slice(0, 60))
+    }
+    flush()
+  }
+  return blocks
+}
+
+/** The current node, phrased by the assistant ("正在进行… / 卡在…"). */
+function currentNodeFromProse(events: readonly SessionEventLike[]): string | undefined {
+  const pattern = /(正在进行|正在做|当前在|卡在|卡住|blocked on|in progress)/iu
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'assistant/message') continue
+    for (const sentence of splitSentences(textOfMessage(event.data?.message))) {
+      if (pattern.test(sentence)) return truncateEnd(sentence.replace(/\s+/gu, ' ').trim(), 80).text
+    }
+  }
+  return undefined
+}
+
+/**
+ * Build the roadmap, or `undefined` when nothing worth calling a plan exists.
+ *
+ * `scene` is the same last-step scene the pending state uses; the blocker is
+ * dropped when a *later* tool result succeeded, because "blocked on an error that
+ * was already fixed" is worse than saying nothing.
+ */
+export function extractPhaseRoadmap(
+  events: readonly SessionEventLike[],
+  taskState: TaskState,
+  scene: LastStepScene = {},
+): PhaseRoadmap | undefined {
+  const lastSeq = events.length > 0 ? Number(events[events.length - 1]?.seq ?? 0) : 0
+  const lastTurn = (() => {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event?.type === 'turn/start') {
+        const value = Number(event.data?.turn)
+        if (Number.isFinite(value)) return value
+      }
+    }
+    return 0
+  })()
+  const todoItems = taskState.todos.map(parseTodoLine).filter((item): item is { done: boolean; text: string } => item !== undefined)
+  const openTodos = taskState.openTodos
+
+  // --- L1: phase prefixes in the todo list ---------------------------------
+  const grouped = new Map<number, { labels: string[]; done: boolean; incomplete: string[] }>()
+  for (const item of todoItems) {
+    const key = phaseKeyOf(item.text)
+    if (key === undefined) continue
+    const entry = grouped.get(key.n) ?? { labels: [], done: true, incomplete: [] }
+    entry.labels.push(key.label)
+    if (!item.done) {
+      entry.done = false
+      entry.incomplete.push(key.label)
+    }
+    grouped.set(key.n, entry)
+  }
+  if (grouped.size > 0) {
+    const ordered = [...grouped.entries()].sort((a, b) => a[0] - b[0])
+    const firstOpen = ordered.findIndex(([, entry]) => !entry.done)
+    const phases: RoadmapPhase[] = ordered.map(([n, entry], index) => ({
+      label: `阶段 ${n} ${truncateEnd(entry.labels[0] ?? '', 40).text}`.trim(),
+      status: entry.done ? 'done' : index === firstOpen ? 'active' : 'pending',
+    }))
+    const activeEntry = firstOpen >= 0 ? ordered[firstOpen][1] : undefined
+    return {
+      unit: '阶段',
+      phases,
+      ...(activeEntry === undefined
+        ? {}
+        : { currentNode: truncateEnd(activeEntry.incomplete[0] ?? activeEntry.labels[0] ?? '', 80).text }),
+      ...blockerOf(events, scene),
+      origin: 'todos',
+      capturedAtSeq: taskState.todoSeq ?? lastSeq,
+      ...(taskState.todoAgeEvents === undefined ? {} : { ageEvents: taskState.todoAgeEvents }),
+      ...(taskState.todoAgeTurns === undefined ? {} : { ageTurns: taskState.todoAgeTurns }),
+    }
+  }
+
+  // --- L2: a numbered plan in the assistant's own words --------------------
+  const blocks = planBlocksOf(events)
+  if (blocks.length > 0) {
+    const block = blocks[blocks.length - 1]
+    const phases: RoadmapPhase[] = block.labels.map((label, index) => ({
+      // The assistant wrote a list, not statuses. Only the position is a fact:
+      // with an open todo list, the first open item is the active node.
+      label: truncateEnd(label, 40).text,
+      status: index === 0 ? 'active' : 'pending',
+    }))
+    const current = openTodos[0] ?? currentNodeFromProse(events)
+    return {
+      unit: '阶段',
+      phases,
+      ...(current === undefined ? {} : { currentNode: truncateEnd(current, 80).text }),
+      ...blockerOf(events, scene),
+      origin: openTodos.length > 0 ? 'mixed' : 'assistant-plan',
+      capturedAtSeq: block.seq,
+      ...(lastSeq > block.seq ? { ageEvents: lastSeq - block.seq } : {}),
+      ...(lastTurn === 0 ? {} : { ageTurns: Math.max(0, lastTurn - 1) }),
+    }
+  }
+
+  // --- L3: plain todos, called 节点 so nothing is over-claimed -------------
+  if (todoItems.length >= 4) {
+    const slice = todoItems.slice(0, 5)
+    const firstOpen = slice.findIndex((item) => !item.done)
+    return {
+      unit: '节点',
+      phases: slice.map((item, index) => ({
+        label: truncateEnd(item.text, 40).text,
+        status: item.done ? 'done' : index === firstOpen ? 'active' : 'pending',
+      })),
+      ...(firstOpen >= 0 ? { currentNode: truncateEnd(slice[firstOpen].text, 80).text } : {}),
+      ...blockerOf(events, scene),
+      origin: 'todos',
+      capturedAtSeq: taskState.todoSeq ?? lastSeq,
+      ...(taskState.todoAgeEvents === undefined ? {} : { ageEvents: taskState.todoAgeEvents }),
+      ...(taskState.todoAgeTurns === undefined ? {} : { ageTurns: taskState.todoAgeTurns }),
+    }
+  }
+
+  return undefined
+}
+
+/** The blocker, unless a later successful tool result already moved past it. */
+function blockerOf(
+  events: readonly SessionEventLike[],
+  scene: LastStepScene,
+): { blocker?: { tool?: string; text: string; seq?: number } } {
+  if (scene.failingTool === undefined && scene.errorText === undefined) return {}
+  let lastResultSeq = -1
+  for (const event of events) {
+    if (event?.type !== 'tool/result') continue
+    const seq = Number(event.seq)
+    if (Number.isFinite(seq) && seq > lastResultSeq) lastResultSeq = seq
+  }
+  if (scene.errorSeq !== undefined && lastResultSeq > scene.errorSeq) return {}
+  const text = (scene.errorText ?? '').replace(/\s+/gu, ' ').trim()
+  if (text.length === 0) return {}
+  return {
+    blocker: {
+      ...(scene.failingTool === undefined ? {} : { tool: scene.failingTool }),
+      text: truncateEnd(text, 120).text,
+      ...(scene.errorSeq === undefined ? {} : { seq: scene.errorSeq }),
+    },
+  }
+}
+
+const MARK = { done: '✅', active: '◐', pending: '○' } as const
+
+/** Render the block. Hard cap 600 chars: it must not outrank the pending state. */
+export function renderPhaseRoadmap(roadmap: PhaseRoadmap): string {
+  const head = (() => {
+    const age =
+      roadmap.ageEvents === undefined
+        ? ''
+        : roadmap.ageEvents >= 500
+          ? `，此后又过 ${roadmap.ageEvents} 个事件——可能已过期`
+          : `，此后又过 ${roadmap.ageEvents} 个事件`
+    return `[Phase Roadmap]（快照 seq=${roadmap.capturedAtSeq}${age}）`
+  })()
+  const lines = [head]
+  for (const phase of roadmap.phases) {
+    const suffix = phase.status === 'active' ? ' — 正在进行' : ''
+    lines.push(`- ${truncateEnd(phase.label, 60).text} ${MARK[phase.status]}${suffix}`)
+  }
+  if (roadmap.currentNode !== undefined && roadmap.currentNode.length > 0) {
+    lines.push(`当前节点：${truncateEnd(roadmap.currentNode, 100).text}`)
+  }
+  if (roadmap.blocker !== undefined) {
+    const tool = roadmap.blocker.tool === undefined ? '' : `${roadmap.blocker.tool}：`
+    const seq = roadmap.blocker.seq === undefined ? '' : `（seq=${roadmap.blocker.seq}）`
+    lines.push(`卡点：${tool}${roadmap.blocker.text}${seq}`)
+  }
+  if (roadmap.unit === '节点') lines.push('（未检测到阶段前缀，以上按清单顺序称为节点）')
+  return truncateEnd(lines.join('\n'), 600).text
 }
 
 function summaryWithConstraints(prose: string, limit: number): { text: string; truncated: boolean } {
@@ -3175,6 +3449,20 @@ export function buildInjectionPlan(
       truncated: olderTruncated,
     })
   }
+  // v7.5: the node plan sits ABOVE the status snapshot.
+  //
+  // Order is the whole point. `[Task Status]` answers "what is left"; this block
+  // answers "where am I and what is in the way". A resumed reader needs the
+  // second question first — and when the todo list is stale, the roadmap is the
+  // only block that still points at the current phase.
+  const roadmap = extractPhaseRoadmap(events, taskState, extractLastStepScene(events))
+  if (roadmap !== undefined) {
+    chunks.push({
+      kind: 'phase-roadmap',
+      text: renderPhaseRoadmap(roadmap),
+      truncated: false,
+    })
+  }
   if (taskState.todos.length > 0) {
     // v7.4: state the snapshot's age instead of implying it is current.
     //
@@ -4792,6 +5080,98 @@ function lastUserText(messages: unknown): string | undefined {
   return undefined
 }
 
+/**
+ * v7.5: the node-plan wake-up.
+ *
+ * Delivered through the pre-step `messages` channel — the same one the standing
+ * constraints use — so it never writes to the log and never consumes a step
+ * number. It is a HINT, not a gate: the model may ignore it and keep working.
+ *
+ * Pacing is deliberately conservative (the user asked for "no nagging"):
+ *   - at most once per user turn (a new user message starts a new turn);
+ *   - at least PLAN_NUDGE_COOLDOWN_TURNS turns between two nudges;
+ *   - only when there is a real signal: the task announces phases but the todo
+ *     list has no `阶段 N:` prefixes, or the list has ≥3 open items and is 500+
+ *     events stale (the drift this whole block exists to survive).
+ */
+const PLAN_NUDGE_TEXT =
+  '[系统提示] 这是长任务：请先制定或更新你的节点计划（Node Plan）——阶段 → 当前节点 → 卡点。写进 todo_write 时用「阶段 1:」前缀，切片会原样带走。'
+const PLAN_NUDGE_COOLDOWN_TURNS = 3
+
+interface PlanNudgeState {
+  userKey: string
+  turns: number
+  nudged: boolean
+  lastNudgeTurn: number
+}
+
+const planNudgeStates = new Map<string, PlanNudgeState>()
+
+/** How many `1.` / `2.` style steps the user's own text carries. */
+function countNumberedSteps(text: string): number {
+  let count = 0
+  for (const line of text.split(/\r?\n/u)) if (/^\s*[0-9]+[.)、]/u.test(line)) count += 1
+  return count
+}
+
+function takePlanNudge(
+  ctx: PluginContextLike,
+  agentId: string,
+  messages: unknown,
+): Array<Record<string, unknown>> {
+  const userText = lastUserText(messages)
+  if (userText === undefined) return []
+  const state = planNudgeStates.get(agentId) ?? { userKey: '', turns: 0, nudged: false, lastNudgeTurn: -100 }
+  const key = userText.trim().slice(0, 160)
+  if (key !== state.userKey) {
+    state.userKey = key
+    state.turns += 1
+    state.nudged = false
+  }
+  planNudgeStates.set(agentId, state)
+  if (state.nudged) return []
+  if (state.turns - state.lastNudgeTurn < PLAN_NUDGE_COOLDOWN_TURNS) return []
+
+  // The live handle keeps the in-memory log: cheaper than readSession (which
+  // decodes the whole zstd file), and bounded to the recent window.
+  const live = (() => {
+    try {
+      return (ctx.get('sessions') as any)?.get?.(agentId) as any
+    } catch {
+      return undefined
+    }
+  })()
+  if (live === undefined || typeof live.snapshotEvents !== 'function') return []
+  let events: readonly SessionEventLike[] = []
+  try {
+    const seq = Number(live.seq)
+    events = Number.isFinite(seq) && seq > 3000 ? live.snapshotEvents(seq - 3000) : live.snapshotEvents(0)
+  } catch {
+    return []
+  }
+  if (events.length === 0) return []
+
+  const taskState = extractTaskState(events)
+  const hasPhasePrefixes = taskState.todos.some((line) => {
+    const item = parseTodoLine(line)
+    return item !== undefined && phaseKeyOf(item.text) !== undefined
+  })
+  const phaseIntent = /(阶段|Phase|里程碑|roadmap)/iu.test(userText) || countNumberedSteps(userText) >= 3
+  const drift = taskState.openTodos.length >= 3 && (taskState.todoAgeEvents ?? 0) >= 500
+  if (!(phaseIntent && !hasPhasePrefixes) && !drift) return []
+
+  state.nudged = true
+  state.lastNudgeTurn = state.turns
+  return [
+    {
+      id: `graft-plan-${agentId}-${state.turns}`,
+      role: 'user',
+      content: [{ type: 'text', text: PLAN_NUDGE_TEXT }],
+      source: { kind: GRAFT_REPLAY_SOURCE_KIND },
+    },
+  ]
+}
+
 function loadPendingConstraints(ctx: PluginContextLike): void {
   try {
     const parsed = JSON.parse(readFileSync(pendingConstraintsPath, 'utf8'))
@@ -6083,6 +6463,7 @@ export async function graftSliceAndInject(
         title: 1,
         oldSummary: plan.chunks.filter((chunk) => chunk.kind === 'old-summary').length,
         taskStatus: plan.chunks.filter((chunk) => chunk.kind === 'task-status').length,
+        phaseRoadmap: plan.chunks.filter((chunk) => chunk.kind === 'phase-roadmap').length,
         subagentReports: plan.chunks.filter((chunk) => chunk.kind === 'subagent-reports').length,
         tape: plan.chunks.filter((chunk) => chunk.kind === 'recent-turn').length,
         pending: plan.chunks.filter((chunk) => chunk.kind === 'pending-state').length,
@@ -8216,8 +8597,12 @@ async function appendTransitionCard(
       const merged = takeDraftMerge(agentId, base)
       const messages = merged === undefined ? base : [...base, ...merged.messages]
       const extra = takePendingConstraintMessages(agentId)
-      if (extra.length === 0) return merged === undefined ? decision : { ...decision, messages }
-      return { ...decision, messages: [...messages, ...extra] }
+      // v7.5: the node-plan hint rides the same channel (and the same discipline:
+      // once, quiet, non-blocking).
+      const planExtra = takePlanNudge(ctx, agentId, payload?.messages)
+      const appended = [...extra, ...planExtra]
+      if (appended.length === 0) return merged === undefined ? decision : { ...decision, messages }
+      return { ...decision, messages: [...messages, ...appended] }
     }
     return { kind: 'enter', messages: Array.isArray(payload?.messages) ? payload.messages : [] }
   })
