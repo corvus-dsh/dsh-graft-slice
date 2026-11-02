@@ -34,7 +34,7 @@ Target runtime: DSH **0.2.1-rc.5** (the installed desktop build).
 ```powershell
 cd 'D:\鎸佷箙灞傝兘鍔涙灦鏋刓dsh-graft-slice'
 node scripts/build.mjs                 # requires Node >= 22.6 (type stripping); runtime needs >= 20
-node --test test/*.test.mjs            # 265 tests
+node --test test/*.test.mjs            # 268 tests
 node scripts/check-docs.mjs            # docs vs code: version, build freshness, tool list, test count, feature status
 node scripts/demo.mjs                  # real persisted log + fake host, never writes the real store
 node scripts/scan-real-logs.mjs        # read-only scan of every local persisted log

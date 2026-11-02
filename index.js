@@ -2563,6 +2563,7 @@ function buildPendingState(
   openTodos                    = [],
   scene                = {},
   lastOpenCall                                                  ,
+  todoFreshness                                                                 ,
 )         {
   const lines           = []
 
@@ -2585,6 +2586,16 @@ function buildPendingState(
         .slice(1, 4)
         .map((item) => truncateEnd(item.replace(/\s+/gu, ' ').trim(), 120).text)
       lines.push(`再往后还有：${rest.join('；')}。`)
+    }
+    // v7.5: a list written before N successful calls is a CLAIM, not the current state.
+    //
+    // Measured on a live handoff: the pending said "立刻执行：推送 v0.8.0（等确认）" while the
+    // push had already happened. The list was stale; nothing on screen said so.
+    if (todoFreshness !== undefined && todoFreshness.newerSuccesses >= 3 && todoFreshness.todoSeq !== undefined) {
+      lines.push(
+        `（清单写于 seq=${todoFreshness.todoSeq}，之后又有 ${todoFreshness.newerSuccesses} 次成功的工具调用——` +
+          '某项可能已完成，先核对再重跑。）',
+      )
     }
   } else {
     // Fallback: prose, but only sentences that survive the noise filter.
@@ -2987,6 +2998,32 @@ export function buildTape(
     const name = typeof event.data?.name === 'string' ? event.data.name : ''
     if (name.length > 0) lastOpenCall = { tool: name, seq: Number(event.seq) }
   }
+  // v7.5: how many SUCCESSFUL tool calls happened after the todo snapshot was written.
+  const todoFreshness = (() => {
+    let todoSeq                    
+    let todoCallId = ''
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event?.type === 'tool/call' && event.data?.name === 'todo_write') {
+        todoSeq = Number(event.seq)
+        todoCallId = typeof event.data?.callId === 'string' ? event.data.callId : ''
+        break
+      }
+    }
+    if (todoSeq === undefined) return undefined
+    let newerSuccesses = 0
+    for (const event of events) {
+      if (event?.type !== 'tool/result') continue
+      if (Number(event.seq) <= todoSeq) continue
+      const callId = event.data?.message?.source?.callId ?? event.data?.message?.toolCallId
+      // The todo_write result itself is not "work done after the snapshot".
+      if (todoCallId.length > 0 && callId === todoCallId) continue
+      if (event.data?.message?.isError === true || event.data?.error !== undefined) continue
+      newerSuccesses += 1
+    }
+    return { todoSeq, newerSuccesses }
+  })()
+
   const pendingBody = buildPendingState(
     lastTurnText,
     goal.goal,
@@ -3002,6 +3039,7 @@ export function buildTape(
     // what the tape chose to replay.
     extractLastStepScene(events),
     lastOpenCall,
+    todoFreshness,
   )
   // 硬约束 7: provenance for inherited constraints goes FIRST in the pending
   // state, ahead of every other line a reader might act on.
