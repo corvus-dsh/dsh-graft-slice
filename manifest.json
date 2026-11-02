@@ -1,0 +1,48 @@
+{
+  "name": "dsh-graft-slice",
+  "version": "0.7.4",
+  "description": "Slice a closed source-session log at its last turn/end and inject a minimal, durable handoff session without forking.",
+  "entry": "index.js",
+  "activate": "activate(ctx, config)",
+  "permissions": [
+    "session:read",
+    "session:write"
+  ],
+  "services": [
+    "sessions",
+    "sessionQuery",
+    "sessionPersistence",
+    "tools"
+  ],
+  "hooks": [
+    "agent/pre-step",
+    "agent/turn-stopping"
+  ],
+  "tools": [
+    "graft_prepare",
+    "graft_commit",
+    "graft_slice_and_inject",
+    "graft_search_history",
+    "graft_read_result",
+    "graft_resume_session"
+  ],
+  "engines": {
+    "dsh": ">=0.2.1-rc.4",
+    "node": ">=20"
+  },
+  "redLines": {
+    "fork": false,
+    "systemHead": "first surface event is system/message",
+    "skeletonSurfaceOp": false,
+    "messageSurfaceOp": "append",
+    "assistantStream": [],
+    "assistantSourceEventSeqs": false,
+    "standaloneToolResult": false,
+    "openTurn": "refuse",
+    "retirement": "agent/pre-step reject"
+  },
+  "notes": [
+    "Permissions are declarative metadata for this package. DSH 0.2.1-rc.5 does not enforce per-plugin permission manifests; actual capability comes from the injected services.",
+    "The runtime entry is index.js, generated from src/index.ts. activate is an alias of apply for callers that expect that name."
+  ]
+}

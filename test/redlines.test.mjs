@@ -1,0 +1,91 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { readFileSync, existsSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+
+const root = new URL('../', import.meta.url)
+
+function read(relative) {
+  return readFileSync(new URL(relative, root), 'utf8')
+}
+
+test('package and manifest declare the plugin identity and permissions', () => {
+  const pkg = JSON.parse(read('package.json'))
+  const manifest = JSON.parse(read('manifest.json'))
+  assert.equal(pkg.name, 'dsh-graft-slice')
+  assert.equal(pkg.type, 'module')
+  assert.equal(pkg.dsh.bundle.patch, './cordis.patch.yml')
+  assert.equal(manifest.name, pkg.name)
+  assert.equal(manifest.version, pkg.version)
+  assert.deepEqual(manifest.permissions, ['session:read', 'session:write'])
+  // v7.3 adds the search tool, which is what makes the read-back design usable:
+  // before it, a target could only read a seq it already knew.
+  // v7.4 adds the two-phase pair: prepare (read-only review) + commit (verified write).
+  assert.deepEqual(manifest.tools, [
+    'graft_prepare',
+    'graft_commit',
+    'graft_slice_and_inject',
+    'graft_search_history',
+    'graft_read_result',
+    'graft_resume_session',
+  ])
+  assert.deepEqual(manifest.hooks, ['agent/pre-step', 'agent/turn-stopping'])
+})
+
+test('cordis patch inserts the plugin row', () => {
+  const patch = read('cordis.patch.yml')
+  assert.match(patch, /insert:/)
+  assert.match(patch, /id:\s*dsh-graft-slice/)
+  assert.match(patch, /name:\s*dsh-graft-slice/)
+  assert.match(patch, /skeletonTurn:\s*1/)
+  assert.match(patch, /skeletonStep:\s*1/)
+})
+
+test('the runtime contains no SQLite dependency and no external imports', () => {
+  const runtime = read('index.js')
+  assert.equal(/sqlite|better-sqlite3/iu.test(runtime), false)
+  const imports = [...runtime.matchAll(/^import\s+.*?from\s+['"]([^'"]+)['"]/gmu)].map((match) => match[1])
+  const external = imports.filter((specifier) => !specifier.startsWith('node:'))
+  assert.deepEqual(external, [], 'index.js may only import Node built-ins')
+})
+
+test('the runtime never calls sessions.fork and never fires a standalone tool/result append', () => {
+  const runtime = read('index.js')
+  const code = runtime
+    .replace(/\/\*[\s\S]*?\*\//gu, '')
+    .replace(/^\s*\/\/.*$/gmu, '')
+  assert.equal(/ctx\.sessions\.fork\s*\(/u.test(code), false)
+  assert.equal(/\.fork\s*\(\s*source/iu.test(code), false)
+  // The only append call sites are typed helpers; a literal append of
+  // tool/result would be a red-line violation.
+  assert.equal(/append\(\s*['"]tool\/result['"]/u.test(code), false)
+})
+
+test('the assistant builder writes stream [] and append surface metadata', () => {
+  const runtime = read('index.js')
+  assert.match(runtime, /stream:\s*\[\]/u)
+  assert.match(runtime, /surfaceOp:\s*['"]append['"]/u)
+  assert.equal(/sourceEventSeqs:\s*\[\]/u.test(runtime), false)
+})
+
+test('the generated runtime is valid JavaScript and exports apply/activate', () => {
+  const runtimePath = new URL('index.js', root)
+  assert.equal(existsSync(runtimePath), true)
+  execFileSync(process.execPath, ['--check', fileURLToPath(runtimePath)], { stdio: 'pipe' })
+  return import('../index.js').then((module) => {
+    assert.equal(typeof module.apply, 'function')
+    assert.equal(typeof module.activate, 'function')
+    assert.deepEqual(module.inject, ['tools', 'sessions', 'sessionQuery', 'sessionPersistence'])
+    assert.equal(module.name, 'dsh-graft-slice')
+  })
+})
+
+test('display metadata and icon are present', () => {
+  const en = JSON.parse(read('locale/en.json'))
+  const zh = JSON.parse(read('locale/zh.json'))
+  assert.equal(typeof en.meta.title, 'string')
+  assert.equal(typeof en.meta.description, 'string')
+  assert.equal(typeof zh.meta.title, 'string')
+  assert.equal(read('icon.svg').startsWith('<svg'), true)
+})

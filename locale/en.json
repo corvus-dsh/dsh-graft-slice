@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Graft Slice",
+    "description": "Slices a finished session at its last turn/end and injects a minimal, durable handoff session without forking."
+  }
+}

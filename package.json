@@ -1,0 +1,71 @@
+{
+  "name": "dsh-graft-slice",
+  "version": "0.7.4",
+  "private": false,
+  "description": "DSH open-source ecosystem plugin (topic: dsh-plugin): physical handoff for long sessions — slice a closed log at its last turn/end into a zero-inheritance, cold-resumable session. No fork, no lossy compaction, crash-safe transaction journal.",
+  "type": "module",
+  "main": "index.js",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./index.js",
+    "./manifest": "./manifest.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "manifest.json",
+    "cordis.patch.yml",
+    "src/index.ts",
+    "scripts/build.mjs",
+    "scripts/demo.mjs",
+    "scripts/read-session-log.mjs",
+    "scripts/scan-real-logs.mjs",
+    "scripts/validate-real-format.mjs",
+    "scripts/check-docs.mjs",
+    "test",
+    "test/fixtures",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "RELEASE_NOTES.md",
+    "ANALYSIS-BRIEF.md",
+    "scripts/publish.mjs"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node --check index.js",
+    "check:docs": "node scripts/check-docs.mjs",
+    "test": "node --test test/*.test.mjs",
+    "demo": "node scripts/demo.mjs",
+    "publish": "node scripts/publish.mjs"
+  },
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.1-rc.4"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "session",
+    "migration",
+    "log-slice"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/REPLACE_WITH_YOUR_ACCOUNT/dsh-graft-slice.git"
+  },
+  "homepage": "https://github.com/REPLACE_WITH_YOUR_ACCOUNT/dsh-graft-slice#readme",
+  "bugs": {
+    "url": "https://github.com/REPLACE_WITH_YOUR_ACCOUNT/dsh-graft-slice/issues"
+  }
+}

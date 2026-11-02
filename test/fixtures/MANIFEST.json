@@ -1,0 +1,15 @@
+{
+  "sessionId": "session-fixture-real",
+  "derivedFrom": "session-legacy-fixture",
+  "provenance": "Real persisted DSH v4 log rescued from the 2026-11-01 recursive delete of ~/.dsh/sessions (trailing-dot survivor). Event shapes are recorded, not invented; only payload sizes were reduced.",
+  "reduction": "first 5 turns kept; long strings clipped to 120 chars; request/header.header body and per-message stream arrays shortened; one reasoning block retained for shape coverage.",
+  "cwd": "D:\\fixture-workspace",
+  "events": 1967,
+  "turns": 5,
+  "toolResults": 342,
+  "toolResultFailures": 6,
+  "writeEditCalls": 67,
+  "bytes": 166180,
+  "sha256": "8e25b5047a5f6232107616439674fc92e4b0644971faa8ef1ed9867866e8c071",
+  "generatedAt": "2026-11-01T16:08:27.166Z"
+}

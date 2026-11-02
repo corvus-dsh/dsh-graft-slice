@@ -1,0 +1,12 @@
+- insert:
+    - id: dsh-graft-slice
+      name: dsh-graft-slice
+      config:
+        recentTurns: 5
+        oldTurnSummaryChars: 600
+        maxTurnChars: 0
+        maxTotalChars: 0
+        retireSource: true
+        verifyReadBack: true
+        skeletonTurn: 1
+        skeletonStep: 1

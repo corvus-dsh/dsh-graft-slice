@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Graft Slice">
+  <rect width="64" height="64" rx="14" fill="#111827"/>
+  <path d="M16 18h20M16 26h14M16 34h18" stroke="#93c5fd" stroke-width="4" stroke-linecap="round"/>
+  <path d="M40 16v32" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+  <path d="M40 24l10 8-10 8" fill="none" stroke="#fbbf24" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="20" cy="46" r="5" fill="none" stroke="#a7f3d0" stroke-width="4"/>
+  <path d="M24 49l8 7" stroke="#a7f3d0" stroke-width="4" stroke-linecap="round"/>
+  <path d="M29 54l5-3" stroke="#a7f3d0" stroke-width="4" stroke-linecap="round"/>
+</svg>

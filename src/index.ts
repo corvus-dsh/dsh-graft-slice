@@ -1,0 +1,9047 @@
+/**
+ * dsh-graft-slice — log slicing and minimal injection for DeepSeek Harness.
+ *
+ * Spec source: 《日志切片与最小注入规格书 v2.1》
+ * Runtime target verified against: DSH 0.2.1-rc.5 (the installed desktop build).
+ *
+ * Two v2.1 corrections are deliberate and are explained at their call sites:
+ *
+ *   1. Skeleton numbering.  v2.1 says turn/start {turn:0} and step/start
+ *      {turn:0,step:0}.  DSH's released v4 relationship validator starts at 1
+ *      and rejects 0 with "turn/start does not open the expected turn".  The
+ *      default is therefore 1/1 (configurable, but 0 only works on a harness
+ *      whose validator starts at 0).
+ *
+ *   2. Creation and flush.  v2.1 says ctx.sessions.create() then
+ *      ctx.sessions.flush().  create() publishes a *live* session; after the
+ *      tool returns, a later agents.resume() calls sessions.prepare() and fails
+ *      with `session "<id>" already exists`; sessions.flush() also rejects a
+ *      detached session.  The durable cold-handoff path is the same path
+ *      AgentLoop.create() uses: sessions.prepare() (zero inherited events) +
+ *      sessionPersistence.create() + handle.append() + handle.flush() +
+ *      handle.close().  No fork is ever used.
+ *
+ * Phase mapping follows the spec sections in the comments below.
+ */
+
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+/** Cordis plugin name. */
+export const name = 'dsh-graft-slice'
+
+/**
+ * Hard service dependencies. sessionPersistence is required for a durable
+ * handoff: a bare ctx.sessions.create session is not persisted in rc.5.
+ */
+export const inject = ['tools', 'sessions', 'sessionQuery', 'sessionPersistence']
+
+// ===========================================================================
+// Public types
+// ===========================================================================
+
+/** Per-row configuration. All fields are optional; defaults are conservative. */
+export interface GraftConfig {
+  /** Number of trailing turns kept verbatim. Default 5 (used only when adaptiveDepth is off). */
+  recentTurns?: number
+  /**
+   * v6.3: choose the retained-turn count from the source's own shape.
+   * Debug-heavy sessions keep more verbatim turns; prose-heavy ones keep fewer
+   * so the target has room to generate. Default true.
+   */
+  adaptiveDepth?: boolean
+  /** Lower bound for adaptive depth. Default 3. */
+  adaptiveDepthMin?: number
+  /** Upper bound for adaptive depth. Default 8. */
+  adaptiveDepthMax?: number
+  /** Maximum characters kept for one recent turn; 0 disables the cap. Default 0. */
+  maxTurnChars?: number
+  /** Maximum characters kept across all tape chunks; 0 disables the cap. Default 0. */
+  maxTotalChars?: number
+  /** Maximum characters per older-turn summary. Default 600. */
+  oldTurnSummaryChars?: number
+  /** Add the source session to the in-memory retired set on success. Default true. */
+  retireSource?: boolean
+  /** Re-read the new session through sessionQuery and validate it. Default true. */
+  verifyReadBack?: boolean
+  /** Skeleton turn number. Default 1 (DSH 0.2.1-rc.5 requires 1). */
+  skeletonTurn?: number
+  /** Skeleton step number. Default 1 (DSH 0.2.1-rc.5 requires 1). */
+  skeletonStep?: number
+  /** v4.0: automatically graft when the turn-stopping token watermark is reached. */
+  autoGraft?: boolean
+  /** v4.0: watermark ratio, default 0.75. */
+  autoGraftAtRatio?: number
+  /** v4.0: fallback context window when request/context does not publish one. */
+  contextWindowTokens?: number
+  /** v4.0: target-id prefix for automatically generated sessions. */
+  autoGraftIdPrefix?: string
+  /** Optional test allowlist; empty means all sessions. */
+  autoGraftSessionIds?: string[]
+  /**
+   * v6.3: 'silent' migrates immediately at the watermark (default).
+   * 'confirm' asks the user first and only migrates after they agree.
+   */
+  graftMode?: 'silent' | 'confirm'
+  /** v6.3: how long a confirm prompt stays valid. Default 10 minutes. */
+  confirmTtlMs?: number
+  /** Test/diagnostic: keep the host event loop alive briefly after an auto turn. Default 0. */
+  autoGraftKeepAliveMs?: number
+  /**
+   * v7.0 C2: completed turns a freshly created target is immune to auto-graft.
+   *
+   * Default 2. A target seeded with a large tape can already sit above
+   * `autoGraftAtRatio` on its very first request, which would graft it again
+   * before the user types anything — and repeat indefinitely. Zero disables the
+   * guard (not recommended).
+   */
+  graftTargetGraceTurns?: number
+  /**
+   * v7.3: how many times a graft may be postponed waiting for a task boundary.
+   *
+   * Default 1. The probe defers when the model left todos open or the last tool
+   * call failed — cutting there hands the target a half-finished task. The wait
+   * is capped because a permanently red test must not pin the session forever;
+   * zero disables the probe entirely.
+   */
+  taskBoundaryMaxDeferTurns?: number
+  /**
+   * v7.4 (decision 2): let the TASK STATE, not just the conversation shape, pick
+   * the replay tier. Off by default.
+   *
+   * Measured on this project: a target that replays 1 turn reaches `plugin_manager`
+   * in 3 calls and finishes in 9 steps, while a zero-replay target spends 19 file
+   * reads rediscovering *how* to verify and finishes in 42. The difference is
+   * whether the last turn's method is visible.
+   *
+   * So when the work is visibly unfinished — an open todo, or a failed last call —
+   * one turn is worth its cost. When the work is at a clean stopping point, zero
+   * replay is cheaper and the read-back index still holds every pointer.
+   *
+   * Default `false` because the rule is supported by ONE paired observation
+   * (n=1), not a distribution. An operator opts in; the plugin does not decide on
+   * that little evidence.
+   */
+  autoAdaptiveTier?: boolean
+  /**
+   * v7.4 P4-3: announce persisted, cold FORK sessions to the client sidebar.
+   *
+   * A fork is written by `sessions.fork` and is never published, so the host's
+   * `session/created` -> `api-session/added` path never fires for it. The
+   * session is loadable and resumable but invisible, which reads to the user as
+   * "my sample disappeared". Default true: the announcement is idempotent and
+   * only covers sessions the plugin did not create itself.
+   */
+  registerArchivedForks?: boolean
+  /**
+   * Explicit directory for the plugin's own state files.
+   *
+   * The desktop host does NOT export DSH_PROFILE_DIR/DSH_HOME to the Electron
+   * main process — those exist only inside the tool sandbox. Guessing a profile
+   * from the environment therefore silently falls back to the plugin directory,
+   * which every profile shares. Set this per profile in cordis.patch.yml.
+   */
+  dataDir?: string
+  /** Optional provider/model for the one-shot LLM constraint extractor. */
+  constraintProvider?: string
+  constraintModel?: string
+}
+
+/** Producer-owned message source. Falls back to the legal `plugin:graft` namespace. */
+export interface GraftSource {
+  kind: string
+  provider?: string
+  model?: string
+}
+
+/**
+ * v7.0 P5: the mark that stops a replay from being replayed.
+ *
+ * The generational-pollution failure this prevents:
+ *
+ * A graft copies the source's user messages into the target as a new
+ * `user/message`. On its face that is what "preserve the user's own words"
+ * means. But the copy is now indistinguishable from a real user turn — and the
+ * target can itself be grafted later. Generation 2 reads the target's log,
+ * finds those messages, and replays them as "what the user said". Generation 3
+ * repeats it. The tape is no longer a record of the conversation; it is a record
+ * of our own previous recordings, with the assistant's narration slowly
+ * outvoting the user's actual words.
+ *
+ * A marker fixes it because our replays are the only messages that carry it,
+ * and the extractor can then state the rule plainly: a message we authored is
+ * never evidence of what the user said.
+ *
+ * `plugin:<name>` is the namespace this project already uses for synthetic
+ * producers (`extractSourceTemplate` refuses a bare `plugin` and accepts
+ * `plugin:graft`). Reusing it keeps one convention instead of two.
+ */
+export const GRAFT_REPLAY_SOURCE_KIND = 'plugin:graft-replay'
+
+/** Whether a message source was written by this plugin's replay injector. */
+export function isGraftAuthored(source: unknown): boolean {
+  if (!isRecord(source)) return false
+  const kind = source.kind
+  if (typeof kind !== 'string') return false
+  return kind === GRAFT_REPLAY_SOURCE_KIND || kind.startsWith('plugin:graft')
+}
+
+/**
+ * v7.4b (硬约束 8): a message the HUMAN actually typed.
+ *
+ * `role: "user"` is not evidence of a human. The standing-constraint
+ * re-assertion, the skill catalog, the time stamp and the runtime snapshot all
+ * arrive with that role; the plugin's own replays do too. The only strict test
+ * is the source kind, so exactly one value qualifies. Everything else is an
+ * injection and must never be read as an instruction.
+ */
+export function isHumanAuthored(source: unknown): boolean {
+  return isRecord(source) && source.kind === 'user'
+}
+
+/**
+ * One tape turn after extraction.
+ *
+ * v7.0: a turn is now a *replay script*, not a prose blob. `text` remains the
+ * rendered legacy form (kept for older callers and for the pending-state
+ * builder), while `replay` carries the structured user → assistant → pointer
+ * flow the target actually re-reads.
+ */
+export interface GraftTapeTurn {
+  turn: number
+  text: string
+  assistantMessages: number
+  pointers: number
+  firstSeq: number
+  lastSeq: number
+  /** v7.0: verbatim user messages that opened this turn, newest last. */
+  userTexts?: string[]
+  /** v7.0: assistant text for this turn, already pointer-annotated. */
+  assistantText?: string
+  /** v7.0: rendered replay block; falls back to `text` when absent. */
+  replay?: string
+}
+
+/** Result of phase one. */
+export interface GraftBoundary {
+  boundarySeq: number
+  lastTurn: number
+  turnCount: number
+  lastTurnReason: string
+}
+
+/** Result of phase two, before chunk budgeting. */
+export interface GraftTape {
+  boundary: GraftBoundary
+  sourceTemplate: GraftSource
+  turns: GraftTapeTurn[]
+  goal: string
+  goalSource: 'user' | 'fallback-user' | 'assistant' | 'placeholder'
+  phase: string
+  pendingStateText: string
+  pointerCount: number
+  /** v7.0 P5: replays found in the source log and refused (present only when > 0). */
+  replayedMessagesSkipped?: number
+}
+
+/** One assistant message to inject. */
+export interface GraftInjectionChunk {
+  kind:
+    | 'old-summary'
+    | 'recent-turn'
+    | 'pending-state'
+    | 'task-status'
+    | 'subagent-reports'
+    | 'workspace-files'
+    | 'open-turn-carryover'
+    | 'omitted-turns'
+    | 'readback-index'
+    | 'open-work'
+  text: string
+  turn?: number
+  truncated: boolean
+}
+
+/** Fully validated, ready-to-write injection plan. */
+export interface GraftPlan {
+  cwd: string
+  boundary: GraftBoundary
+  sourceTemplate: GraftSource
+  goal: string
+  goalSource: GraftTape['goalSource']
+  phase: string
+  chunks: GraftInjectionChunk[]
+  /** The window depth the slice chose (intended replays). */
+  recentTurnCount: number
+  /** How many of those replays survived the per-turn budget (v7.0). */
+  recentInjectedCount: number
+  olderTurnCount: number
+  /** v6.3: the depth actually used, and why. */
+  adaptiveDepth: { depth: number; mode: 'debug' | 'generation' | 'balanced'; reason: string }
+  /**
+   * v7.4 (decision 2): present only when `autoAdaptiveTier` picked the depth.
+   *
+   * Its presence is the signal: when absent, `adaptiveDepth` (or the configured
+   * `recentTurns`) decided, and the operator should not read a task-state rule into
+   * the number.
+   */
+  adaptiveTier?: { tier: 'A' | 'B'; depth: number; reason: string }
+  /** v6.4: files the source actually wrote or edited, newest first. */
+  workspaceFiles: WorkspaceFile[]
+  pointerCount: number
+  olderPointerCount: number
+  olderToolNames: string[]
+  constraints: string[]
+  constraintSource: 'llm' | 'regex-fallback'
+  taskStatus: string[]
+  subagentReports: string[]
+  /** v7.0 B1: work the still-open turn already finished, as pointers. */
+  openTurnCarryover?: OpenTurnCarryover
+  totalTapeChars: number
+  warnings: string[]
+}
+
+/** Tool result for graft_slice_and_inject. */
+export interface GraftReport {
+  ok: true
+  sourceSessionId: string
+  newSessionId: string
+  cwd: string
+  boundarySeq: number
+  sourceEventCount: number
+  /** v7.0: the goal actually injected, so callers can reuse it (e.g. sidebar titles). */
+  goal: string
+  goalSource: GraftTape['goalSource']
+  turns: number
+  recentTurnCount: number
+  /** v7.0: replays that actually made it into the tape (window minus drops). */
+  recentInjectedCount: number
+  olderTurnCount: number
+  /** v6.3: the retained-turn depth chosen for this slice, and why. */
+  adaptiveDepth: { depth: number; mode: 'debug' | 'generation' | 'balanced'; reason: string }
+  injected: {
+    system: number
+    goal: number
+    title: number
+    oldSummary: number
+    taskStatus: number
+    subagentReports: number
+    tape: number
+    pending: number
+    /** v7.0: the remaining block kinds, so parts always sum to `total`. */
+    workspaceFiles: number
+    openTurn: number
+    omittedTurns: number
+    readback: number
+    total: number
+  }
+  pointers: {
+    total: number
+    recent: number
+    older: number
+    olderToolNames: string[]
+  }
+  constraints: string[]
+  constraintSource: 'llm' | 'regex-fallback'
+  workspace: {
+    attached: boolean
+    id: string | null
+  }
+  eventSeqRange: {
+    first: number
+    last: number
+  }
+  sourceTemplate: GraftSource
+  skeleton: {
+    turn: number
+    step: number
+    closed: boolean
+  }
+  durability: {
+    attached: boolean
+    appended: number
+    barrier: 'sessionPersistence.handle.flush'
+    verified: boolean
+  }
+  retired: {
+    source: boolean
+  }
+  warnings: string[]
+}
+
+/** Tool result for graft_read_result. */
+export interface GraftReadResult {
+  found: boolean
+  seq: number
+  text: string | null
+  truncated: boolean
+  totalChars: number
+  /** Present when the caller asked for a numbered line range. */
+  lineRange?: { start: number; end: number; totalLines: number }
+  /**
+   * v7.4 P1-1: the author of a `user/message` payload.
+   *
+   * `'user'` is a human. Anything else (`plugin:graft-replay`, `runtime-context`,
+   * `time-context`, `skill-catalog`, `tool-jobs`, …) is machinery, and a reader
+   * must not treat it as an instruction from the user.
+   */
+  sourceKind?: string
+}
+
+// ===========================================================================
+// Small helpers
+// ===========================================================================
+
+export function graftError(code: string, message: string): Error & { code: string } {
+  const error = new Error(`[${code}] ${message}`) as Error & { code: string }
+  error.name = 'GraftError'
+  error.code = code
+  return error
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function asNonEmptyString(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw graftError('INVALID_ARGUMENT', `${field} must be a non-empty string`)
+  }
+  return value
+}
+
+function asSafeInteger(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || Object.is(value, -0)) {
+    throw graftError('INVALID_ARGUMENT', `${field} must be a non-negative safe integer`)
+  }
+  return value
+}
+
+function asFiniteInteger(value: unknown, defaultValue: number, field: string): number {
+  if (value === undefined) return defaultValue
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw graftError('INVALID_CONFIG', `${field} must be a finite number`)
+  }
+  return Math.max(0, Math.trunc(value))
+}
+
+/**
+ * v7.4: exported so a test can assert on DEFAULTS directly.
+ *
+ * The defaults are the plugin's public contract (an operator reads the README to
+ * learn what happens when a field is omitted), so they should be testable without
+ * constructing a whole migration.
+ */
+export function normalizeConfig(config: GraftConfig | undefined): Required<GraftConfig> {
+  const input = isRecord(config) ? config : {}
+  return {
+    recentTurns: asFiniteInteger(input.recentTurns, 5, 'recentTurns'),
+    adaptiveDepth: input.adaptiveDepth === undefined ? true : input.adaptiveDepth === true,
+    adaptiveDepthMin: asFiniteInteger(input.adaptiveDepthMin, 3, 'adaptiveDepthMin'),
+    adaptiveDepthMax: asFiniteInteger(input.adaptiveDepthMax, 8, 'adaptiveDepthMax'),
+    graftMode: input.graftMode === 'confirm' ? 'confirm' : 'silent',
+    confirmTtlMs: asFiniteInteger(input.confirmTtlMs, 600_000, 'confirmTtlMs'),
+    maxTurnChars: asFiniteInteger(input.maxTurnChars, 0, 'maxTurnChars'),
+    maxTotalChars: asFiniteInteger(input.maxTotalChars, 0, 'maxTotalChars'),
+    oldTurnSummaryChars: asFiniteInteger(input.oldTurnSummaryChars, 600, 'oldTurnSummaryChars'),
+    retireSource: input.retireSource === undefined ? true : input.retireSource === true,
+    verifyReadBack: input.verifyReadBack === undefined ? true : input.verifyReadBack === true,
+    skeletonTurn: asFiniteInteger(input.skeletonTurn, 1, 'skeletonTurn'),
+    skeletonStep: asFiniteInteger(input.skeletonStep, 1, 'skeletonStep'),
+    autoGraft: input.autoGraft === true,
+    autoGraftAtRatio: asRatio(input.autoGraftAtRatio, 0.75, 'autoGraftAtRatio'),
+    contextWindowTokens: asFiniteInteger(input.contextWindowTokens, 0, 'contextWindowTokens'),
+    autoGraftIdPrefix:
+      typeof input.autoGraftIdPrefix === 'string' && input.autoGraftIdPrefix.trim().length > 0
+        ? input.autoGraftIdPrefix.trim()
+        : 'auto-graft',
+    autoGraftSessionIds: Array.isArray(input.autoGraftSessionIds)
+      ? input.autoGraftSessionIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map((value) => value.trim())
+      : [],
+    autoGraftKeepAliveMs: asFiniteInteger(input.autoGraftKeepAliveMs, 0, 'autoGraftKeepAliveMs'),
+    graftTargetGraceTurns: asFiniteInteger(input.graftTargetGraceTurns, 2, 'graftTargetGraceTurns'),
+    taskBoundaryMaxDeferTurns: asFiniteInteger(input.taskBoundaryMaxDeferTurns, 1, 'taskBoundaryMaxDeferTurns'),
+    // v7.4 (decision 2): off unless asked. See the config doc for why n=1 is not
+    // enough evidence to make this the default.
+    autoAdaptiveTier: input.autoAdaptiveTier === true,
+    // v7.4 P4-3: archived forks never reach the sidebar by themselves, because
+    // the client only learns about sessions from `session/created`, which fires
+    // for published sessions only. Announcing them is on by default.
+    registerArchivedForks: input.registerArchivedForks === undefined ? true : input.registerArchivedForks === true,
+    dataDir:
+      typeof input.dataDir === 'string' && input.dataDir.trim().length > 0 ? input.dataDir.trim() : '',
+    constraintProvider:
+      typeof input.constraintProvider === 'string' && input.constraintProvider.trim().length > 0
+        ? input.constraintProvider.trim()
+        : '',
+    constraintModel:
+      typeof input.constraintModel === 'string' && input.constraintModel.trim().length > 0
+        ? input.constraintModel.trim()
+        : '',
+  }
+}
+
+function asRatio(value: unknown, fallback: number, name: string): number {
+  if (value === undefined) return fallback
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 1) {
+    throw graftError('INVALID_CONFIG', `${name} must be a number in (0, 1]`)
+  }
+  return value
+}
+
+function isAbsolutePath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/u.test(value) || value.startsWith('\\\\') || value.startsWith('/')
+}
+
+function normalizeText(text: string): string {
+  // Preserve code-block indentation and blank lines: recent turns are supposed
+  // to be high-fidelity, not flattened prose. Only normalize line endings and
+  // trim the outer edges.
+  return text.replace(/\r\n/gu, '\n').trim()
+}
+
+interface Truncation {
+  text: string
+  truncated: boolean
+  originalLength: number
+}
+
+function truncateEnd(text: string, limit: number): Truncation {
+  if (limit <= 0 || text.length <= limit) return { text, truncated: false, originalLength: text.length }
+  const marker = `\n…[graft truncated ${text.length - limit} chars]…`
+  return {
+    text: text.slice(0, Math.max(0, limit - marker.length)) + marker,
+    truncated: true,
+    originalLength: text.length,
+  }
+}
+
+function truncateMiddle(text: string, limit: number): Truncation {
+  if (limit <= 0 || text.length <= limit) return { text, truncated: false, originalLength: text.length }
+  const head = Math.max(1, Math.floor(limit * 0.6))
+  const tail = Math.max(0, limit - head - 48)
+  const marker = `\n…[graft truncated ${text.length - limit} chars]…\n`
+  return {
+    text: text.slice(0, head) + marker + (tail > 0 ? text.slice(-tail) : ''),
+    truncated: true,
+    originalLength: text.length,
+  }
+}
+
+/** Strip Markdown enough to make an older-turn first paragraph readable as prose. */
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/gu, ' ')
+    .replace(/`([^`]*)`/gu, '$1')
+    .replace(/!\[[^\]]*\]\([^)]*\)/gu, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/gu, '$1')
+    .replace(/^#{1,6}\s*/gmu, '')
+    .replace(/^>\s?/gmu, '')
+    .replace(/^[-*+]\s+/gmu, '')
+    .replace(/^\d+\.\s+/gmu, '')
+    .replace(/(?<!\w)[*_~]{1,3}|[*_~]{1,3}(?!\w)/gu, '')
+    .replace(/<[^>]+>/gu, ' ')
+    .replace(/\|/gu, ' ')
+    .replace(/[ \t]+/gu, ' ')
+    .replace(/\n{3,}/gu, '\n\n')
+    .trim()
+}
+
+function firstParagraph(text: string, limit: number): Truncation {
+  const blocks = text
+    .split(/\n\s*\n/gu)
+    .map((block) => block.trim())
+    .filter(Boolean)
+  const chosen = blocks.find((block) => block.length >= 20) ?? blocks[0] ?? ''
+  return truncateEnd(chosen.replace(/\s+/gu, ' ').trim(), limit)
+}
+
+function textOfMessage(message: unknown): string {
+  if (!isRecord(message)) return ''
+  const content = Array.isArray(message.content) ? message.content : []
+  const parts: string[] = []
+  for (const block of content) {
+    if (isRecord(block) && block.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+  }
+  return parts.join('\n').trim()
+}
+
+/**
+ * v5.2: pointers are prose now, and they sit inline inside the assistant's
+ * sentence rather than on their own line. Detection therefore scans the whole
+ * text: both the legacy bracketed form and the humanized "（注：… seq=N）"
+ * form name a seq the reader can hand to graft_read_result, which is the
+ * stable signal in either shape.
+ */
+const POINTER_INLINE_PATTERN = /\[tool name=[^\]]*seq=\d+[^\]]*\]|graft_read_result[^)]*seq=\d+/gu
+
+/**
+ * The full sentence a tool pointer occupies, including any wrapper the
+ * humanized form added. Removing only the inner `graft_read_result(...)` text
+ * leaves dangling prose like "需要细节时用 ）", so the sentence goes as a unit.
+ */
+/**
+ * v6.0: pointer sentences are first-person recollections, e.g.
+ * "（回顾：刚才我已经调用 read_file 完成了这一步…读 seq=9）".
+ * Matching the whole parenthetical keeps the tool name readable AND removes the
+ * sentence cleanly from prose — matching only the inner call would leave a
+ * dangling "…读 ）".
+ */
+/**
+ * v7.0: every shape a tool pointer can take, including the downgraded one.
+ *
+ * `（历史记录：使用了当前环境不支持的工具 X…）` was missing. It is what
+ * `describeUnavailableTool()` writes when the target lacks a tool (F3), and
+ * without it the older-turn index counted ZERO pointers on any slice whose
+ * tools had been downgraded — the index then claimed "no tools in this span"
+ * while the tape was full of them. Measured on the real fixture with a
+ * two-entry registry: pointerCount 342, olderPointerCount 0.
+ */
+const POINTER_SENTENCE_PATTERN =
+  /（回顾：[^）]*）|（注：[^）]*）|（历史记录：[^）]*）|\[tool name=[^\]]*seq=\d+[^\]]*\]|^-\s*[^\s(（]+\(seq=\d+(?:,\d+!?)*\)(?:\s*\(unavailable here\))?|前面提到的那些细节都还留着[^\n]*|如果上面提到的细节不够[^\n]*/gmu
+
+function pointerSentences(text: string): string[] {
+  return text.match(POINTER_SENTENCE_PATTERN) ?? []
+}
+
+function proseWithoutPointers(text: string): string {
+  return text.replace(POINTER_SENTENCE_PATTERN, ' ').replace(/[ \t]{2,}/gu, ' ').trim()
+}
+
+function stripLeadingLabel(text: string): string {
+  return text.replace(/^(当前假设|假设|已排除|排除|下一步|接下来)\s*[：:]\s*/u, '').trim()
+}
+
+function splitSentences(text: string): string[] {
+  return text
+    .split(/(?<=[。！？!?；;])\s*|\n+/u)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean)
+}
+
+function pickSentence(sentences: string[], pattern: RegExp, fallback: string): string {
+  for (const sentence of sentences) {
+    if (pattern.test(sentence)) return stripLeadingLabel(sentence)
+  }
+  return fallback
+}
+
+/**
+ * v7.4 P4-2: the shape of a plan sentence is in its FIRST characters.
+ *
+ * Matching a keyword anywhere is what produced "我接下来需要 源码里还有一行注释
+ * 直接声明该设计（L4799）：*\"Since retireSource runs later…\"*" — the word
+ * "runs" satisfied the old /run/ test inside a quotation, so a citation became
+ * the next action. A real plan announces itself: 下一步 / 接下来 / 待办 / next.
+ */
+const PLAN_LEAD_PATTERN =
+  /^\s*(?:[-*•]\s*)?(?:下一步|接下来|随后|待办|接着|然后|现在先|现在需要|还需要|需要先|next\b|then\b)/iu
+
+/** Keywords that mark a sentence as an absolute constraint worth carrying across a reset. */
+const CONSTRAINT_PATTERN =
+  /(必须|禁止|绝对|不能|不得|不许|务必|第\s*\d+\s*行|CHECKSUM_42|如果|则|除非|仅有|只有|否则|优先|\bmust\b|\bnever\b|\bforbidden\b|\bline\s+\d+\b|\bdo not\b|\bdon't\b|\bcannot\b|\brequired\b|\bconstraint\b|\bif\b|\bthen\b|\bunless\b|\bonly\b|\bprefer\b|\balways\b|\bbefore\s+you\b|\bend\s+every\b)/iu
+
+function isConstraintSentence(sentence: string): boolean {
+  return CONSTRAINT_PATTERN.test(sentence)
+}
+
+/**
+ * v3.2: extract hard constraints from every user message, with turn 1 first.
+ * This is deliberately independent of the assistant summary: the original
+ * constraint is usually in the user message, not in what the assistant chose
+ * to summarize.
+ */
+const ACTION_PATTERN =
+  /(\bdo\b|\bdon't\b|\bdo not\b|\bmust\b|\bnever\b|\bcannot\b|\bcan't\b|\bshould\b|\bwrite\b|\buse\b|\bignore\b|\binclude\b|\bsend\b|\bask\b|\bend\b|\breply\b|\bchoose\b|\bpick\b|\breport\b|\balways\b|\bonly\b|\bbefore\b|\bafter\b|\bavoid\b|\bkeep\b|\badd\b|\bremove\b|\bcall\b|\brun\b|\breturn\b|\bshow\b|\bwait\b|\bdraft\b|\bleave\b|\bmake\b|\bset\b|\bensure\b|\bprefer\b|\bexclude\b|必须|禁止|不要|不能|不得|务必|请|写|使用|忽略|包含|发送|询问|结束|回复|选择|优先|仅|只)/iu
+
+const IMPERATIVE_START =
+  /^(请|必须|禁止|不要|不能|不得|务必|\bdo\b|\bdon't\b|\bdo not\b|\bmust\b|\bnever\b|\balways\b|\bonly\b|\bwrite\b|\buse\b|\bignore\b|\binclude\b|\bsend\b|\bask\b|\bend\b|\breply\b|\bchoose\b|\bpick\b|\breport\b|\bavoid\b|\bkeep\b|\badd\b|\bremove\b|\bcall\b|\brun\b|\breturn\b|\bshow\b|\bwait\b|\bdraft\b|\bleave\b|\bmake\b|\bset\b|\bensure\b|\bprefer\b|\bexclude\b)/iu
+
+const SESSION_SCOPE_PATTERN = /(for the rest of this session|for the rest of the session|standing constraint|this session|整个会话|本次会话|后续所有轮次)/iu
+
+function isQuestionLike(text: string): boolean {
+  if (/^(do not|don't|does not|did not)\b/iu.test(text)) return false
+  return /[?？]\s*$/u.test(text) || /^(what|why|how|who|when|where|which|is|are|can|could|would|should|do|does|did)\b/iu.test(text)
+}
+
+function tokenSet(text: string): Set<string> {  return new Set((text.toLowerCase().match(/[a-z0-9_]+|[\u4e00-\u9fff]/gu) ?? []))
+}
+
+function nearDuplicate(a: string, b: string): boolean {
+  const left = tokenSet(a)
+  const right = tokenSet(b)
+  if (left.size === 0 || right.size === 0) return normalizedEqual(a, b)
+  let overlap = 0
+  for (const token of left) if (right.has(token)) overlap += 1
+  return overlap / Math.max(left.size, right.size) >= 0.9
+}
+
+function normalizedEqual(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase()
+}
+
+/**
+ * v4.3: extract hard constraints with precision filters.
+ *
+ * - reject sentences shorter than 10 or longer than 800 chars
+ * - reject questions and sentences without an imperative/action cue
+ * - drop near-duplicates
+ * - if there are more than 8 candidates, rank by hard/imperative/action
+ *   score and keep the best 8 in original order
+ */
+/**
+ * v6.1: DSH injects delegation boilerplate into a subagent's user turn:
+ * "Your parent agent id is \"...\". Before you finish, send your result to that
+ * agent with send_message({...})".
+ *
+ * That is a one-shot instruction for the subagent's own turn, not a standing
+ * constraint. Carrying it into a top-level target made the migrated session call
+ * send_message against an agent it does not belong to, which fails with
+ * SubagentError "belongs to another parent session".
+ *
+ * The migration strips lineage on purpose, so this text must not survive either.
+ */
+const DELEGATION_NOISE_PATTERN =
+  /(your parent agent id|parent agent id is|send your result to that agent|send_message\(\s*\{\s*agent_id|self-contained result|the parent shares your workspace|does not automatically receive your transcript)/iu
+
+export function extractConstraints(events: readonly SessionEventLike[]): string[] {
+  const candidates: Array<{ text: string; index: number; score: number }> = []
+  let index = 0
+  for (const event of events) {
+    if (event.type !== 'user/message') continue
+    // v7.0: inherit the constraints a PRIOR graft recorded.
+    //
+    // This used to skip anything whose source.kind was not 'user', which meant a
+    // generation-2 graft could not see the constraints a generation-1 graft had
+    // written. The rules were present in the log, in our own handoff message, and
+    // were dropped on every hop — the exact "multi-generation amnesia" the
+    // provenance anchor is meant to point at. Reading our own recorded block is
+    // not the same as trusting a replay as user intent (that is P5, and it is
+    // handled where replays are assembled, not here).
+    if (isGraftAuthored(event.data?.source)) {
+      const recorded = constraintBlockOf(textOfMessage(event.data))
+      if (recorded.length > 0) {
+        for (const constraint of recorded) {
+          candidates.push({ text: constraint, index: index++, score: 100 })
+        }
+      }
+      continue
+    }
+    if (event.data?.source?.kind !== 'user') continue
+    const text = textOfMessage(event.data)
+    if (text.length === 0) continue
+    // Filtering happens per sentence: a user message can legitimately carry a
+    // real standing rule next to harness preamble.
+    const messageScope = SESSION_SCOPE_PATTERN.test(text)
+    for (const sentence of splitSentences(text)) {
+      const normalized = sentence.replace(/\s+/gu, ' ').trim()
+      if (normalized.length < 10 || normalized.length > 800) continue
+      if (normalized.includes('[redacted')) continue
+      if (DELEGATION_NOISE_PATTERN.test(normalized)) continue
+      const hasKeyword = isConstraintSentence(normalized)
+      const hasImperative = IMPERATIVE_START.test(normalized)
+      if (!hasKeyword && !hasImperative) continue
+      if (isQuestionLike(normalized)) continue
+      if (!ACTION_PATTERN.test(normalized)) continue
+      if (candidates.some((candidate) => nearDuplicate(candidate.text, normalized))) continue
+      const hard = /(\bmust\b|\bnever\b|\bdon't\b|\bdo not\b|\bcannot\b|\balways\b|\bonly\b|必须|禁止|绝对|不能|不得|务必)/iu.test(normalized) ? 2 : 0
+      const imperative = /^(请|必须|禁止|不要|不能|不得|务必|\bdo\b|\bdon't\b|\bdo not\b|\bmust\b|\bnever\b|\balways\b|\bonly\b|\bwrite\b|\buse\b|\bignore\b|\binclude\b|\bsend\b|\bask\b|\bend\b|\breply\b)/iu.test(normalized) ? 2 : 0
+      const actionHits = (normalized.match(ACTION_PATTERN) ?? []).length
+      const lengthBonus = normalized.length >= 20 && normalized.length <= 240 ? 1 : 0
+      const scopeBonus = (messageScope ? 6 : 0) + (SESSION_SCOPE_PATTERN.test(normalized) ? 4 : 0)
+      candidates.push({ text: normalized, index: index++, score: hard + imperative + actionHits + lengthBonus + scopeBonus })
+    }
+  }
+  const selected = candidates.length > 8
+    ? [...candidates].sort((left, right) => right.score - left.score || left.index - right.index).slice(0, 8).sort((left, right) => left.index - right.index)
+    : candidates
+  const out: string[] = []
+  let total = 0
+  for (const candidate of selected) {
+    const next = truncateEnd(candidate.text, 800)
+    if (total + next.text.length > 8000) break
+    out.push(next.text)
+    total += next.text.length
+  }
+  return out
+}
+
+const LLM_CONSTRAINT_PROMPT = [
+  'You are a system-level constraint extractor.',
+  'From the user inputs below, extract only long-lived, globally effective hard rules and constraints',
+  '(for example: do not use a feature, global naming rules, required output formats).',
+  'Do NOT extract one-off requests to generate long content (for example: write an article, write a long script).',
+  'Do NOT extract discussion, questions, feature requests, goals, observations, or "please help me" requests.',
+  'Do NOT extract harness delegation boilerplate (for example "your parent agent id is ...", "send your result to that agent", send_message instructions).',
+  'Only extract rules the user explicitly makes global or standing (for example: always/never/only/must/do not).',
+  'Return only a JSON array of strings. If there are no hard constraints, return [].',
+].join('\n')
+
+export interface LlmConstraintResult {
+  constraints: string[]
+  source: 'llm' | 'regex-fallback'
+  error?: string
+}
+
+/**
+ * v5.0: one cheap LLM call selects semantic standing constraints. The regex
+ * extractor remains the fallback whenever the model/service/JSON fails.
+ */
+export async function llmExtractConstraints(
+  ctx: PluginContextLike,
+  events: readonly SessionEventLike[],
+  settings: Required<GraftConfig>,
+): Promise<LlmConstraintResult> {
+  const fallback = (error?: string): LlmConstraintResult => ({
+    constraints: extractConstraints(events),
+    source: 'regex-fallback',
+    ...(error === undefined ? {} : { error }),
+  })
+  const llm = ctx.get('llm')
+  if (!isRecord(llm) || typeof llm.stream !== 'function') return fallback('llm service unavailable')
+  const sourceTemplate = extractSourceTemplate(events)
+  const provider = settings.constraintProvider || sourceTemplate.provider || 'deepseek-account'
+  const model = settings.constraintModel || sourceTemplate.model || 'deepseek-flash'
+  const userTexts: string[] = []
+  const seen = new Set<string>()
+  for (const event of events) {
+    if (event.type !== 'user/message' || event.data?.source?.kind !== 'user') continue
+    const text = textOfMessage(event.data).replace(/\s+/gu, ' ').trim()
+    if (text.length === 0 || seen.has(text)) continue
+    seen.add(text)
+    userTexts.push(truncateEnd(text, 2000).text)
+  }
+  if (userTexts.length === 0) return { constraints: [], source: 'llm' }
+  const selected = [...userTexts.slice(0, 5), ...userTexts.slice(-15)]
+  const input = selected.map((text, index) => `--- user input ${index + 1} ---\n${text}`).join('\n\n')
+  let lastError = 'llm extraction failed'
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const stream = llm.stream({
+      provider,
+      model,
+      system: LLM_CONSTRAINT_PROMPT,
+      messages: [{ role: 'user', content: [{ type: 'text', text: input }] }],
+      maxTokens: 1200,
+      ...(typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? { signal: AbortSignal.timeout(45_000) }
+        : {}),
+    })
+    let raw = ''
+    for await (const chunk of stream) {
+      if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') raw += chunk.text
+      if (chunk?.type === 'finish' && chunk.reason?.kind === 'error') {
+        throw new Error(chunk.reason.failure?.message ?? 'llm finish error')
+      }
+    }
+    const start = raw.indexOf('[')
+    const end = raw.lastIndexOf(']')
+    if (start < 0 || end <= start) throw new Error('llm returned no JSON array')
+    const parsed = JSON.parse(raw.slice(start, end + 1))
+    if (!Array.isArray(parsed)) throw new Error('llm JSON is not an array')
+    const out: string[] = []
+    for (const item of parsed) {
+      if (typeof item !== 'string') continue
+      const normalized = item.replace(/\s+/gu, ' ').trim()
+      if (normalized.length < 10 || normalized.length > 800) continue
+      const strong = /(\bmust\b|\bnever\b|\bdon't\b|\bdo not\b|\bonly\b|\balways\b|\bcannot\b|必须|禁止|不要|不得|只能|务必|始终|绝不)/iu.test(normalized)
+      const noise = /(请帮我|能不能|是否|有没有|如何|为什么|我想|我希望|需要|希望|\?|？)/iu.test(normalized)
+      const imperative = /^(write|use|ignore|include|send|ask|end|reply|choose|pick|report|avoid|keep|add|remove|call|run|return|show|wait|draft|leave|make|set|ensure|prefer|exclude)\b/iu.test(normalized)
+      if (DELEGATION_NOISE_PATTERN.test(normalized)) continue
+      if (noise && !strong) continue
+      if (!strong && !imperative) continue
+      if (out.some((existing) => nearDuplicate(existing, normalized))) continue
+      out.push(normalized)
+      if (out.length >= 8) break
+    }
+    return { constraints: out, source: 'llm' }
+    } catch (error) {
+      lastError = String((error as any)?.message ?? error)
+    }
+  }
+  return fallback(lastError)
+}
+export interface TaskState {
+  todos: string[]
+  subagentReports: string[]
+  /** Unchecked items from the last todo_write, in order. */
+  openTodos: string[]
+  /**
+   * v7.4: the seq of the last `todo_write`, and how far the log has moved since.
+   *
+   * The list is a snapshot of what the model believed at that moment, and models
+   * stop updating it: measured on a real 44-turn session, the last `todo_write`
+   * was at seq 9269 while the boundary was 13413 — 4,144 events and eleven turns
+   * of work later. The block was presented without any date, so the target read a
+   * finished list as the current plan and re-verified work that was already done.
+   *
+   * The plugin cannot invent fresher data; what it can do is refuse to imply that
+   * the list is current.
+   */
+  todoSeq?: number
+  /** Events between the last todo_write and the end of the sliced span. */
+  todoAgeEvents?: number
+  todoAgeTurns?: number
+}
+
+/**
+ * v7.4b: does this tool result look like a file listing, a source dump or a test
+ * log rather than a conclusion someone wrote for me?
+ *
+ * Kept separate from `addReport`'s own dump test because the two run at
+ * different stages: this one guards the *decision to call it a report*, the
+ * other guards the rendering.
+ */
+/**
+ * v7.4b: tools whose results are file text or logs, never a subagent's conclusion.
+ * For these the report marker has to be at the very start of the result.
+ */
+const NEVER_REPORTERS = new Set([
+  'read',
+  'glob',
+  'grep',
+  'pwsh',
+  'edit',
+  'write',
+  'create_file',
+  'apply_patch',
+  'str_replace_editor',
+])
+
+function looksLikeToolDump(text: string): boolean {
+  if (/<path>|<\/content>|<type>/u.test(text)) return true
+  if ((text.match(/^\s*\d+:\s/gmu) ?? []).length >= 3) return true
+  if ((text.match(/✔ /gu) ?? []).length >= 3) return true
+  return (text.match(/[A-Za-z]:\\/gu) ?? []).length >= 4
+}
+
+export function extractTaskState(events: readonly SessionEventLike[]): TaskState {
+  const reports: string[] = []
+  const reportSeen = new Set<string>()
+  const callNames = new Map<string, string>()
+
+  // v6.2: the todo list is a STATE, not a log.
+  //
+  // The previous version accumulated every todo_write snapshot, so a task that
+  // was written three times appeared three times — once unchecked, then checked,
+  // then checked again. On a Flash-class model that reads as "there are twelve
+  // things to do" and is worse than no list at all.
+  //
+  // A later todo_write replaces the previous state entirely; only the LAST one
+  // describes what the model currently believes.
+  let latestTodoWrite: Array<{ text: string; completed: boolean }> | undefined
+  /** v7.4: where that snapshot was taken, so staleness can be reported. */
+  let latestTodoSeq: number | undefined
+  let latestTodoTurn: number | undefined
+  let lastTurn = 0
+
+  const addReport = (text: string): void => {
+    const normalized = text.replace(/\s+/gu, ' ').trim()
+    if (normalized.length === 0) return
+    // v7.0: a "report" is a summary a subagent returned, not a directory dump.
+    //
+    // Measured on session-legacy-fixture, the injected [Subagent Reports] block was
+    // 4,533 characters of raw `pwsh` output — file listings and test logs that
+    // happened to match /report|调研/. That is tool output wearing a report's
+    // label: it spends the largest single chunk of the budget on text the target
+    // can neither act on nor verify, while the real subagent conclusions sit
+    // below it in the same blob.
+    //
+    // A directory listing or a log tail is recognisable: many short lines with
+    // timestamps/sizes, or a wall of paths. Those become pointers instead — the
+    // caller keeps the seq, and re-reading is one tool call away.
+    const looksLikeDump =
+      (normalized.match(/[A-Za-z]:\\/gu) ?? []).length >= 4 ||
+      (normalized.match(/\d{4}\/\d{1,2}\/\d{1,2}/gu) ?? []).length >= 3 ||
+      (normalized.match(/-{3,}/gu) ?? []).length >= 2
+    if (looksLikeDump) return
+    const line = `- ${truncateEnd(normalized, 400).text}`
+    if (reportSeen.has(line)) return
+    reportSeen.add(line)
+    reports.push(line)
+  }
+
+  for (const event of events) {
+    if (event.type === 'turn/start') {
+      const value = Number(event.data?.turn)
+      if (Number.isFinite(value)) lastTurn = value
+      continue
+    }
+    if (event.type === 'tool/call') {
+      const name = String(event.data?.name ?? '')
+      const callId = String(event.data?.callId ?? '')
+      if (callId.length > 0) callNames.set(callId, name)
+      if (name === 'todo_write') {
+        try {
+          const payload = JSON.parse(String(event.data?.arguments ?? '{}'))
+          const list = Array.isArray(payload) ? payload : Array.isArray(payload?.todos) ? payload.todos : []
+          const next: Array<{ text: string; completed: boolean }> = []
+          for (const item of list) {
+            if (!isRecord(item)) continue
+            const content = String(item.content ?? item.text ?? item.title ?? '').replace(/\s+/gu, ' ').trim()
+            if (content.length === 0) continue
+            const status = String(item.status ?? '')
+            next.push({
+              text: truncateEnd(content, 300).text,
+              completed: status === 'completed' || status === 'done' || item.completed === true,
+            })
+          }
+          // Replace, never merge.
+          latestTodoWrite = next
+          latestTodoSeq = Number(event.seq)
+          latestTodoTurn = lastTurn
+        } catch {
+          // Malformed tool arguments are not a task-state failure.
+        }
+      }
+      continue
+    }
+
+    if (event.type === 'assistant/message') {
+      const text = textOfMessage(event.data?.message)
+      for (const sentence of splitSentences(text)) {
+        if (/(子代理|Subagent|subagent|teammate|调研结果|回传报告)/u.test(sentence)) {
+          addReport(sentence)
+        }
+      }
+      continue
+    }
+
+    if (event.type === 'tool/result') {
+      const message = event.data?.message
+      const callId = String(message?.source?.callId ?? message?.toolCallId ?? '')
+      const name = callNames.get(callId) ?? ''
+      const text = textOfMessage(message)
+      const byTool = /wait_agent|send_message|subagent|spawn_teammate/u.test(name)
+      if (text.length === 0) continue
+      // v7.4b: a keyword ANYWHERE in a 4 KB file dump is not a subagent report.
+      //
+      // Measured on `handoff-demo`: 4 of the 5 injected "reports" were
+      // `read`/`pwsh`/`job_output` output that merely happened to contain the
+      // word "report" or a test runner's `✔`. The block then spent ~1.7 KB — the
+      // second largest chunk of the tape — on text the target can neither act on
+      // nor verify, and every such line pushes a real conclusion out.
+      //
+      // Two gates now: the keyword must be in the OPENING of the result (where a
+      // report announces itself), and the body must not look like a file/log dump.
+      if (!byTool) {
+        // A report announces itself in its first line. Scanning 300 chars was
+        // still enough for a `graft_prepare` summary that mentions
+        // "subagent-reports" as a chunk name, and for a test probe that printed
+        // `origin= subagent`. 60 characters is where a real conclusion says what
+        // it is.
+        //
+        // v7.4b: tools that only ever produce file/log text need the marker at the
+        // very START. `pwsh` grep output can contain "subagentReports" in a code
+        // line and still be a grep hit, not a report.
+        const window = NEVER_REPORTERS.has(name) ? text.slice(0, 12) : text.slice(0, 60)
+        if (!/(子代理|Subagent|subagent|teammate|调研结果|回传报告|report)/iu.test(window)) continue
+        if (looksLikeToolDump(text)) continue
+      }
+      addReport(`${name || 'subagent'}: ${text}`)
+    }
+  }
+
+  // Only the final snapshot becomes the injected list.
+  const todos = (latestTodoWrite ?? []).map(
+    (item) => `- [${item.completed ? 'x' : ' '}] ${item.text}`,
+  )
+
+  // v7.4: how stale is this snapshot?
+  const lastSeq = events.length > 0 ? Number(events[events.length - 1]?.seq) : 0
+  const ageEvents =
+    latestTodoSeq === undefined || !Number.isFinite(lastSeq) ? undefined : Math.max(0, lastSeq - latestTodoSeq)
+  const ageTurns =
+    latestTodoTurn === undefined || lastTurn === 0 ? undefined : Math.max(0, lastTurn - latestTodoTurn)
+
+  return {
+    todos: todos.slice(0, 30),
+    subagentReports: reports.slice(-5),
+    openTodos: (latestTodoWrite ?? []).filter((item) => !item.completed).map((item) => item.text),
+    ...(latestTodoSeq === undefined ? {} : { todoSeq: latestTodoSeq }),
+    ...(ageEvents === undefined ? {} : { todoAgeEvents: ageEvents }),
+    ...(ageTurns === undefined ? {} : { todoAgeTurns: ageTurns }),
+  }
+}
+
+function summaryWithConstraints(prose: string, limit: number): { text: string; truncated: boolean } {
+  const sentences = splitSentences(prose)
+  const priority = sentences.filter((sentence) => isConstraintSentence(sentence))
+  const rest = sentences.filter((sentence) => !isConstraintSentence(sentence))
+  const ordered = [...priority, ...rest]
+  if (ordered.length === 0) return { text: '', truncated: false }
+  const raw = ordered.join(' ')
+  return truncateEnd(raw, limit)
+}
+
+// ===========================================================================
+// Phase 1 — Boundary location and template extraction
+// ===========================================================================
+
+/**
+ * Phase 1: locate the last CLOSED turn boundary.
+ *
+ * A turn that is still open cannot be sliced: it has no `turn/end`, and the
+ * caller is usually the very turn that is running, so it can never close
+ * itself. Refusing outright makes the tool nearly unusable — every in-turn
+ * invocation fails. Instead the open tail is dropped and the cut moves to the
+ * last closed `turn/end`, which is exactly the strategy autoGraft already uses.
+ *
+ * Structural malformation is still fatal: a `turn/start` inside an open turn
+ * or a `turn/end` without a matching `turn/start` means the log itself is
+ * inconsistent, and silently trimming there could slice through a broken span.
+ */
+export function locateBoundary(events: readonly SessionEventLike[], options?: { allowOpenTail?: boolean }): GraftBoundary {
+  const allowOpenTail = options?.allowOpenTail !== false
+  let openTurn: number | null = null
+  let lastEnd: { seq: number; turn: number } | null = null
+  let lastClosedSeq = -1
+  let droppedOpenTurns = 0
+  let turnCount = 0
+  let lastTurnReason = 'unknown'
+
+  for (const event of events) {
+    if (event.type === 'turn/start') {
+      if (openTurn !== null) {
+        throw graftError(
+          'OPEN_TURN',
+          `turn/start at seq ${event.seq} opens turn ${String(event.data?.turn)} while turn ${openTurn} is still open`,
+        )
+      }
+      openTurn = asSafeInteger(event.data?.turn, 'turn/start.turn')
+      turnCount += 1
+      continue
+    }
+    if (event.type === 'turn/end') {
+      const turn = asSafeInteger(event.data?.turn, 'turn/end.turn')
+      if (openTurn === null) {
+        throw graftError('UNBALANCED_TURN', `turn/end at seq ${event.seq} closes turn ${turn} with no open turn`)
+      }
+      if (turn !== openTurn) {
+        throw graftError(
+          'UNBALANCED_TURN',
+          `turn/end at seq ${event.seq} closes turn ${turn} but turn ${openTurn} is open`,
+        )
+      }
+      openTurn = null
+      lastEnd = { seq: Number(event.seq), turn }
+      lastClosedSeq = Number(event.seq)
+      const reason = event.data?.reason
+      lastTurnReason = isRecord(reason) && typeof reason.kind === 'string' ? reason.kind : 'unknown'
+    }
+  }
+
+  if (openTurn !== null) {
+    if (!allowOpenTail) {
+      throw graftError(
+        'OPEN_TURN',
+        `the last turn (${openTurn}) has no matching turn/end; refusing to slice without a stable boundary`,
+      )
+    }
+    // Drop the open tail and cut at the last closed turn. The caller is usually
+    // the running turn itself, which can never close itself, so refusing here
+    // would make every in-turn call fail.
+    droppedOpenTurns = 1
+  }
+  if (lastEnd === null) {
+    throw graftError('NO_CLOSED_TURN', 'the source log contains no closed turn (no turn/end)')
+  }
+  return {
+    boundarySeq: lastEnd.seq,
+    lastTurn: lastEnd.turn,
+    turnCount,
+    lastTurnReason,
+    ...(droppedOpenTurns === 0 ? {} : { droppedOpenTurns }),
+  }
+}
+
+/**
+ * v7.4 P0-3b: a slice needs one closed turn, but it must not throw away the open
+ * one. A caller that cannot slice still needs to know the difference between
+ * "no durable boundary at all" and "the boundary exists and there is extra work
+ * after it".
+ */
+export function hasClosedTurn(events: readonly SessionEventLike[]): boolean {
+  return events.some((event) => event.type === 'turn/end')
+}
+
+/**
+ * v7.0 B1: do not throw away the open turn's finished work.
+ *
+ * `locateBoundary()` cuts at the last `turn/end`, so the turn that is *currently
+ * running* is excluded — and it has to be, because the target cannot inherit a
+ * turn the source has not finished. But "exclude the open turn" was implemented
+ * as "exclude everything after the boundary", and by the time the watermark
+ * trips that open turn typically already contains a dozen completed tool calls
+ * that produced real results: files written, tests run, errors seen.
+ *
+ * Dropping them means the target is blind to the most recent work — the exact
+ * work the user is watching. It then re-runs commands whose output is already
+ * in the log.
+ *
+ * This function collects what the open turn actually accomplished, as pointers
+ * (never bodies), so the target knows the work exists and can read it back.
+ */
+export interface PointerItem {
+  /** The tool as the source called it. */
+  name: string
+  /** The seq of the tool/result a reader can fetch. */
+  seq: number
+  /** That call came back as an error. */
+  isError?: boolean
+  /** The target does not have this tool mounted (v6.4 F3). */
+  unavailable?: boolean
+}
+
+export interface OpenTurnCarryover {
+  turn: number
+  /** Completed tool pointers, newest last. */
+  pointers: PointerItem[]
+  /** Assistant text produced so far in the open turn, trimmed. */
+  assistantText: string
+  /** User messages admitted during the open turn. */
+  userTexts: string[]
+}
+
+export function extractOpenTurnCarryover(
+  events: readonly SessionEventLike[],
+  fromSeqExclusive: number,
+  sourceSessionId?: string,
+): OpenTurnCarryover | undefined {
+  let turn: number | undefined
+  const openCalls = new Map<string, { name: string; callSeq: number }>()
+  const results = new Map<string, { resultSeq: number; isError: boolean; exitCode?: number }>()
+  const assistant: string[] = []
+  const user: string[] = []
+
+  for (const event of events) {
+    if (Number(event.seq) <= fromSeqExclusive) continue
+    if (event.type === 'turn/start') {
+      turn = asSafeInteger(event.data?.turn, 'turn/start.turn')
+      continue
+    }
+    if (event.type === 'tool/call') {
+      const callId = typeof event.data?.callId === 'string' ? event.data.callId : ''
+      if (callId.length === 0) continue
+      const name = typeof event.data?.name === 'string' && event.data.name.length > 0 ? event.data.name : 'unknown'
+      openCalls.set(callId, { name, callSeq: Number(event.seq) })
+      continue
+    }
+    if (event.type === 'tool/result') {
+      const message = event.data?.message
+      const callId = message?.toolCallId ?? message?.source?.callId
+      if (typeof callId !== 'string' || callId.length === 0) continue
+      const text = textOfMessage(message)
+      const isError = message?.isError === true || event.data?.error !== undefined
+      const exitMatch = /exit\s*(?:code)?\s*[:=]?\s*(\d{1,3})\b/iu.exec(text)
+      results.set(callId, {
+        resultSeq: Number(event.seq),
+        isError,
+        ...(isError && exitMatch !== null ? { exitCode: Number(exitMatch[1]) } : {}),
+      })
+      continue
+    }
+    if (event.type === 'user/message') {
+      const sourceKind = typeof event.data?.source?.kind === 'string' ? event.data.source.kind : 'user'
+      if (sourceKind !== 'user') continue
+      const text = normalizeText(textOfMessage(event.data) ?? '').trim()
+      if (text.length > 0) user.push(text)
+      continue
+    }
+    if (event.type === 'assistant/message') {
+      const text = textOfMessage(event.data?.message).trim()
+      if (text.length > 0) assistant.push(text)
+    }
+  }
+
+  // Only calls with a real result — an unresolved call is not work, and
+  // advertising it would invite the target to wait for something that will
+  // never arrive (the source turn is abandoned, not resumable).
+  const pointers: PointerItem[] = []
+  for (const [callId, call] of openCalls) {
+    const result = results.get(callId)
+    if (result === undefined) continue
+    pointers.push({
+      name: call.name,
+      seq: result.resultSeq,
+      ...(result.isError ? { isError: true } : {}),
+    })
+  }
+
+  if (turn === undefined && pointers.length === 0 && assistant.length === 0 && user.length === 0) return undefined
+  return {
+    turn: turn ?? 0,
+    pointers,
+    assistantText: assistant.join('\n\n'),
+    userTexts: user,
+  }
+}
+
+/**
+ * Phase 1: record a legal producer-owned assistant source.
+ *
+ * v2.1 calls the field data.source; in the released v4 envelope it is
+ * data.message.source. Both are accepted. The retired {kind:'plugin'} wrapper
+ * is refused; plugin:<name> is the legal migration namespace. replayState is
+ * never copied: the synthetic content has no matching replay envelope.
+ */
+export function extractSourceTemplate(events: readonly SessionEventLike[]): GraftSource {
+  let found: GraftSource | undefined
+  for (const event of events) {
+    if (event.type !== 'assistant/message') continue
+    const source = event.data?.message?.source ?? event.data?.source
+    if (!isRecord(source)) continue
+    const kind = source.kind
+    if (typeof kind !== 'string' || kind.length === 0 || kind === 'plugin') continue
+    const template: GraftSource = { kind }
+    if (typeof source.provider === 'string' && source.provider.length > 0) template.provider = source.provider
+    if (typeof source.model === 'string' && source.model.length > 0) template.model = source.model
+    found = template
+  }
+  return found ?? { kind: 'plugin:graft', provider: 'unknown', model: 'unknown' }
+}
+
+// ===========================================================================
+// Phase 2 — Event extraction and tape assembly
+// ===========================================================================
+
+interface CallRecord {
+  callId: string
+  name: string
+  turn: number
+  step: number
+  callSeq: number
+  resultSeq?: number
+  /** Whether the tool result carried an error, for humanized pointer text. */
+  isError?: boolean
+  /** Exit code parsed from a failed shell result, when present. */
+  exitCode?: number
+}
+
+interface AssistantRecord {
+  seq: number
+  text: string
+  callIds: string[]
+  pointers: string[]
+}
+
+/**
+ * v5.2: a fenced block large enough to blow the tape budget.
+ *
+ * The first ten lines are kept inline so the reader still sees what the block
+ * is; the rest is recoverable through `graft_read_result({seq, lineRange})`.
+ */
+export interface CodeBlockPointer {
+  seq: number
+  startLine: number
+  endLine: number
+  preview: string
+  pointer: string
+}
+
+const CODEBLOCK_MAX_LINES = 200
+const CODEBLOCK_MAX_CHARS = 8000
+const CODEBLOCK_PREVIEW_LINES = 10
+
+function lineCount(text: string): number {
+  let count = 1
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) === 10) count += 1
+  }
+  return count
+}
+
+function firstLines(text: string, count: number): string {
+  const lines: string[] = []
+  let start = 0
+  for (let index = 0; index <= text.length; index += 1) {
+    if (index !== text.length && text.charCodeAt(index) !== 10) continue
+    lines.push(text.slice(start, index))
+    start = index + 1
+    if (lines.length >= count) break
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Replace oversized fenced code blocks with a readable pointer.
+ *
+ * Only text the assistant wrote directly is considered. A block produced by
+ * `write_file`/`edit` already has a tool pointer, and rewriting it here would
+ * duplicate that indirection.
+ *
+ * Line numbers in the pointer are ABSOLUTE within the assistant message, so
+ * the same numbers can be handed straight to `graft_read_result.lineRange`.
+ * A block starting on message line 12 reports `lines=12-313`, not `1-302`;
+ * relative numbering silently shifts every later read.
+ */
+export function pointerizeCodeBlocks(
+  text: string,
+  seq: number,
+  sourceSessionId = '<sourceSessionId>',
+): { text: string; pointers: CodeBlockPointer[] } {
+  const pointers: CodeBlockPointer[] = []
+  if (text.length === 0) return { text, pointers }
+  const pattern = /```[^\n]*\n([\s\S]*?)```/gu
+  const output = text.replace(pattern, (match: string, body: string, offset: number) => {
+    // `body` keeps the newline that precedes the closing fence; that newline
+    // terminates the last content line rather than starting a new one, so the
+    // content line count must drop it. Counting it would report one extra line
+    // and shift every later read.
+    const content = body.endsWith('\n') ? body.slice(0, -1) : body
+    const bodyLines = lineCount(content)
+    if (bodyLines <= CODEBLOCK_MAX_LINES && match.length <= CODEBLOCK_MAX_CHARS) return match
+    // The message line on which this block's body starts.
+    const bodyStartLine = lineCount(text.slice(0, offset + (match.indexOf('\n') + 1)))
+    const bodyEndLine = bodyStartLine + bodyLines - 1
+    const preview = firstLines(content, CODEBLOCK_PREVIEW_LINES)
+    const pointer =
+      `[codeblock seq=${seq} lines=${bodyStartLine}-${bodyEndLine} preview]\n${preview}\n` +
+      `…[${Math.max(0, bodyLines - CODEBLOCK_PREVIEW_LINES)} more lines; call ` +
+      `graft_read_result({"sourceSessionId":"${sourceSessionId}","seq":${seq},` +
+      `"lineRange":{"start":${bodyStartLine},"end":${bodyEndLine}}})]`
+    pointers.push({ seq, startLine: bodyStartLine, endLine: bodyEndLine, preview, pointer })
+    return pointer
+  })
+  return { text: output, pointers }
+}
+
+/** Extract one numbered line range from a text body, 1-based and inclusive. */
+export function sliceLines(text: string, start: number, end: number): string {
+  const lines = text.split('\n')
+  const from = Math.max(1, start)
+  const to = Math.min(lines.length, end)
+  if (to < from) return ''
+  return lines.slice(from - 1, to).join('\n')
+}
+
+interface TurnDraft {
+  turn: number
+  assistant: AssistantRecord[]
+  /** v7.0: the user's own words that opened this turn, in order. */
+  user: { seq: number; text: string }[]
+}
+
+/**
+ * v7.0 (borrowed from dsh-rollover-snapshot): stop untrusted text from forging structure.
+ *
+ * `verbatimConversation` in rollover-snapshot renders user text with
+ * `neutralizeHeadings()` for a measured reason: a user message can contain
+ * "## Handoff" or "### 接下来", and a replay that quotes it verbatim lets that
+ * text become a *section of our own layout*. The reader then cannot tell where
+ * our structure ends and their text begins — the same false-certainty failure,
+ * moved from truncation to forgery.
+ *
+ * The graft tape is a different shape (role-prefixed replay lines, not Markdown
+ * sections), so the attack surface is narrower, but the same rule applies: a
+ * quoted line must never look like a header of the surrounding document.
+ *
+ * Escaping only the structural lines, never the whole block, is deliberate —
+ * escaping everything is what turned a real checkpoint's own table of contents
+ * into \\`\\## 你与用户说的\\`, which reads as damage on every crossing.
+ */
+const FORGED_HEADING = /^\s{0,3}(?:#{1,6}\s|<\/?h[1-6][^>]*>)/iu
+const FORGED_FENCE = /^\s{0,3}(?:```|~~~)/u
+const FORGED_RULE = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$/u
+
+function neutralizeStructure(text: string): string {
+  const lines = text.split(/\r\n|\r|\n|\u0085|\u2028|\u2029/u)
+  let inFence = false
+  return lines
+    .map((line) => {
+      if (FORGED_FENCE.test(line)) {
+        inFence = !inFence
+        // A fence inside quoted text must not open a block in our layout.
+        return `\\${line.trimStart()}`
+      }
+      if (inFence) return line
+      if (FORGED_HEADING.test(line) || FORGED_RULE.test(line)) {
+        return `\\${line.trimStart()}`
+      }
+      return line
+    })
+    .join('\n')
+}
+
+interface GoalResult {
+  goal: string
+  source: GraftTape['goalSource']
+}
+
+/**
+ * v7.0 A4: the goal is the LATEST intent, not the earliest.
+ *
+ * v6.x took the first user message of length >= 12 that did not start with `/`.
+ * On a long session that is the opening brief — which the user has usually
+ * superseded three times by the time the context fills. The target then
+ * confidently resumes work the user abandoned forty turns ago, and the freshest
+ * instruction (the one that actually matters) is nowhere in the injection.
+ *
+ * The newest substantive user message is the right anchor: it is the last thing
+ * the user asked for, and everything after it is the assistant's response to it.
+ *
+ * "Substantive" is the hard part. Measured on session-legacy-fixture, the last four
+ * user turns were literally "请继续" — a bare steer, with the actual intent
+ * living in the turn *before* it. Taking the newest message blindly would make
+ * the goal "请继续", which is worse than the opening brief. So a bare
+ * continuation is skipped and the search walks backwards to the last message
+ * that actually said what to do.
+ */
+function extractGoal(events: readonly SessionEventLike[]): GoalResult {
+  const humans = events.filter(
+    (event) => event.type === 'user/message' && event.data?.source?.kind === 'user' && textOfMessage(event.data).length > 0,
+  )
+  const bareAcknowledgement =
+    /^(请?继续(吧|工作|推进)?|继续|好的?|可以|嗯+|行|ok|okay|go on|continue|yes|y|proceed|go)[\s.!。！?？]*$/iu
+  /**
+   * A steer with a throwaway prefix: "考验，请继续", "好，继续吧", "OK go on".
+   *
+   * Measured, not guessed: session-legacy-fixture's final six user messages were
+   * "请继续", "考验，请继续", "请继续" x4. A naive "skip bare acknowledgements"
+   * rule stops at "考验，请继续" and makes that the goal — a six-character phrase
+   * that says nothing about what to build. The real instruction is the last
+   * message with actual content, however far back it sits.
+   */
+  const steeredAcknowledgement =
+    /^[^，,。.！!？?\s]{1,12}[，,、]\s*(请?继续|继续吧?|往下|接着来?|继续干)[\s.!。！?？]*$/iu
+  const substantive = (text: string): boolean => {
+    const trimmed = text.trim()
+    if (trimmed.length < 2) return false
+    if (trimmed.startsWith('/')) return false
+    if (/^background (job|subagent)\b/iu.test(trimmed)) return false
+    if (bareAcknowledgement.test(trimmed)) return false
+    if (steeredAcknowledgement.test(trimmed)) return false
+    // A short phrase that is mostly punctuation/steering carries no goal.
+    if (trimmed.length < 8 && /^(请|继续|再|来|开始|试试)/u.test(trimmed)) return false
+    return true
+  }
+  // v7.0 P2: anchor on the last few substantive messages, not one.
+  //
+  // A single anchor is a single point of failure. Measured on the real corpus,
+  // the newest substantive message is sometimes a narrow correction ("把第 42 行的
+  // 常量改成 43") that only makes sense on top of the two before it. Taking it
+  // alone hands the target a task with no context; taking the three together
+  // hands it the shape of the current work.
+  //
+  // Newest first, up to three, then flipped back into chronological order so the
+  // goal reads as a progression rather than a countdown.
+  const anchors: string[] = []
+  for (let index = humans.length - 1; index >= 0 && anchors.length < 3; index -= 1) {
+    const event = humans[index]
+    if (!isRecord(event.data)) continue
+    const sourceKind = typeof event.data?.source?.kind === 'string' ? event.data.source.kind : 'user'
+    if (sourceKind !== 'user') continue
+    // v7.0 P5: a replay is our own writing, not the user's words.
+    //
+    // This check must come BEFORE the text test but it is written after the
+    // sourceKind gate on purpose: `plugin:graft-replay` already fails
+    // `sourceKind !== 'user'`, so in practice this line never fires for a replay.
+    // It is kept as an explicit assertion of the invariant — and it is the reason
+    // the ordering below matters. A previous revision relied on the sourceKind
+    // gate alone while the goal extractor accepted `plugin:*` sources from the
+    // inherited-constraints path, which let a prior generation's handoff prose
+    // become this generation's "当前要做的事".
+    if (isGraftAuthored(event.data?.source)) continue
+    const text = textOfMessage(event.data)
+    if (!substantive(text)) continue
+    const normalized = normalizeText(text)
+    if (anchors.some((existing) => nearDuplicate(existing, normalized))) continue
+    anchors.push(normalized)
+  }
+  if (anchors.length > 0) {
+    const ordered = anchors.reverse()
+    const joined = ordered.map((line) => truncateEnd(line, 1600).text).join('\n')
+    return { goal: truncateEnd(joined, 4000).text, source: 'user' }
+  }
+  const human = humans[0]
+  if (human) {
+    return { goal: truncateEnd(normalizeText(textOfMessage(human.data)), 4000).text, source: 'user' }
+  }
+  const anyUser = events.find((event) => event.type === 'user/message' && textOfMessage(event.data).length > 0)
+  if (anyUser) {
+    return { goal: truncateEnd(normalizeText(textOfMessage(anyUser.data)), 4000).text, source: 'fallback-user' }
+  }
+  const assistant = events.find((event) => event.type === 'assistant/message' && textOfMessage(event.data?.message).length > 0)
+  if (assistant) {
+    return { goal: truncateEnd(normalizeText(textOfMessage(assistant.data?.message)), 4000).text, source: 'assistant' }
+  }
+  return { goal: 'Continue the migrated work.', source: 'placeholder' }
+}
+
+/**
+ * v5.2 拟人化：把一条工具调用写成一句陈述，而不是裸标签。
+ *
+ * 轻量模型（Flash 一类）会把 `[tool name=write]` 当成待执行的指令或未完成的
+ * 调用，从而复读或试图重放。写成"注：此处调用了 write 工具…"后，它是叙述的
+ * 一部分，模型只需要理解发生过什么。
+ *
+ * 可回读的 seq 仍然保留在句子里，需要细节时模型可以调 graft_read_result。
+ */
+/**
+ * v6.4 F4: current artifact index.
+ *
+ * The blind test on a 73-turn real session exposed the real gap: the target knew
+ * WHAT HAPPENED but not WHERE THINGS LIVE NOW. The model then spent its first
+ * actions running `ls` to rediscover a disk state the source already knew.
+ *
+ * This collects the paths the source actually wrote or edited, newest first, so
+ * the target can act on files instead of hunting for them.
+ */
+export interface WorkspaceFile {
+  path: string
+  action: 'write' | 'edit'
+  seq: number
+  /** Set when the source re-edited the same path later. */
+  writes: number
+  /** Set when the newest write/edit for this path came back as an error. */
+  failed?: boolean
+}
+
+const WRITE_TOOL_NAMES = new Set(['write', 'edit', 'create_file', 'apply_patch', 'str_replace_editor'])
+
+function pathFromToolArguments(raw: unknown): string | undefined {
+  if (!isRecord(raw)) return undefined
+  for (const key of ['file_path', 'path', 'filePath', 'target_file', 'filename']) {
+    const value = raw[key]
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+  }
+  return undefined
+}
+
+/** Every distinct path the source wrote, plus how many there were before the cap. */
+export interface WorkspaceIndex {
+  files: WorkspaceFile[]
+  total: number
+}
+
+export function extractWorkspaceIndex(events: readonly SessionEventLike[], limit = 20): WorkspaceIndex {
+  const byPath = new Map<string, WorkspaceFile & { callSeq: number }>()
+  // v7.4b: the block tells the reader "用 graft_read_result 按 seq 回读" — so the
+  // seq it prints must be one that tool can OPEN.
+  //
+  // Measured on `handoff-demo`: every entry cited a `tool/call` seq
+  // (e.g. 14888), and reading it answered "No payload at seq 14888"; the
+  // readable payload was the `tool/result` one event later (14889). A pointer
+  // that cannot be followed is worse than no pointer — it teaches the target
+  // that the block is unreliable.
+  const resultSeqByCallId = new Map<string, number>()
+  for (const event of events) {
+    if (event.type !== 'tool/result') continue
+    const message = event.data?.message
+    const callId = message?.toolCallId ?? message?.source?.callId ?? event.data?.toolCallId
+    if (typeof callId === 'string' && callId.length > 0) resultSeqByCallId.set(callId, Number(event.seq))
+  }
+  const callBySeq = new Map<string, { path: string; seq: number }>()
+  for (const event of events) {
+    if (event.type !== 'tool/call') continue
+    const name = String(event.data?.name ?? '')
+    if (!WRITE_TOOL_NAMES.has(name)) continue
+    let args: unknown
+    try {
+      args = JSON.parse(String(event.data?.arguments ?? '{}'))
+    } catch {
+      continue
+    }
+    const path = pathFromToolArguments(args)
+    if (path === undefined) continue
+    const action: WorkspaceFile['action'] = name === 'edit' ? 'edit' : 'write'
+    const callSeq = Number(event.seq)
+    const callId = String(event.data?.callId ?? '')
+    // The result's seq is what graft_read_result can open; fall back to the call
+    // seq when the call never came back (interrupted, or cut at the boundary).
+    const seq = resultSeqByCallId.get(callId) ?? callSeq
+    if (callId.length > 0) callBySeq.set(callId, { path, seq: callSeq })
+    const existing = byPath.get(path)
+    if (existing === undefined) {
+      byPath.set(path, { path, action, seq, callSeq, writes: 1 })
+    } else {
+      existing.seq = seq
+      existing.callSeq = callSeq
+      existing.action = action
+      existing.writes += 1
+      // A newer attempt supersedes an older failure.
+      delete existing.failed
+    }
+  }
+  // A call that came back as an error did not put a file on disk. Presenting it
+  // as a path the target can read is a claim the target cannot check, so it is
+  // marked instead of dropped: the pointer is still historically true.
+  //
+  // Field convention is the one the rest of this file already uses for results
+  // (`message.toolCallId ?? message.source.callId`, `message.isError`): a real
+  // v4 log carries the ids and the error flag INSIDE `data.message`, so reading
+  // `data.toolCallId` here would compile, pass a hand-written fixture, and never
+  // fire on a real log.
+  for (const event of events) {
+    if (event.type !== 'tool/result') continue
+    const message = event.data?.message
+    const callId = message?.toolCallId ?? message?.source?.callId ?? event.data?.toolCallId
+    if (typeof callId !== 'string' || callId.length === 0) continue
+    const isError = message?.isError === true || event.data?.isError === true || event.data?.error !== undefined
+    if (!isError) continue
+    const call = callBySeq.get(callId)
+    if (call === undefined) continue
+    const entry = byPath.get(call.path)
+    if (entry !== undefined && entry.callSeq === call.seq) entry.failed = true
+  }
+  const all = [...byPath.values()]
+    .map(({ callSeq, ...rest }) => rest as WorkspaceFile)
+    .sort((a, b) => b.seq - a.seq)
+  return { files: all.slice(0, Math.max(1, limit)), total: all.length }
+}
+
+export function extractWorkspaceState(events: readonly SessionEventLike[], limit = 20): WorkspaceFile[] {
+  return extractWorkspaceIndex(events, limit).files
+}
+
+/**
+ * Render the block. A failed tool result for a written path is reported as an
+ * unverified write: claiming success for a call that errored would be a lie the
+ * target cannot detect.
+ */
+export function renderWorkspaceState(files: readonly WorkspaceFile[], cwd: string, total = files.length): string {
+  if (files.length === 0) return ''
+  const lines = ['[Workspace Files]']
+  lines.push(`本次窗口内我写过/改过的文件（按最近一次操作排序，工作目录 ${cwd}）：`)
+  for (const file of files) {
+    const rel = file.path.startsWith(cwd) ? file.path.slice(cwd.length).replace(/^[\\/]+/u, '') : file.path
+    const times = file.writes > 1 ? ` ×${file.writes}` : ''
+    const status = file.failed === true ? '，最近一次报错，未确认落盘' : ''
+    lines.push(`- ${rel}（最近一次：${file.action}${times}，seq=${file.seq}${status}）`)
+  }
+  // A capped list that says nothing about the cap reads as "this is everything".
+  if (total > files.length) {
+    lines.push(
+      `本次窗口共有 ${total} 个文件，这里只列最近 ${files.length} 个；更早的同样能用 graft_read_result 按 seq 回读。`,
+    )
+  }
+  lines.push('以上是写入记录，不是磁盘校验结果；需要内容时用 graft_read_result 按 seq 回读，不要再盲目列目录。')
+  return lines.join('\n')
+}
+
+/**
+ * v6.4 F3: pointer downgrade for tools the target does not have.
+ *
+ * A source-only tool (a plugin that is no longer mounted) would otherwise be
+ * named in a pointer sentence, and a literal-minded model tries to call it.
+ * The history is still real, so the pointer stays — it just stops pretending the
+ * tool is callable here.
+ */
+export function describeUnavailableTool(name: string, resultSeq: number, isError: boolean): string {
+  const suffix = isError ? '（当时这次调用还报了错）' : ''
+  return `（历史记录：使用了当前环境不支持的工具 ${name}${suffix}；原始输出仍可用 graft_read_result 读 seq=${resultSeq}）`
+}
+/**
+ * v7.4 P4-1（方案 B）：回顾句是元数据，不是散文。
+ *
+ * 真机实测：一个 3,955 字符的重放块里，31 条「（回顾：刚才我已经调用 pwsh…）」
+ * 占了 2,387 字符（60%），却只承载两个事实——工具名和 seq。更糟的是它们把时序
+ * 埋掉了：每行读起来一模一样，读者看不出"pwsh 连着跑了二十次、read 只跑了三次"。
+ *
+ * 紧凑形式把同一次连续调用只写一次工具名，按顺序列出 seq：
+ *
+ *   - pwsh(seq=364,372,380) · read(seq=388)
+ *
+ * 行序就是时序；`!` 标记那次调用报了错。单个 seq 的粒度和旧句式完全一样，
+ * 需要原文时仍然用 graft_read_result 读。
+ */
+/**
+ * v7.4b: name how the open-turn carryover was built.
+ *
+ * The block is not a single message: it is the last paragraph of each step's
+ * assistant text (reasoning dropped) plus tool pointers. Saying so is the
+ * difference between "I remember what I said" and "I am reading a montage".
+ */
+export function carryoverAssemblyNote(carryover: { assistantText: string }): string {
+  const paragraphs = carryover.assistantText
+    .trim()
+    .split(/\n{2,}/u)
+    .filter((paragraph) => paragraph.trim().length > 0)
+  if (paragraphs.length < 2) {
+    return '（断点块：这一轮尚未结束，正文取自断点前最后一步）'
+  }
+  return `（断点块：下面 ${paragraphs.length} 段正文按时间拼接自断点前各步的最终段落，不是一条完整消息）`
+}
+
+export function renderPointerLines(items: readonly PointerItem[]): string {
+  const runs: { name: string; seqs: string[]; unavailable: boolean }[] = []
+  for (const item of [...items].sort((left, right) => left.seq - right.seq)) {
+    const last = runs[runs.length - 1]
+    const unavailable = item.unavailable === true
+    if (last !== undefined && last.name === item.name && last.unavailable === unavailable) {
+      last.seqs.push(`${item.seq}${item.isError === true ? '!' : ''}`)
+      continue
+    }
+    runs.push({
+      name: item.name,
+      seqs: [`${item.seq}${item.isError === true ? '!' : ''}`],
+      unavailable,
+    })
+  }
+  return runs
+    .map((run) => `- ${run.name}(seq=${run.seqs.join(',')})${run.unavailable ? ' (unavailable here)' : ''}`)
+    .join('\n')
+}
+
+/**
+ * v6.2: PendingState is built from the todo list first, prose second.
+ *
+ * Free-text extraction produced garbage on a real log. A test name like
+ * "An expired token is rejected and removed from sessions" matched the
+ * "已排除" regex, and a markdown heading "## Tests" matched "接下来", so the
+ * injected state read: "我刚刚排除了 An expired token …。接下来我需要 ## Tests。"
+ * That is worse than saying nothing.
+ *
+ * The model's own todo_write is authoritative: the first unchecked item IS the
+ * next action. Prose is only a fallback, and it refuses markdown structure,
+ * test names, and anything that is not a sentence.
+ */
+const MARKDOWN_NOISE = /^\s*(#{1,6}\s|[-*+]\s|\d+[.)]\s|\||>|`{3}|~{3})/u
+const TEST_NAME_NOISE = /\b(test_|tests?_\w|unittest|pytest|assert|Ran \d+ tests?)/iu
+
+/** Strip a leading label such as "下一步：" so the clause reads naturally. */
+function stripLabel(value: string): string {
+  return value
+    .replace(/^\s*[-*•]?\s*(当前假设|假设|已排除|排除|下一步|接下来|结论|判断)\s*[：:]\s*/u, '')
+    .replace(/^\s*[-*•]\s*/u, '')
+    .trim()
+}
+
+function looksLikeProsePlan(sentence: string): boolean {
+  const text = sentence.trim()
+  if (text.length < 8 || text.length > 300) return false
+  if (MARKDOWN_NOISE.test(text)) return false
+  if (TEST_NAME_NOISE.test(text)) return false
+  // A sentence needs some natural-language shape, not just an identifier.
+  if (!/[\u4e00-\u9fff]/u.test(text) && !/\s/u.test(text)) return false
+  return true
+}
+
+/**
+ * v7.0 P9: the natural-language close that replaced the removed wake directive.
+ *
+ * Declared before its user so the module has no use-before-definition risk even
+ * when a bundler hoists differently.
+ */
+const CONTINUE_NUDGE = '直接接着刚才的工作继续即可。'
+
+/**
+ * v7.3: name the retrieval path at the end of the pending state.
+ *
+ * The read-back index lists ~24 recent pointers. A reader that wants something
+ * older needs to know a search exists — otherwise "the index does not mention it"
+ * reads as "it is not there", and the model re-runs the command instead. Naming
+ * the tool costs one sentence and turns a dead end into a two-step lookup.
+ */
+const SEARCH_HINT =
+  '如果有不确定的报错或历史代码，请使用 graft_search_history 搜索，再用 graft_read_result 查看原文。'
+
+/**
+ * v7.0 P12: build the trailing read-back index.
+ *
+ * Sources of seq, in the order a reader is likely to want them:
+ *   - tool results behind the replay pointers (the expensive ones to re-run)
+ *   - user messages (cheap to quote, but the ones the model should echo exactly)
+ *
+ * Newest first within each group: a resumed window acts on recent work, which is
+ * the same reason the older-turn index names the tail of its range.
+ *
+ * The index is capped and says so. A silently truncated index reads as
+ * "these are all the pointers", which is the false-certainty failure the
+ * workspace block was already fixed for.
+ */
+function collectReadbackIndex(
+  tape: GraftTape,
+  events: readonly SessionEventLike[],
+  limit = 24,
+): string[] {
+  const byTurn = new Map<number, GraftTapeTurn>()
+  for (const turn of tape.turns) byTurn.set(turn.turn, turn)
+  const pointerSeq = new Map<number, string>()
+  for (const event of events) {
+    if (event.type !== 'tool/result') continue
+    const message = event.data?.message
+    const callId = message?.toolCallId ?? message?.source?.callId
+    if (typeof callId !== 'string') continue
+    pointerSeq.set(Number(event.seq), typeof message === 'string' ? '' : String(callId))
+  }
+  // Reuse the pointer sentences the tape already produced: they are the exact
+  // wording the model just read, so the index matches what it is indexing.
+  const rows: { seq: number; label: string }[] = []
+  const seen = new Set<number>()
+  for (const turn of [...tape.turns].reverse()) {
+    for (const pointer of pointerSentences(turn.replay ?? turn.text)) {
+      // v7.4 P4-1: a compact run names the tool once and lists every seq.
+      const compact = /^-\s*([A-Za-z0-9_.:-]+)\(seq=([^)]+)\)/u.exec(pointer)
+      const seqText = compact?.[2] ?? /seq=(\d+)/u.exec(pointer)?.[1]
+      if (seqText === undefined) continue
+      // v7.3.1: name every pointer shape, including the downgraded one.
+      //
+      // Missing the `（历史记录：…工具 X…）` branch here is what turned the whole
+      // index into anonymous `Turn 5 · tool` rows when F3 downgraded the tape —
+      // an index with no tool names gives a reader no reason to fetch anything.
+      // The downgrade decision itself is fixed at the source (scope-correct
+      // lookup); this branch keeps the index readable even when a genuine
+      // downgrade happens.
+      const name =
+        compact?.[1] ??
+        /调用\s*([A-Za-z0-9_.-]+)/u.exec(pointer)?.[1] ??
+        /tools? name=([^\s]+)/u.exec(pointer)?.[1] ??
+        /不支持的工具\s+([A-Za-z0-9_.-]+)/u.exec(pointer)?.[1] ??
+        'tool'
+      // Mark a downgraded pointer as such: "read (unavailable)" tells the reader
+      // the original output is still fetchable while the tool itself is not.
+      const downgraded = /历史记录：/u.test(pointer) || /\(unavailable here\)/u.test(pointer)
+      for (const part of seqText.split(',')) {
+        const seq = Number(part.replace(/!$/u, '').trim())
+        if (!Number.isFinite(seq) || seen.has(seq)) continue
+        seen.add(seq)
+        rows.push({ seq, label: `Turn ${turn.turn} · ${name}${downgraded ? ' (unavailable here)' : ''}` })
+        if (rows.length >= limit) break
+      }
+      if (rows.length >= limit) break
+    }
+    if (rows.length >= limit) break
+  }
+  for (const turn of [...tape.turns].reverse()) {
+    if (rows.length >= limit) break
+    if ((turn.userTexts ?? []).length === 0) continue
+    if (seen.has(turn.firstSeq)) continue
+    seen.add(turn.firstSeq)
+    const head = (turn.userTexts?.[0] ?? '').replace(/\s+/gu, ' ').slice(0, 28)
+    rows.push({ seq: turn.firstSeq, label: `Turn ${turn.turn} · 用户原话「${head}…」` })
+  }
+  if (rows.length === 0) return []
+  const lines = rows.map((row) => `- seq=${row.seq}  ${row.label}`)
+  const total = tape.pointerCount + tape.turns.reduce((sum, turn) => sum + (turn.userTexts ?? []).length, 0)
+  if (total > rows.length) {
+    lines.push(`- （共 ${total} 处可回读，这里按最近优先列 ${rows.length} 条；完整原文按 seq 取）`)
+  }
+  return lines
+}
+
+/**
+ * v7.0 P1-2: background work that will NOT follow the user into the target.
+ *
+ * A graft copies the conversation; it cannot copy a running process. Jobs and
+ * subagents are owned by the live agent loop, and when the source session is
+ * retired those children keep running (or get torn down) with their results
+ * going to a session the user has left. The target then waits for a report that
+ * will never arrive, or — worse — re-runs work that is still in flight.
+ *
+ * Detection is from the log, not from the jobs service: `job/registered` and
+ * `job/settled` are already paired per job id in the durable record, so this
+ * needs no live handle and works identically for a cold slice.
+ */
+export interface OpenBackgroundWork {
+  jobs: string[]
+  subagents: string[]
+}
+
+export function extractOpenBackgroundWork(events: readonly SessionEventLike[]): OpenBackgroundWork {
+  const jobs = new Map<string, string>()
+  const subagents = new Map<string, string>()
+  for (const event of events) {
+    const data = event.data
+    if (!isRecord(data)) continue
+    if (event.type === 'job/registered') {
+      const id = typeof data.jobId === 'string' ? data.jobId : ''
+      if (id.length === 0) continue
+      const label = typeof data.label === 'string' && data.label.length > 0 ? data.label : id
+      jobs.set(id, label)
+      continue
+    }
+    if (event.type === 'job/settled') {
+      const id = typeof data.jobId === 'string' ? data.jobId : ''
+      if (id.length > 0) jobs.delete(id)
+      continue
+    }
+    // A spawned subagent's lifetime is visible through its own events: the
+    // task id appears on creation and again on settlement.
+    if (event.type === 'subagent/start') {
+      const id = typeof data.id === 'string' ? data.id : typeof data.taskId === 'string' ? data.taskId : ''
+      if (id.length === 0) continue
+      subagents.set(id, typeof data.label === 'string' && data.label.length > 0 ? data.label : id)
+      continue
+    }
+    if (event.type === 'subagent/end') {
+      const id = typeof data.id === 'string' ? data.id : typeof data.taskId === 'string' ? data.taskId : ''
+      if (id.length > 0) subagents.delete(id)
+    }
+  }
+  return { jobs: [...jobs.values()], subagents: [...subagents.values()] }
+}
+
+/**
+ * One line stating what did not come across, or `''` when nothing is running.
+ *
+ * Stated as a fact with a count and the consequence, because the failure this
+ * prevents is the target waiting:
+ * "there are 2 jobs still running; their output will not arrive here."
+ */
+function renderOpenWorkNotice(open: OpenBackgroundWork): string {
+  const total = open.jobs.length + open.subagents.length
+  if (total === 0) return ''
+  const parts: string[] = []
+  if (open.jobs.length > 0) parts.push(`${open.jobs.length} 个后台作业`)
+  if (open.subagents.length > 0) parts.push(`${open.subagents.length} 个子代理`)
+  const names = [...open.jobs, ...open.subagents].slice(0, 5).join('、')
+  const more = total > 5 ? ` 等 ${total} 项` : ''
+  return (
+    `源会话里还有 ${parts.join('和')}仍在运行（${names}${more}）；` +
+    '它们不会被迁移，结果也不会自动回到这里。需要那些结果时，回到源会话查看，或重新发起。'
+  )
+}
+
+/**
+ * v7.0: read the constraint list back out of a handoff message we wrote.
+ *
+ * The block the goal message carries is:
+ *
+ *   HARD CONSTRAINTS（从源会话用户消息中抽取，逐条有效，不可协商）:
+ *   1. [ ] …
+ *   2. [ ] …
+ *
+ * Parsing our own format (rather than re-running the heuristic over the whole
+ * block) keeps the inherited list byte-identical to what the previous generation
+ * was given: no re-scoring, no re-filtering, no slow drift across hops.
+ */
+function constraintBlockOf(text: string): string[] {
+  const marker = 'HARD CONSTRAINTS'
+  const start = text.indexOf(marker)
+  if (start < 0) return []
+  const lines = text.slice(start).split(/\r?\n/u)
+  const out: string[] = []
+  for (const line of lines.slice(1)) {
+    const match = /^\s*\d+\.\s*(?:\[[ x]?\]\s*)?(.+)$/u.exec(line)
+    if (match !== null) {
+      const value = match[1].trim()
+      if (value.length > 0) out.push(value)
+      continue
+    }
+    // The list ends at the first non-item, non-blank line.
+    if (line.trim().length === 0) continue
+    if (out.length > 0) break
+  }
+  return out
+}
+
+/**
+ * v7.0: where this task's constraints originally came from, across generations.
+ *
+ * The problem the report names: after several migrations, the read-back index
+ * lists only the most recent ~24 pointers. A fifth-generation model therefore
+ * cannot find the first generation's constraints — they are real, they are in a
+ * log it can read, but nothing tells it those seqs exist. The index is a window,
+ * and the window has moved past them.
+ *
+ * The fix is an anchor, not a bigger window: state that constraints exist
+ * upstream, how many generations back, and one seq to start from. That is a
+ * constant-size fact regardless of depth, so it stays true at generation 20.
+ *
+ * Detection is from the log, not from memory: a prior graft writes its own
+ * handoff into a `user/message` whose source is `plugin:graft-replay`, and that
+ * message contains the HARD CONSTRAINTS block. Finding the OLDEST such message is
+ * finding the earliest recorded statement of the rules.
+ */
+export interface ConstraintProvenance {
+  /** How many graft generations before this one the constraints were recorded. */
+  generationsBack: number
+  /** The seq of the earliest replay message that carried a constraints block. */
+  seq: number
+  /** The session that log belongs to. */
+  sessionId: string
+}
+
+export function findConstraintProvenance(
+  events: readonly SessionEventLike[],
+  sourceSessionId: string,
+  sourceGeneration: number,
+): ConstraintProvenance | undefined {
+  let oldest: { seq: number; text: string } | undefined
+  for (const event of events) {
+    if (event?.type !== 'user/message') continue
+    if (!isGraftAuthored(event.data?.source)) continue
+    const text = textOfMessage(event.data)
+    if (!/HARD CONSTRAINTS/u.test(text)) continue
+    if (oldest === undefined || Number(event.seq) < oldest.seq) {
+      oldest = { seq: Number(event.seq), text }
+    }
+  }
+  if (oldest === undefined) return undefined
+  // If the block we found already carries a provenance line, that line names the
+  // TRUE origin (an earlier generation, another session). Pass it through rather
+  // than re-deriving "one generation back" from this hop alone — otherwise the
+  // anchor would always say "上一代" no matter how deep the chain is.
+  const inherited = /核心约束最早记录在第?\s*(\d+)?\s*代会话（([^，]+)，seq=(\d+)）/u.exec(oldest.text)
+  if (inherited !== null) {
+    const depth = Number(inherited[1])
+    const sessionId = inherited[2].trim()
+    const seq = Number(inherited[3])
+    if (Number.isFinite(depth) && depth > 0 && Number.isFinite(seq)) {
+      return { generationsBack: depth + 1, seq, sessionId }
+    }
+  }
+  return {
+    // The oldest constraints block we can see was written by the PREVIOUS
+    // generation, so it is at least one back; deeper ancestry is carried by the
+    // generation counter, not guessed from the text.
+    generationsBack: Math.max(1, sourceGeneration),
+    seq: oldest.seq,
+    sessionId: sourceSessionId,
+  }
+}
+
+function renderConstraintProvenance(provenance: ConstraintProvenance): string {
+  const generation =
+    provenance.generationsBack === 1 ? '上一代会话' : `第 ${provenance.generationsBack} 代会话`
+  return (
+    `核心约束最早记录在${generation}（${provenance.sessionId}，seq=${provenance.seq}）。` +
+    '上面列出的约束是它们的最新副本；如果这里的表述和回读结果冲突，以后读到的原文为准。'
+  )
+}
+
+/**
+ * v7.0: a one-line, concrete account of what the LAST step actually touched.
+ *
+ * Why this exists — the "zero replay" trade-off:
+ *
+ * Once the tape drops to 0-1 turns, the target no longer reads the last exchange.
+ * Everything it knows about the immediate situation comes from the structured
+ * blocks. A pending state that only says "I need to continue pushing <goal>"
+ * gives it the task but not the scene: which file was open, which function was
+ * being changed, what the failure actually said. The model then re-explores to
+ * rebuild that scene, which is exactly the cost the tape was supposed to avoid.
+ *
+ * So this extracts the three facts that make a scene: the most recent file
+ * touched, the most recent tool that produced an error, and the error's own
+ * words. All three come from the log, so they are facts, not paraphrase.
+ */
+export interface LastStepScene {
+  file?: string
+  action?: string
+  failingTool?: string
+  errorText?: string
+  /** v7.2: the seq of the failing tool/result, so the error can be traced back. */
+  errorSeq?: number
+  /** v7.2: the failing result's full text (bounded), for inline display. */
+  errorBody?: string
+  /** v7.2: whether `errorBody` had to be cut. */
+  errorTruncated?: boolean
+}
+
+export function extractLastStepScene(events: readonly SessionEventLike[]): LastStepScene {
+  const scene: LastStepScene = {}
+  // Collect call metadata FIRST, in forward order.
+  //
+  // The backward scan below hits a `tool/result` before the `tool/call` that
+  // produced it (call seq 1737, result seq 1738), so a single reverse pass sees
+  // an empty name map and reports the tool as "tool". Two passes cost one extra
+  // linear read of an array that is already in memory, and they are correct.
+  const toolNames = new Map<string, string>()
+  const callArgs = new Map<string, unknown>()
+  for (const event of events) {
+    if (event?.type !== 'tool/call') continue
+    const callId = typeof event.data?.callId === 'string' ? event.data.callId : ''
+    if (callId.length === 0) continue
+    const name = typeof event.data?.name === 'string' ? event.data.name : ''
+    if (name.length > 0) toolNames.set(callId, name)
+    const raw = event.data?.arguments
+    if (typeof raw === 'string') {
+      try {
+        callArgs.set(callId, JSON.parse(raw))
+      } catch {
+        // Arguments that are not JSON cannot name a path; skip them.
+      }
+    }
+  }
+  // Newest first: the scene is the most recent moment, not the whole history.
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event === undefined) continue
+    if (event.type !== 'tool/result') continue
+    const message = event.data?.message
+    const callId = message?.toolCallId ?? message?.source?.callId
+    const name = typeof callId === 'string' ? toolNames.get(callId) ?? '' : ''
+    const text = textOfMessage(message)
+    const isError = message?.isError === true || event.data?.error !== undefined
+    if (isError && scene.failingTool === undefined) {
+      scene.failingTool = name.length > 0 ? name : 'tool'
+      // Keep the first line that carries each of the usual tripwires; a bare
+      // "exit code 1" is less useful than the assertion message above it.
+      const line =
+        text
+          .split(/\r?\n/u)
+          .map((candidate) => candidate.trim())
+          .find((candidate) => /error|失败|exception|assert|not found|cannot|exit code/iu.test(candidate)) ??
+        text.split(/\r?\n/u)[0] ??
+        ''
+      scene.errorText = truncateEnd(line.replace(/\s+/gu, ' '), 180).text
+      // v7.2: keep the whole failure body, not just the one matched line.
+      //
+      // During continuous debugging the thing a resumed window needs is the
+      // error's own words — the stack, the assertion, the offending path. A
+      // 180-char gist forces it to go fetch the seq, which is exactly the lookup
+      // this block exists to save. Bounded at 2000 chars and marked when cut, so
+      // the reader knows the difference between "that is the error" and "that is
+      // the first part of the error".
+      const body = text.trim()
+      scene.errorSeq = Number(event.seq)
+      if (body.length > 2000) {
+        scene.errorBody = body.slice(0, 2000)
+        scene.errorTruncated = true
+      } else {
+        scene.errorBody = body
+        scene.errorTruncated = false
+      }
+    }
+    if (scene.file === undefined && WRITE_TOOL_NAMES.has(name)) {
+      const path = pathFromToolArguments(callId === undefined ? undefined : callArgs.get(String(callId)))
+      if (path !== undefined) {
+        scene.file = path
+        scene.action = name
+      }
+    }
+    if (scene.file !== undefined && scene.failingTool !== undefined) break
+  }
+  return scene
+}
+
+/**
+ * v7.0: render the scene as one sentence of first-person recall.
+ *
+ * Stated as memory ("I was just…"), not as a label, because a label invites the
+ * model to treat it as an instruction; a recollection invites it to continue.
+ */
+/**
+ * v7.2: render the scene, then inline the failure's own text.
+ *
+ * The one-line summary names what failed; the body below is what it SAID. Both
+ * are needed for continuous debugging: the summary tells the reader where to
+ * look, the body saves it the round trip. Without the body, "the last pwsh call
+ * failed" is a fact the model must spend a tool call to expand — on every single
+ * migration, which is exactly when it can least afford one.
+ *
+ * The body is fenced so a stack trace containing markdown cannot restructure the
+ * pending state, and labelled with its seq so the reader can still reach the
+ * original if the 2000-char cut removed the part it needed.
+ */
+function renderLastStepScene(scene: LastStepScene): string {
+  const parts: string[] = []
+  if (scene.file !== undefined) {
+    const verb = scene.action === 'write' ? '写' : '改'
+    parts.push(`最后一步我在${verb} ${scene.file}`)
+  }
+  if (scene.failingTool !== undefined) {
+    const detail = scene.errorText === undefined || scene.errorText.length === 0 ? '' : `，报错是「${scene.errorText}」`
+    parts.push(`最后跑的 ${scene.failingTool} 失败了${detail}`)
+  }
+  const summary = parts.length === 0 ? '' : `${parts.join('；')}。`
+  if (scene.errorBody === undefined || scene.errorBody.length === 0) return summary
+  const body = neutralizeStructure(scene.errorBody)
+  const cut = scene.errorTruncated === true ? '\n…[已截断]' : ''
+  const header =
+    scene.errorSeq === undefined
+      ? '最后一条报错原文：'
+      : `最后一条报错原文（seq=${scene.errorSeq}）：`
+  const block = `${header}\n${body}${cut}`
+  // The caller joins the scene with the following line, so the block must end
+  // with its own terminator. Without it the error's last line ran straight into
+  // "我接下来需要…", and a stack trace's final frame read as part of the plan.
+  const terminated = /[。.!！?？:：\n]$/u.test(block) ? block : `${block}。`
+  return summary.length === 0 ? terminated : `${summary}\n\n${terminated}`
+}
+
+/**
+ * v7.4b (硬约束 4): the breakpoint outranks the todo list when they disagree.
+ *
+ * The pending state opens with `openTodos[0]` because a written plan is the
+ * most authoritative statement of intent — but a todo list is a snapshot taken
+ * BEFORE the cut, and the open turn after it may already have performed the
+ * first item. Measured on `handoff-demo`: the list said
+ * "用 graft_prepare 真机体检…" while the carryover ended with
+ * `graft_prepare(seq=14965)` and the model's own "提交" line. A reader that
+ * trusts the list re-issues a side-effecting tool that already ran — for
+ * `graft_commit` that is a second migration of the same session.
+ *
+ * So: when the open-turn tail names the tool the first open todo names, say so
+ * instead of hiding it. The instruction stays; the doubt is attached to it.
+ */
+export function staleTodoHint(
+  openTodo: string | undefined,
+  lastOpenCall: { readonly tool: string; readonly seq: number } | undefined,
+): string | undefined {
+  if (openTodo === undefined || lastOpenCall === undefined) return undefined
+  const squash = (value: string): string => value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/gu, '')
+  const tool = squash(lastOpenCall.tool)
+  if (tool.length === 0 || !squash(openTodo).includes(tool)) return undefined
+  return `断点前我刚发出过 ${lastOpenCall.tool}(seq=${lastOpenCall.seq})，这一项可能已经做完了——先核对它的结果，不要直接重跑。`
+}
+
+function buildPendingState(
+  lastTurnText: string,
+  goal: string,
+  sourceSessionId: string | undefined,
+  pointerCount: number,
+  openTodos: readonly string[] = [],
+  scene: LastStepScene = {},
+  lastOpenCall?: { readonly tool: string; readonly seq: number },
+): string {
+  const lines: string[] = []
+
+  // v7.0: the scene comes FIRST when the tape is short.
+  //
+  // With zero or one replayed turn, this line is the only thing that says where
+  // the work physically stopped. Putting it after the goal would bury the one
+  // concrete fact under the most abstract one.
+  const sceneText = renderLastStepScene(scene)
+  if (sceneText.length > 0) lines.push(sceneText)
+
+  if (openTodos.length > 0) {
+    // Authoritative path: the model already wrote down what remains.
+    const next = openTodos[0].replace(/\s+/gu, ' ').trim()
+    lines.push(`我接下来需要立刻执行：${truncateEnd(next, 260).text}。`)
+    const stale = staleTodoHint(next, lastOpenCall)
+    if (stale !== undefined) lines.push(stale)
+    if (openTodos.length > 1) {
+      const rest = openTodos
+        .slice(1, 4)
+        .map((item) => truncateEnd(item.replace(/\s+/gu, ' ').trim(), 120).text)
+      lines.push(`再往后还有：${rest.join('；')}。`)
+    }
+  } else {
+    // Fallback: prose, but only sentences that survive the noise filter.
+    const prose = proseWithoutPointers(lastTurnText)
+    const sentences = splitSentences(prose)
+    const excluded = pickSentence(
+      sentences,
+      /(排除|放弃|不再|否决|ruled out|rejected|not viable|dead end|does not work)/iu,
+      '',
+    )
+    // v7.4 P4-2: anchor the plan pattern at the SENTENCE LEAD.
+    //
+    // The old pattern matched the substring anywhere, so an English aside like
+    // "since retireSource runs later" scored as a plan and the pending state read
+    // "我接下来需要 源码里还有一行注释直接声明该设计（L4799）…". A plan sentence
+    // announces itself at the front; a citation or an aside does not.
+    const next = pickSentence(sentences, PLAN_LEAD_PATTERN, '')
+    const excludedText = looksLikeProsePlan(excluded) ? stripLabel(excluded) : ''
+    const nextText = looksLikeProsePlan(next) ? stripLabel(next) : ''
+    if (excludedText.length > 0) lines.push(`我刚刚排除了 ${truncateEnd(excludedText, 260).text}。`)
+    if (nextText.length > 0) {
+      // v7.4 P4-2: a conditional is a PRECONDITION, not an action.
+      //
+      // "我接下来需要 如果 X 就 Y。" glues an if-clause onto a declarative frame:
+      // ungrammatical, and — worse — it reads as an order to do X now. The
+      // natural form foregrounds the action and demotes the condition:
+      // "我接下来需要继续推进，前提是 …".
+      const cut = truncateEnd(nextText, 260).text
+      if (/^(?:如果|若|假如|假设|要是|除非|一旦)/u.test(cut)) {
+        lines.push(
+          `我接下来需要继续推进，前提是 ${cut.replace(/^(?:如果|若|假如|假设|要是|除非|一旦)\s*/u, '')}。`,
+        )
+      } else {
+        lines.push(`我接下来需要 ${cut}。`)
+      }
+    } else {
+      // v7.0: do NOT quote the goal here.
+      //
+      // The goal is multi-anchor since P2 (up to three joined messages, with
+      // newlines). Wrapping it in 「…」 produced a wall of quoted text that read
+      // as damaged prose and repeated what the goal message already says. The
+      // goal lives one message above; this line only has to point at it.
+      // v7.3.1: point at the goal by its honest label.
+      //
+      // The goal is the session's task, which may already be substantially done.
+      // This line only fires when the model left NO open todo, so "continue the
+      // task" is the only available next action — but it must name the same label
+      // the goal message uses, or the reference dangles.
+      lines.push('我接下来需要按上面「这个会话的任务」继续推进，并验证结果。')
+    }
+  }
+
+  // v7.2: join with newlines, not with ''.
+  //
+  // The concatenation was fine while every line was a short sentence. Since the
+  // scene can now carry a multi-line error body, `join('')` ran the stack trace's
+  // last frame straight into the next sentence ("at test.ts:3我接下来需要…"),
+  // which reads as one broken line and makes the plan look like part of the error.
+  let text = lines.join('\n')
+  if (sourceSessionId !== undefined && pointerCount > 0) {
+    text += `\n\n前面提到的那些细节都还留着。如果哪一步需要原文，我就用 graft_read_result，sourceSessionId 传 ${sourceSessionId}，seq 传回忆句里写的编号。`
+  }
+  // v7.0 P9: the directive became a sentence in the assistant's own voice.
+  //
+  // A separate "系统强制指令" block told the reader it was looking at a system
+  // document. The same intent, phrased as the last beat of an inner monologue,
+  // keeps the recency position inside the conversation instead of outside it.
+  if (text.length > 0) text += `\n\n${SEARCH_HINT}\n${CONTINUE_NUDGE}`
+  return text
+}
+
+/**
+ * v7.0 A1/A2: render one turn as a replay of the real conversation flow.
+ *
+ * Why not prose: v6.x flattened each turn into a paragraph of assistant
+ * narration with tool pointers woven in. The target read "I did X, then Y" — a
+ * work log — and had to infer what it had been asked. Worse, the user's actual
+ * instruction was not present at all, so a directive like "only change the CSS,
+ * never touch the JSX" left no trace and was violated on the next edit.
+ *
+ * The replay keeps the two roles distinct, because that distinction is what
+ * carries intent:
+ *
+ *   [Turn 4]  ← the turn number is the anchor for graft_read_result
+ *   【用户】…verbatim…
+ *   【我】…assistant text, with tool pointers inline…
+ *
+ * Tool results stay as pointers rather than bodies. That is deliberate: the
+ * pointer names a seq, and re-reading a full result is one tool call away,
+ * while carrying every body would spend the budget that the verbatim user text
+ * needs.
+ */
+/**
+ * Test-only entry point for the goal extractor.
+ *
+ * `extractGoal` stays module-private because it is an implementation detail of
+ * `buildTape`; veiling it behind a named export keeps the unit test honest
+ * (it exercises the real function, not a copy) without widening the plugin's
+ * public surface for production callers.
+ */
+export function extractGoalForTest(events: readonly SessionEventLike[]): GoalResult {
+  return extractGoal(events)
+}
+
+/**
+ * v7.0 (adopted from dsh-rollover-snapshot): render one turn with a reachable seq.
+ *
+ * rollover-snapshot renders its verbatim block as
+ * `- User (seq 118): ...` / `- Assistant (seq 121): ...` — every quoted line
+ * names the seq that can be handed straight to `history`. The graft tape
+ * previously printed only `[Turn 12]`, which tells the reader WHERE in the
+ * conversation it is but not HOW to read the original.
+ *
+ * The distinction matters: a reader who wants the full tool output behind a
+ * replay line has no way to ask for it, so it either guesses or re-runs the
+ * work. Naming the seq turns every replay line into a retrieval handle, at the
+ * cost of about ten characters.
+ *
+ * `neutralizeStructure` guards the quoted text: a user message containing
+ * "## Handoff" or "```" must not become a section of our own layout.
+ */
+function renderReplayTurn(
+  turn: number,
+  userTexts: readonly string[],
+  assistantText: string,
+  userSeq?: number,
+  assistantSeq?: number,
+): string {
+  const lines: string[] = [`[Turn ${turn}]`]
+  for (const userText of userTexts) {
+    const trimmed = userText.trim()
+    if (trimmed.length === 0) continue
+    const at = userSeq === undefined ? '' : ` (seq ${userSeq})`
+    lines.push(`【用户${at}】${neutralizeStructure(trimmed)}`)
+  }
+  const body = assistantText.trim()
+  if (body.length > 0) {
+    const at = assistantSeq === undefined ? '' : ` (seq ${assistantSeq})`
+    lines.push(`【我${at}】${neutralizeStructure(body)}`)
+  }
+  return lines.join('\n')
+}
+
+/**
+ * Phase 2: extract closed turns up to the boundary.
+ *
+ * assistant/chunk, turn/*, step/*, assistant/attempt are not tape material.
+ * assistant/message contributes text. tool/call + tool/result become pointer
+ * text embedded in the adjacent assistant body; tool/result is never emitted
+ * as its own event later.
+ */
+export function buildTape(
+  events: readonly SessionEventLike[],
+  boundary: GraftBoundary,
+  config: GraftConfig,
+  sourceSessionId?: string,
+  openTodos: readonly string[] = [],
+  availableTools?: ReadonlySet<string>,
+): GraftTape {
+  const sliced = events.filter((event) => Number(event.seq) <= boundary.boundarySeq)
+  const calls = new Map<string, CallRecord>()
+  const turns = new Map<number, TurnDraft>()
+  let currentTurn: number | undefined
+  /** v7.0 P5: how many of our own replays were seen and refused (reported, not silent). */
+  let replayedMessagesSkipped = 0
+
+  const ensureTurn = (turn: number): TurnDraft => {
+    let draft = turns.get(turn)
+    if (draft === undefined) {
+      draft = { turn, assistant: [], user: [] }
+      turns.set(turn, draft)
+    }
+    return draft
+  }
+
+  for (const event of sliced) {
+    if (event.type === 'turn/start') {
+      currentTurn = asSafeInteger(event.data?.turn, 'turn/start.turn')
+      ensureTurn(currentTurn)
+      continue
+    }
+    if (event.type === 'user/message') {
+      // v6.3: attachments must not vanish. A user message that carried an image
+      // or file becomes a natural-language pointer on the current turn.
+      const pointers = extractAttachmentPointers(event.data?.message)
+      if (pointers.length > 0) {
+        const turnValue =
+          typeof event.data?.turn === 'number' && Number.isSafeInteger(event.data.turn)
+            ? event.data.turn
+            : currentTurn
+        if (typeof turnValue === 'number') {
+          const draft = ensureTurn(turnValue)
+          let target = draft.assistant[draft.assistant.length - 1]
+          if (target === undefined) {
+            target = { seq: Number(event.seq), text: '', callIds: [], pointers: [], toolPointers: [] }
+            draft.assistant.push(target)
+          }
+          for (const pointer of pointers) {
+            if (!target.pointers.includes(pointer)) target.pointers.push(pointer)
+          }
+        }
+      }
+      // v7.0 A1/A2: keep the user's own words.
+      //
+      // v6.x dropped this branch entirely (`continue` after attachments), so a
+      // target inherited the assistant's narration but never the instruction it
+      // was answering. Measured on session-legacy-fixture: 42 substantive user
+      // messages in, 1 recoverable from the tape. The model was reading a work
+      // log of a conversation it could not see.
+      //
+      // Only genuine user turns are replayed. Two shapes are excluded because
+      // they are host plumbing, not intent: `runtime-context` snapshots (cwd,
+      // sandbox policy, time) and the compaction checkpoint, whose replacement
+      // message is a summary rather than something the user said.
+      // v7.0 P5: a replay is never evidence of what the user said.
+      //
+      // The check must come FIRST, before the sourceKind test below, because a
+      // replay is a `plugin:graft-replay` message and would otherwise be
+      // rejected as "host plumbing" — which is right by accident, not by
+      // intent. Stating it separately keeps the rule legible: it is not that we
+      // ignore plugin messages in general, it is that OUR OWN recordings are
+      // not the conversation.
+      if (isGraftAuthored(event.data?.source)) {
+        replayedMessagesSkipped += 1
+        continue
+      }
+      const source = event.data?.source
+      const sourceKind = typeof source?.kind === 'string' ? source.kind : 'user'
+      const hostAuthored =
+        sourceKind !== 'user' || (typeof source?.kind === 'string' && source.kind === 'compact-checkpoint')
+      if (!hostAuthored) {
+        const userText = normalizeText(textOfMessage(event.data) ?? '').trim()
+        if (userText.length > 0) {
+          const turnValue =
+            typeof event.data?.turn === 'number' && Number.isSafeInteger(event.data.turn)
+              ? event.data.turn
+              : currentTurn
+          if (typeof turnValue === 'number') {
+            ensureTurn(turnValue).user.push({ seq: Number(event.seq), text: userText })
+          }
+        }
+      }
+      continue
+    }
+    if (event.type === 'assistant/message') {
+      const turnValue = event.data?.turn ?? currentTurn
+      if (typeof turnValue !== 'number' || !Number.isSafeInteger(turnValue)) continue
+      const draft = ensureTurn(turnValue)
+      const message = event.data?.message
+      const text = textOfMessage(message)
+      const callIds: string[] = []
+      const content = Array.isArray(message?.content) ? message.content : []
+      for (const block of content) {
+        if (!isRecord(block) || block.type !== 'tool-call') continue
+        if (typeof block.id !== 'string' || block.id.length === 0) continue
+        callIds.push(block.id)
+        const existing = calls.get(block.id)
+        calls.set(block.id, {
+          callId: block.id,
+          name: typeof block.name === 'string' && block.name.length > 0 ? block.name : existing?.name ?? 'unknown',
+          turn: turnValue,
+          step: typeof event.data?.step === 'number' ? event.data.step : existing?.step ?? 0,
+          callSeq: existing?.callSeq ?? Number(event.seq),
+          ...(existing?.resultSeq === undefined ? {} : { resultSeq: existing.resultSeq }),
+        })
+      }
+      draft.assistant.push({
+        seq: Number(event.seq),
+        text,
+        callIds,
+        pointers: [],
+        toolPointers: [],
+      })
+      continue
+    }
+    if (event.type === 'tool/call') {
+      const callId = typeof event.data?.callId === 'string' ? event.data.callId : undefined
+      if (callId === undefined || callId.length === 0) continue
+      const existing = calls.get(callId)
+      calls.set(callId, {
+        callId,
+        name: typeof event.data?.name === 'string' && event.data.name.length > 0 ? event.data.name : existing?.name ?? 'unknown',
+        turn: typeof event.data?.turn === 'number' ? event.data.turn : existing?.turn ?? currentTurn ?? 0,
+        step: typeof event.data?.step === 'number' ? event.data.step : existing?.step ?? 0,
+        callSeq: existing?.callSeq ?? Number(event.seq),
+        ...(existing?.resultSeq === undefined ? {} : { resultSeq: existing.resultSeq }),
+      })
+      continue
+    }
+    if (event.type === 'tool/result') {
+      const message = event.data?.message
+      const callId = message?.toolCallId ?? message?.source?.callId
+      if (typeof callId !== 'string' || callId.length === 0) continue
+      const existing = calls.get(callId)
+      const resultText = textOfMessage(message)
+      const isError =
+        message?.isError === true ||
+        event.data?.error !== undefined ||
+        /^\s*(error|dsh:\s*error)\b/iu.test(resultText)
+      const exitMatch = /exit\s*(?:code)?\s*[:=]?\s*(\d{1,3})\b/iu.exec(resultText)
+      calls.set(callId, {
+        callId,
+        name: existing?.name ?? 'unknown',
+        turn: typeof event.data?.turn === 'number' ? event.data.turn : existing?.turn ?? currentTurn ?? 0,
+        step: typeof event.data?.step === 'number' ? event.data.step : existing?.step ?? 0,
+        callSeq: existing?.callSeq ?? Number(event.seq),
+        resultSeq: Number(event.seq),
+        ...(isError ? { isError: true } : {}),
+        ...(isError && exitMatch !== null ? { exitCode: Number(exitMatch[1]) } : {}),
+      })
+    }
+  }
+
+  // Embed pointers only where a real result exists; an unresolved call is not
+  // turned into an orphan tool/result and does not create a fake seq.
+  for (const call of calls.values()) {
+    if (call.resultSeq === undefined) continue
+    // v6.4 F3: a tool the target does not have must not be advertised as
+    // callable. The history is real, so the pointer survives in downgraded form.
+    const draft = turns.get(call.turn)
+    if (draft === undefined) continue
+    let target =
+      [...draft.assistant].reverse().find((assistant) => assistant.callIds.includes(call.callId)) ??
+      draft.assistant[draft.assistant.length - 1]
+    if (target === undefined) {
+      target = { seq: call.callSeq, text: '', callIds: [], pointers: [], toolPointers: [] }
+      draft.assistant.push(target)
+    }
+    // v7.4 P4-1: keep the pointer structured; the prose is rendered once per run.
+    if (!target.toolPointers.some((item) => item.seq === call.resultSeq)) {
+      target.toolPointers.push({
+        name: call.name,
+        seq: call.resultSeq,
+        ...(call.isError === true ? { isError: true } : {}),
+        ...(availableTools !== undefined && !availableTools.has(call.name) ? { unavailable: true } : {}),
+      })
+    }
+  }
+
+  const tapeTurns: GraftTapeTurn[] = []
+  let pointerCount = 0
+  const ordered = [...turns.values()].sort((left, right) => left.turn - right.turn)
+  for (const draft of ordered) {
+    const pieces: string[] = []
+    let assistantMessages = 0
+    let turnPointers = 0
+    const seqs: number[] = []
+    for (const user of draft.user) seqs.push(user.seq)
+    for (const assistant of draft.assistant) {
+      assistantMessages += 1
+      seqs.push(assistant.seq)
+      turnPointers += assistant.pointers.length + assistant.toolPointers.length
+      // Oversized inline code becomes a pointer; the full body stays in the
+      // source log and is recoverable through graft_read_result lineRange.
+      const pointerized = pointerizeCodeBlocks(assistant.text.trim(), assistant.seq, sourceSessionId)
+      turnPointers += pointerized.pointers.length
+      const body = pointerized.text
+      // v7.4 P4-1（方案 B）: tool pointers collapse into one line per contiguous
+      // run; attachment pointers stay as their own sentences.
+      const pointers = [renderPointerLines(assistant.toolPointers), ...assistant.pointers]
+        .filter((line) => line.length > 0)
+        .join('\n')
+      const piece = [body, pointers].filter(Boolean).join('\n\n')
+      if (piece.length > 0) pieces.push(piece)
+    }
+    const text = normalizeText(pieces.join('\n\n'))
+    const userTexts = draft.user.map((entry) => entry.text)
+    // v7.0 A1/A2: a turn with neither side is nothing to replay.
+    if (text.length === 0 && userTexts.length === 0) continue
+    pointerCount += turnPointers
+    tapeTurns.push({
+      turn: draft.turn,
+      text,
+      assistantMessages,
+      pointers: turnPointers,
+      firstSeq: seqs.length > 0 ? Math.min(...seqs) : 0,
+      lastSeq: seqs.length > 0 ? Math.max(...seqs) : 0,
+      userTexts,
+      assistantText: text,
+      replay: renderReplayTurn(
+        draft.turn,
+        userTexts,
+        text,
+        draft.user[0]?.seq,
+        draft.assistant[0]?.seq,
+      ),
+    })
+  }
+
+  const goal = extractGoal(sliced)
+  const lastTurnText = tapeTurns.length > 0 ? tapeTurns[tapeTurns.length - 1].text : ''
+  // v7.4b (硬约束 4): what the OPEN turn had already sent when the tape was cut.
+  //
+  // Only calls past the boundary count: earlier ones belong to closed turns and
+  // are already reflected in the todo snapshot's own state.
+  let lastOpenCall: { tool: string; seq: number } | undefined
+  for (const event of events) {
+    if (Number(event.seq) <= boundary.boundarySeq) continue
+    if (event.type !== 'tool/call') continue
+    const name = typeof event.data?.name === 'string' ? event.data.name : ''
+    if (name.length > 0) lastOpenCall = { tool: name, seq: Number(event.seq) }
+  }
+  const pendingBody = buildPendingState(
+    lastTurnText,
+    goal.goal,
+    sourceSessionId,
+    pointerCount,
+    openTodos,
+    // v7.0: the scene is read from the FULL log, not the sliced part.
+    //
+    // The last concrete step usually happens in the OPEN turn — the one the
+    // boundary deliberately excludes — so reading `sliced` reported "nothing
+    // happened recently" precisely when the most recent action was the one
+    // that mattered. The scene is a fact about the source session, not about
+    // what the tape chose to replay.
+    extractLastStepScene(events),
+    lastOpenCall,
+  )
+  // 硬约束 7: provenance for inherited constraints goes FIRST in the pending
+  // state, ahead of every other line a reader might act on.
+  const constraintAnchor = inheritedConstraintAnchor(events, sourceSessionId)
+  return {
+    boundary,
+    sourceTemplate: extractSourceTemplate(sliced),
+    turns: tapeTurns,
+    goal: goal.goal,
+    goalSource: goal.source,
+    phase: 'handoff',
+    pendingStateText: constraintAnchor === undefined ? pendingBody : `${constraintAnchor}\n\n${pendingBody}`,
+    pointerCount,
+    ...(replayedMessagesSkipped === 0 ? {} : { replayedMessagesSkipped }),
+  }
+}
+
+/**
+ * 硬约束 7（v7.4）：把"这套约束从哪一代来"钉在 pending state 的第一行。
+ *
+ * A graft's goal message carries the source's accumulated HARD CONSTRAINTS. The
+ * next generation copies that text again — with provenance stripped. After two
+ * or three hops the target cannot tell whether a rule was said by the human
+ * three generations ago or written by a plugin's own bootstrap, and the only
+ * sanctioned way to check (graft_read_result) needs a seq it was never given.
+ *
+ * Measured consequence, this repo: an inherited block has been re-copied through
+ * every generation, and the target has twice acted on a rule as though the
+ * current user had just stated it.
+ *
+ * So: when the source's OWN goal already contained an inherited HARD CONSTRAINTS
+ * section, say which generation wrote it and which seq holds the original.
+ */
+export function inheritedConstraintAnchor(
+  events: readonly SessionEventLike[],
+  sourceSessionId: string,
+): string | undefined {
+  // v7.4: only the GOAL counts as the origin.
+  //
+  // The plugin also re-asserts the same constraints in-band as a standing
+  // `user/message` on later steps (`plugin:graft-replay`, "[系统提示] 本次任务的
+  // 硬约束…"). Those are copies too, and picking the newest one pointed the anchor
+  // at a re-assertion (seq=1425) instead of the goal (seq=3) — a seq that holds
+  // the text but not the origin the reader is being sent to.
+  const GOAL_SHAPE = /(这个会话的任务|当前要做的事|【系统交接】)/u
+  const goals = events.filter((event) => {
+    if (event.type !== 'user/message' || !isGraftAuthored(event.data?.source)) return false
+    const text = textOfMessage(event.data)
+    return text.includes('HARD CONSTRAINTS') && GOAL_SHAPE.test(text)
+  })
+  // v7.4b (硬约束 7 + 8): a HUMAN goal can carry an explicitly labelled
+  // extraction too.
+  //
+  // The user pasted "HARD CONSTRAINTS（从源会话用户消息中抽取，逐条有效…）"
+  // after an audit. A human sent it, so it is `source.kind === 'user'` — but the
+  // text is still a copy of an earlier statement, not something this
+  // generation's user just said. Measured on `handoff-demo`: the anchor
+  // stayed absent because only graft-authored goals were scanned, so the target
+  // had eight rules with no pointer to their source.
+  //
+  // The gate is both facts, not one: a human author (硬约束 8 — never a system
+  // injection) AND the extraction marker itself (a human stating rules in their
+  // own words needs no anchor; pointing at their own sentence adds nothing).
+  const humanOrigins = events.filter((event) => {
+    if (event.type !== 'user/message' || !isHumanAuthored(event.data?.source)) return false
+    const text = textOfMessage(event.data)
+    return text.includes('HARD CONSTRAINTS')
+  })
+  if (goals.length === 0 && humanOrigins.length > 0) {
+    // v7.4b: point at the EARLIEST human statement, not the newest copy.
+    //
+    // The constraints are harvested from several user messages across the
+    // session (measured: seq 2282, 3474, 6592, 7420 on session-source-demo), then
+    // rendered into the target's goal as a numbered block. The reader needs the
+    // place where the rule was first written, so a re-assertion later on cannot
+    // masquerade as the origin.
+    const first = humanOrigins[0]
+    return (
+      `[高优锚点] 核心约束源自第 1 代会话（${sourceSessionId}），seq=${first.seq}，必要时请优先回读。` +
+      `\n下面这段 HARD CONSTRAINTS 是插件从用户原话抽取的副本，不是这一代用户刚刚说的；` +
+      `要确认原话，用 graft_read_result(sourceSessionId, ${first.seq})。`
+    )
+  }
+  if (goals.length === 0) return undefined
+  const goal = goals[goals.length - 1]
+  const generation = goals.length
+  return (
+    `[高优锚点] 核心约束源自第 ${generation} 代会话（${sourceSessionId}），seq=${goal.seq}，必要时请优先回读。` +
+    `\n当前是第 ${generation + 1} 代。下面这段 HARD CONSTRAINTS 是逐代复制来的文本，不是这一代用户刚刚说的；` +
+    `要确认原话，用 graft_read_result(sourceSessionId, ${goal.seq})。`
+  )
+}
+
+/**
+ * v6.3 module 3: adaptive slice depth.
+ *
+ * A debug session and a writing session need opposite things from a handoff.
+ * Debug work lives in the most recent actions — error text, failing commands,
+ * file diffs — so cutting too shallow loses the thread. Prose work accumulates
+ * meaning over the whole conversation, so keeping fewer verbatim turns leaves
+ * the target room to actually generate.
+ *
+ * Signals used, all cheap and local:
+ *   - tool-call density in the last few turns
+ *   - share of tool results that are errors
+ *   - share of assistant text that is code (fenced blocks)
+ */
+export interface AdaptiveDepthResult {
+  depth: number
+  mode: 'debug' | 'generation' | 'balanced'
+  reason: string
+}
+
+export function calculateAdaptiveDepth(
+  events: readonly SessionEventLike[],
+  settings: { adaptiveDepthMin: number; adaptiveDepthMax: number },
+): AdaptiveDepthResult {
+  const min = Math.max(1, settings.adaptiveDepthMin)
+  const max = Math.max(min, settings.adaptiveDepthMax)
+
+  // Count only the trailing window; old history should not decide today's shape.
+  const turnStarts: number[] = []
+  for (let index = 0; index < events.length; index += 1) {
+    if (events[index]?.type === 'turn/start') turnStarts.push(index)
+  }
+  const windowTurns = 6
+  const windowStart = turnStarts.length > windowTurns ? turnStarts[turnStarts.length - windowTurns] : 0
+  const window = events.slice(windowStart)
+
+  let toolCalls = 0
+  let toolResults = 0
+  let toolErrors = 0
+  let assistantChars = 0
+  let codeChars = 0
+
+  for (const event of window) {
+    if (event.type === 'tool/call') {
+      toolCalls += 1
+      continue
+    }
+    if (event.type === 'tool/result') {
+      toolResults += 1
+      const message = event.data?.message
+      const text = textOfMessage(message)
+      const isError =
+        message?.isError === true || event.data?.error !== undefined || /^\s*(error|dsh:\s*error)\b/iu.test(text)
+      if (isError) toolErrors += 1
+      continue
+    }
+    if (event.type === 'assistant/message') {
+      const text = textOfMessage(event.data?.message)
+      assistantChars += text.length
+      for (const block of text.matchAll(/```[\s\S]*?```/gu)) codeChars += block[0].length
+    }
+  }
+
+  const turns = Math.max(1, windowTurns)
+  const callsPerTurn = toolCalls / turns
+  const errorRatio = toolResults === 0 ? 0 : toolErrors / toolResults
+  const codeRatio = assistantChars === 0 ? 0 : codeChars / assistantChars
+
+  // Debug wins when the session is busy with tools and hitting failures.
+  const debugScore = callsPerTurn * 1.2 + errorRatio * 3 + codeRatio * 1.2
+  // Generation shows up as long assistant text with few tools and no failures.
+  const generationScore = (assistantChars / turns / 1200) * 1.0 + (1 - Math.min(1, callsPerTurn)) * 1.5 + (1 - errorRatio) * 0.5
+
+  let depth: number
+  let mode: AdaptiveDepthResult['mode']
+  let reason: string
+  if (debugScore >= generationScore && debugScore > 1.2) {
+    mode = 'debug'
+    // v7.2: debug sessions get ZERO replayed turns.
+    //
+    // The measurement that decided this: on a real 14-turn session, tier A
+    // (0 turns) and tier C (5 turns) carry the SAME 342 read-back handles — every
+    // pointer the target could want is in the index either way — while A is ~70%
+    // smaller in characters. The replayed turns were not adding retrieval; they
+    // were adding bulk.
+    //
+    // That matters most in exactly this shape: a debugging session's recent turns
+    // are stack traces and command output, the least compressible text there is.
+    // Replaying them spends the budget restating failures, while the ONE failure
+    // that matters is now inlined verbatim into the pending state, with its seq
+    // and (if long) a truncation mark.
+    //
+    // What the target keeps: goal, task status, workspace files, pending state
+    // with the failure text, the failure's own body, and the full read-back index.
+    depth = 0
+    reason =
+      `debug-shaped: ${callsPerTurn.toFixed(1)} tool calls/turn, ${(errorRatio * 100).toFixed(0)}% errors, ` +
+      `${(codeRatio * 100).toFixed(0)}% code — zero replay, failure text inlined, every pointer indexed`
+  } else if (generationScore > debugScore && callsPerTurn < 1) {
+    mode = 'generation'
+    depth = Math.max(min, Math.min(4, Math.round(min + 1)))
+    reason = `generation-shaped: ${callsPerTurn.toFixed(1)} tool calls/turn, ${(codeRatio * 100).toFixed(0)}% code, long prose`
+  } else {
+    mode = 'balanced'
+    depth = Math.max(min, Math.min(max, 5))
+    reason = `balanced: ${callsPerTurn.toFixed(1)} tool calls/turn, ${(errorRatio * 100).toFixed(0)}% errors`
+  }
+
+  return { depth, mode, reason }
+}
+
+/**
+ * v6.3 module 2: media and attachment pointers.
+ *
+ * DSH stores an uploaded image/file as a content block carrying a host path.
+ * The tape keeps text only, so without this the migrated model is blind to
+ * everything the user uploaded. Each such block becomes one natural-language
+ * sentence naming the path, which the target can then read with a normal file
+ * tool (or graft_read_result, if the pointer names a seq).
+ */
+const ATTACHMENT_KINDS = new Set(['image', 'file', 'attachment', 'document', 'audio', 'video'])
+
+function attachmentPointer(block: Record<string, any>): string | undefined {
+  const kind = String(block.type ?? '')
+  if (!ATTACHMENT_KINDS.has(kind)) return undefined
+  const path =
+    (typeof block.path === 'string' && block.path) ||
+    (typeof block.hostPath === 'string' && block.hostPath) ||
+    (typeof block.url === 'string' && block.url) ||
+    (isRecord(block.source) && typeof block.source.path === 'string' && block.source.path) ||
+    (isRecord(block.attachment) && typeof block.attachment.path === 'string' && block.attachment.path) ||
+    ''
+  const id =
+    (typeof block.id === 'string' && block.id) ||
+    (typeof block.ref === 'string' && block.ref) ||
+    (isRecord(block.attachment) && typeof block.attachment.id === 'string' && block.attachment.id) ||
+    ''
+  const label = kind === 'image' ? '图片' : kind === 'audio' ? '音频' : kind === 'video' ? '视频' : '文件'
+  const target = String(path || id)
+  if (target.length === 0) return `（回顾：用户在此处上传了一个${label}，但记录里没有留下可读取的路径）`
+  const name = typeof block.name === 'string' && block.name.length > 0 ? `（${block.name}）` : ''
+  return `（回顾：用户在此处上传了一个${label}${name}，保存路径为：${target}，必要时请直接读取该路径）`
+}
+
+/** Collect attachment pointers from one user message. */
+export function extractAttachmentPointers(message: unknown): string[] {
+  if (!isRecord(message)) return []
+  const content = Array.isArray(message.content) ? message.content : []
+  const out: string[] = []
+  for (const block of content) {
+    if (!isRecord(block)) continue
+    const pointer = attachmentPointer(block)
+    if (pointer !== undefined && !out.includes(pointer)) out.push(pointer)
+  }
+  return out
+}
+
+/** Build the bounded injection plan from a validated source log snapshot. */
+export function buildInjectionPlan(
+  log: SessionLogSnapshotLike,
+  config: GraftConfig,
+  constraintsOverride?: readonly string[],
+  constraintSource: 'llm' | 'regex-fallback' = 'regex-fallback',
+  /** v6.4 F3: tools the target actually has; undefined means "assume all". */
+  availableTools?: ReadonlySet<string>,
+  /** v7.0 B1: set false to omit the open-turn carryover (tests, legacy callers). */
+  options?: { includeOpenTurn?: boolean },
+): GraftPlan {
+  const settings = normalizeConfig(config)
+  const events = Array.isArray(log.events) ? log.events : []
+  const boundary = locateBoundary(events)
+  // v6.2: the model's own todo list is the authoritative next-action source.
+  const taskStateForPending = extractTaskState(events)
+  // v6.3: pick the retained-turn depth from the source's own shape.
+  const adaptive = settings.adaptiveDepth
+    ? calculateAdaptiveDepth(events, settings)
+    : { depth: settings.recentTurns, mode: 'balanced' as const, reason: 'adaptiveDepth=false' }
+
+  /**
+   * v7.4 (decision 2): the task-state tier, when the operator opted in.
+   *
+   * `calculateAdaptiveDepth` reads the SHAPE of recent turns (tool density, error
+   * ratio, code ratio) — a proxy for what kind of conversation this is. This reads
+   * something else: whether the work sits at a clean stopping point. They answer
+   * different questions, and the task state is the one that decides whether the
+   * last turn's *method* is worth replaying.
+   *
+   * Measured on this project (same source session, same instruction, same model):
+   *   A tier (0 turns): 42 steps, 19 file reads,  0 `plugin_manager` calls
+   *   B tier (1 turn) :  9 steps,  1 file read,   3 `plugin_manager` calls
+   * The replayed turn carried "I verified with plugin_manager", and that one fact
+   * removed almost all of the rediscovery.
+   *
+   * When `autoAdaptiveTier` is on it WINS over `adaptiveDepth`: it is explicit and
+   * task-derived, while the other is a shape-based guess.
+   */
+  const tierDecision = (() => {
+    if (settings.autoAdaptiveTier !== true) return undefined
+    const boundaryState = checkTaskBoundary(events, taskStateForPending.openTodos)
+    const tier: 'A' | 'B' = boundaryState.shouldDefer ? 'B' : 'A'
+    return {
+      tier,
+      depth: tier === 'B' ? 1 : 0,
+      reason: boundaryState.shouldDefer
+        ? `unfinished work (${boundaryState.reason}) → replay 1 turn for the method`
+        : `clean stopping point (${boundaryState.reason}) → replay nothing; the index holds every pointer`,
+    }
+  })()
+  const effectiveSettings =
+    tierDecision === undefined
+      ? { ...settings, recentTurns: adaptive.depth }
+      : { ...settings, recentTurns: tierDecision.depth }
+  const tape = buildTape(
+    events,
+    boundary,
+    effectiveSettings,
+    typeof log.session?.id === 'string' ? log.session.id : undefined,
+    taskStateForPending.openTodos,
+    availableTools,
+  )
+  const cwd = log.session?.cwd
+  if (typeof cwd !== 'string' || cwd.length === 0 || !isAbsolutePath(cwd)) {
+    throw graftError(
+      'MISSING_CWD',
+      `source session ${String(log.session?.id)} has no absolute cwd; cross-session tool pointers require an exact cwd`,
+    )
+  }
+
+  const warnings: string[] = []
+  const constraints = constraintsOverride !== undefined ? [...constraintsOverride] : extractConstraints(log.events)
+  const taskState = extractTaskState(log.events)
+  const recentCount = Math.min(effectiveSettings.recentTurns, tape.turns.length)
+  const recentSlice = tape.turns.slice(tape.turns.length - recentCount)
+  const olderSlice = tape.turns.slice(0, tape.turns.length - recentCount)
+
+  // v7.0 P1 x A3: decide which "recent" turns actually survive BEFORE the older
+  // index is computed.
+  //
+  // The two rules interact and the earlier ordering got it wrong. `older` was
+  // fixed at "everything before the recent window", and P1 later dropped
+  // individual recent turns that exceeded `maxTurnChars`. A dropped turn then
+  // belonged to neither list: it was announced in `[已省略 …]` but its pointers
+  // were still counted in the total and attributed to nothing. On the real
+  // fixture (Turn 1 = 10,959 chars, maxTurnChars 6000) that produced
+  // `older: 0` while 342 pointers existed — the report claimed there was
+  // nothing older to read back while the omission notice said there was.
+  //
+  // Fixing the order makes the accounts meet: a turn is either replayed
+  // verbatim, or it is old, and every old turn's pointers appear in the index.
+  const oversizedRecent = recentSlice.filter(
+    (turn) => settings.maxTurnChars > 0 && (turn.replay ?? turn.text).length > settings.maxTurnChars,
+  )
+  const recent = recentSlice.filter((turn) => !oversizedRecent.includes(turn))
+  const older = [...olderSlice, ...oversizedRecent]
+
+  // v7.0 A3: older turns become metadata, not prose.
+  //
+  // v6.x ran `summaryWithConstraints()` over each old turn's de-pointerized
+  // prose and kept up to `oldTurnSummaryChars` (600) per turn. On a 40-turn
+  // session that spent more than 20k characters of budget describing work the
+  // target can neither see nor verify — and every one of those characters was
+  // taken from the *recent* turns, which are the only ones it can act on.
+  //
+  // The old prose was also unreliably wrong: it was regex-squeezed assistant
+  // narration, so it read as confident summary while losing the user's ask.
+  //
+  // A compact index is strictly better: it states what happened, how much of it,
+  // and the seq range needed to read the real thing. Cheap, honest, and it keeps
+  // the freed budget for the verbatim recent window.
+  const olderToolNames = new Set<string>()
+  let olderPointerCount = 0
+  let olderUserMessageCount = 0
+  for (const turn of older) {
+    const pointers = pointerSentences(turn.text)
+    for (const pointer of pointers) {
+      olderPointerCount += 1
+      // Every pointer shape names the tool, but in a different place:
+      //   legacy      [tool name=read_file seq=9 …]
+      //   recollection 刚才我已经调用 read_file 完成了这一步…
+      //   downgraded  使用了当前环境不支持的工具 spawn_teammate；…
+      // The downgraded form (v6.4 F3) was missing here, so a slice whose tools
+      // had been downgraded reported "342 tool calls" while naming none of them.
+      const legacy = pointer.match(/^\[tool name=([^\s]+) seq=/u)
+      const compact = pointer.match(/^-\s*([A-Za-z0-9_.:-]+)\(seq=/u)
+      const humanized = pointer.match(/调用\s*([A-Za-z0-9_.-]+)\s*(?:时|完成|工具|报错)/u)
+      const downgraded = pointer.match(/不支持的工具\s+([A-Za-z0-9_.-]+)/u)
+      const name = compact?.[1] ?? legacy?.[1] ?? humanized?.[1] ?? downgraded?.[1]
+      if (name !== undefined) olderToolNames.add(name)
+    }
+    olderUserMessageCount += (turn.userTexts ?? []).length
+  }
+
+  const olderLines: string[] = []
+  if (older.length > 0) {
+    const first = older[0]
+    const last = older[older.length - 1]
+    const span = older.length === 1 ? `Turn ${first.turn}` : `Turn ${first.turn}-${last.turn}`
+    const toolPart = olderPointerCount > 0 ? `，${olderPointerCount} 次工具调用` : ''
+    const userPart = olderUserMessageCount > 0 ? `，${olderUserMessageCount} 条用户指令` : ''
+    olderLines.push(
+      `- [历史片段: ${span}，共 ${older.length} 轮${userPart}${toolPart}；` +
+        `原文按 seq=${first.firstSeq}-${last.lastSeq} 用 graft_read_result 回查]`,
+    )
+    if (olderToolNames.size > 0) {
+      olderLines.push(`  涉及工具: ${[...olderToolNames].sort().join(', ')}`)
+    }
+  }
+  const olderTruncated = false
+
+  const chunks: GraftInjectionChunk[] = []
+  // v7.0 B1: the open turn is placed first and kept verbatim — it is the most
+  // recent work, and a budget squeeze must not be the thing that hides it.
+  const openTurnCarryover =
+    options?.includeOpenTurn === false
+      ? undefined
+      : extractOpenTurnCarryover(events, boundary.boundarySeq, typeof log.session?.id === 'string' ? log.session.id : undefined)
+  if (openTurnCarryover !== undefined && (openTurnCarryover.pointers.length > 0 || openTurnCarryover.assistantText.length > 0)) {
+    const lines: string[] = []
+    if (openTurnCarryover.userTexts.length > 0) {
+      for (const userText of openTurnCarryover.userTexts) {
+        lines.push(`【用户】${neutralizeStructure(userText.trim())}`)
+      }
+    }
+    if (openTurnCarryover.assistantText.length > 0) {
+      lines.push(`【我】${neutralizeStructure(openTurnCarryover.assistantText.trim())}`)
+    }
+    if (openTurnCarryover.pointers.length > 0) {
+      lines.push(renderPointerLines(openTurnCarryover.pointers))
+    }
+    chunks.push({
+      kind: 'open-turn-carryover',
+      // v7.0 B4: no "交接瞬间" narration. The label states the turn and what is
+      // missing; a reader resuming work does not need to be told a boundary
+      // happened, only which turn this is and that unfinished work is absent.
+      //
+      // v7.4b: say when the block is ASSEMBLED from several steps.
+      //
+      // Measured on `handoff-demo`: the carryover read like one coherent
+      // message, but every paragraph was lifted verbatim from a different step
+      // (seq 14949/14956/14963/14968) with the English reasoning dropped. The
+      // target read it as "the last thing I said" and had to be corrected by
+      // reading the log. Naming the assembly is cheap and prevents that.
+      text:
+        `[Turn ${openTurnCarryover.turn} · 进行中]\n` +
+        `${carryoverAssemblyNote(openTurnCarryover)}\n${lines.join('\n')}`,
+      truncated: false,
+    })
+  }
+  if (olderLines.length > 0) {
+    chunks.push({
+      kind: 'old-summary',
+      text: `[历史片段索引]\n${olderLines.join('\n')}`,
+      truncated: olderTruncated,
+    })
+  }
+  if (taskState.todos.length > 0) {
+    // v7.4: state the snapshot's age instead of implying it is current.
+    //
+    // Measured on a real 44-turn session: the last `todo_write` sat at seq 9269
+    // while the slice boundary was 13413 — 4,144 events and eleven turns later.
+    // The target read that finished list as the live plan, re-verified completed
+    // work, and only understood the drift after the user pointed at it.
+    //
+    // The plugin cannot invent a fresher list. It CAN refuse to imply that an old
+    // one is current, and name the seq to read if the reader wants to check.
+    const age = taskState.todoAgeEvents ?? 0
+    const stale = age >= 500
+    const ageLine = stale
+      ? `（此列表快照于 seq=${taskState.todoSeq}` +
+        (taskState.todoAgeTurns === undefined ? '' : `，约 ${taskState.todoAgeTurns} 轮前`) +
+        `，此后又有 ${age} 个事件——可能已过期，按需用 graft_read_result 回读 seq=${taskState.todoSeq} 附近确认）`
+      : ''
+    chunks.push({
+      kind: 'task-status',
+      text: `[Task Status]${ageLine}\n${taskState.todos.join('\n')}`,
+      truncated: false,
+    })
+  }
+  if (taskState.subagentReports.length > 0) {
+    // v7.2: in a debug slice, subagent reports are the first thing to go.
+    //
+    // They are the least actionable block during continuous debugging: a
+    // delegated agent's summary describes work that already finished, while the
+    // target is trying to fix the thing that just broke. Keeping them spends
+    // budget that the pending state — which now inlines the actual failure text —
+    // needs more.
+    //
+    // A genuinely short report stays: if a subagent said one sentence, that
+    // sentence may be the whole answer, and dropping it would trade signal for a
+    // heuristic.
+    const reportsText = `[Subagent Reports]\n${taskState.subagentReports.join('\n')}`
+    const keepInDebug = reportsText.length <= 400
+    if (adaptive.mode !== 'debug' || keepInDebug) {
+      chunks.push({
+        kind: 'subagent-reports',
+        text: reportsText,
+        truncated: false,
+      })
+    } else {
+      warnings.push(
+        `subagent-reports dropped in debug mode (${reportsText.length} chars > 400); budget goes to the pending state`,
+      )
+    }
+  }
+  // v6.4 F4: tell the target where things live now, not just what happened.
+  const workspace = extractWorkspaceIndex(events, 20)
+  const workspaceFiles = workspace.files
+  const workspaceText = renderWorkspaceState(workspaceFiles, cwd, workspace.total)
+  if (workspaceText.length > 0) {
+    chunks.push({ kind: 'workspace-files', text: workspaceText, truncated: false })
+  }
+  // v7.0 P1-2: state plainly what did not come across.
+  //
+  // Placed high in importance (it is pushed before the replays) because it is a
+  // correction to the target's implicit assumption that it now sees everything.
+  // A target that believes it has the whole picture will wait for a subagent
+  // report or a job result that is going to a session nobody is reading.
+  const openWork = extractOpenBackgroundWork(events)
+  const openWorkText = renderOpenWorkNotice(openWork)
+  if (openWorkText.length > 0) {
+    chunks.push({
+      kind: 'open-work',
+      text: `[未随迁移带走的后台工作]\n${openWorkText}`,
+      truncated: false,
+    })
+  }
+  // v7.0 P1: a turn is kept whole or not at all.
+  //
+  // v6.x ran each recent turn through `truncateMiddle()` when it exceeded
+  // `maxTurnChars`. That produced a replay whose middle was gone: the user's
+  // instruction survived, the assistant's conclusion survived, and the actual
+  // work vanished between two ellipses — with no marker saying so. A model
+  // reading it cannot tell a short answer from a truncated one, which is the
+  // same false-certainty failure the budget rules exist to avoid.
+  //
+  // Dropping the OLDEST recent turn entirely is strictly better: what remains is
+  // verbatim, and the omission is declared at the top with the seq range needed
+  // to read it back. The reader learns "turns 3-5 happened, here is how to see
+  // them" instead of "here is a turn with a hole in it".
+  const droppedTurns: GraftTapeTurn[] = [...oversizedRecent]
+  for (const turn of oversizedRecent) {
+    warnings.push(
+      `turn ${turn.turn} dropped whole (${(turn.replay ?? turn.text).length} chars > maxTurnChars ${settings.maxTurnChars})`,
+    )
+  }
+  /** v7.0 P1: turns removed by the TOTAL budget pass, tracked by firstSeq. */
+  const droppedByBudgetSeq: number[] = []
+  for (const turn of recent) {
+    chunks.push({
+      kind: 'recent-turn',
+      text: turn.replay ?? turn.text,
+      turn: turn.turn,
+      truncated: false,
+    })
+  }
+  // The omission declaration is emitted after BOTH budget passes, so a turn
+  // removed for either reason is reported exactly once (see below).
+  // v7.0 P12: one read-back index at the end, instead of pointers scattered
+  // through the narration.
+  //
+  // Every replay line already names its own seq, and every tool pointer names
+  // one too. Scattered through the text, though, they are only discoverable by
+  // reading everything — a reader who wants "the failing test output" has to
+  // scan the whole replay to find which pointer it was.
+  //
+  // A single trailing block turns the question around: here is everything you
+  // can read back, grouped by kind, with the seq you need. The prose above stays
+  // prose; retrieval becomes a lookup instead of a hunt.
+  const readback = collectReadbackIndex(tape, events)
+  if (readback.length > 0) {
+    chunks.push({
+      kind: 'readback-index',
+      text: `[可回读索引] 需要原文时用 graft_read_result(sourceSessionId, seq)：\n${readback.join('\n')}`,
+      truncated: false,
+    })
+  }
+  // v7.0: the cross-generation anchor, appended to the index it belongs to.
+  //
+  // Deliberately part of this block, not a new one: it is a pointer, and a
+  // pointer belongs with the pointers. It is also placed AFTER the listing so a
+  // reader scanning the index sees it as its conclusion.
+  const sourceGeneration = graftGenerationOf(typeof log.session?.id === 'string' ? log.session.id : '')
+  const provenance =
+    typeof log.session?.id === 'string'
+      ? findConstraintProvenance(events, log.session.id, sourceGeneration)
+      : undefined
+  if (readback.length > 0) {
+    const index = chunks.find((chunk) => chunk.kind === 'readback-index')
+    if (index !== undefined) {
+      // v7.3: name the previous session in the chain, at the TOP of the index.
+      //
+      // The provenance line at the bottom says "the constraints came from
+      // generation N, seq=Y". That is enough to know a rule's ancestry, and not
+      // enough to FIND an old error: the target still needs to know which session
+      // id to pass to graft_search_history. By generation 3-4 the current
+      // sourceSessionId points at a tape that no longer contains the earliest
+      // failure, so a search against it returns nothing and looks like "it was
+      // never there".
+      //
+      // One line, constant size, and it names the exact id a search can target.
+      const parent = graftTargets.get(
+        typeof log.session?.id === 'string' ? log.session.id : '',
+      )
+      const chain: string[] = []
+      if (typeof log.session?.id === 'string') chain.push(`当前：${log.session.id}`)
+      if (parent !== undefined) {
+        chain.push(`上一代：${parent.sourceSessionId}`)
+      }
+      if (chain.length > 1) {
+        index.text =
+          `[历史链追溯] ${chain.join('　')}\n` +
+          '更早的报错或代码可能只存在于上一代会话；用 graft_search_history 时把 sourceSessionId 换成它再搜。\n' +
+          index.text
+      }
+      if (provenance !== undefined) {
+        index.text += `\n\n${renderConstraintProvenance(provenance)}`
+      }
+    }
+  }
+  chunks.push({
+    kind: 'pending-state',
+    text: tape.pendingStateText,
+    truncated: false,
+  })
+
+  if (settings.maxTotalChars > 0) {
+    // v7.0: budget by priority, not by equal shares — and never by cutting a
+    // turn in half.
+    //
+    // Two rules compose here:
+    //   1. Priority decides WHO gets dropped: an old-turn index is worth
+    //      sacrificing long before the most recent exchange.
+    //   2. P1 decides HOW: a `recent-turn` is atomic. It is either kept whole or
+    //      removed whole and counted in the omitted-turns declaration. Cutting
+    //      its middle is what produced replays with the work missing between two
+    //      ellipses and nothing saying so.
+    //
+    // Non-turn chunks (indexes, file lists, subagent reports) may still be
+    // middle-truncated: they are pointers and lists, where a shortened form is
+    // still an honest pointer, and their omission notice is the truncation mark.
+    const protectedKinds = new Set<GraftInjectionChunk['kind']>(['pending-state', 'open-turn-carryover'])
+    /**
+     * v7.0 P8: chunks that survive whole or not at all.
+     *
+     * `recent-turn` is atomic because a half-cut exchange reads as a complete
+     * one (P1). `task-status` is atomic for the same class of reason: a todo
+     * list truncated mid-way still *looks* like the todo list, and the reader
+     * has no way to know items are missing — so it concludes the remaining work
+     * is what it sees. Losing it whole is honest; losing half of it is not.
+     *
+     * Dropping it whole is safe because it is redundant with the protected
+     * pending state: `buildPendingState` already receives `openTodos`, so the
+     * unchecked items a resumed model must act on survive there. The
+     * `task-status` block carries the *full* checklist, which is nice to have
+     * and not worth a misleading partial.
+     */
+    const atomicKinds = new Set<GraftInjectionChunk['kind']>(['recent-turn', 'task-status'])
+    /**
+     * v7.0 P8: survival order, HIGHEST FIRST.
+     *
+     * This array is not a preference list; it is the order in which material is
+     * kept when the budget runs out, and every position is a claim about what a
+     * resumed model can reconstruct.
+     *
+     * The rule that fixes the order: **the breakpoint beats the state.**
+     *
+     * A `recent-turn` is the only chunk that cannot be rebuilt. It is the actual
+     * exchange — what the user asked, what the assistant answered — and once it
+     * is dropped the target has no way to know it existed except the seq range
+     * in the omission notice. A `task-status` block is a todo list: it is a
+     * *summary of state* that the source's own `todo_write` call still carries,
+     * and the model can re-read it (or simply re-derive it from the workspace).
+     * Dropping one costs a tool call; dropping the other costs the thread.
+     *
+     * So `task-status` sits BELOW `recent-turn` even though it is smaller and
+     * "feels" more organised. Smaller is not the same as more valuable: a cheap
+     * summary must not outlive the conversation it summarises.
+     *
+     * Measured cost of getting this backwards (before the fix, budget 700):
+     * `task-status` survived at 187 chars while `recent-turn` fell from 4 to 2.
+     * That is exactly inverted — the list of todos outlived the instructions
+     * that produced it.
+     */
+    const priority: GraftInjectionChunk['kind'][] = [
+      'readback-index',
+      'recent-turn',
+      'open-work',
+      'task-status',
+      'workspace-files',
+      'old-summary',
+      'subagent-reports',
+      'omitted-turns',
+    ]
+    const rank = (chunk: GraftInjectionChunk): number => {
+      if (protectedKinds.has(chunk.kind)) return -1
+      const index = priority.indexOf(chunk.kind)
+      // `recent-turn` is ranked by recency: the newest turn outranks an older one.
+      if (chunk.kind === 'recent-turn') {
+        const position = chunks.filter((candidate) => candidate.kind === 'recent-turn').indexOf(chunk)
+        return index * 1000 - position
+      }
+      return index * 1000
+    }
+    const ordered = [...chunks].sort((left, right) => rank(left) - rank(right))
+    let remaining = settings.maxTotalChars
+    // Protected chunks are never trimmed by this pass; pending-state already has
+    // its own limit below.
+    for (const chunk of ordered) {
+      if (protectedKinds.has(chunk.kind)) continue
+      if (remaining <= 0) {
+        if (atomicKinds.has(chunk.kind)) {
+          const turn = chunk.turn === undefined ? undefined : recent.find((entry) => entry.turn === chunk.turn)
+          if (turn !== undefined) droppedByBudgetSeq.push(turn.firstSeq)
+          chunk.text = ''
+          continue
+        }
+        chunk.text = ''
+        chunk.truncated = true
+        continue
+      }
+      if (chunk.text.length <= remaining) {
+        remaining -= chunk.text.length
+        continue
+      }
+      if (atomicKinds.has(chunk.kind)) {
+        // Whole or nothing. Zero-length text removes it from the filtered list.
+        const turn = chunk.turn === undefined ? undefined : recent.find((entry) => entry.turn === chunk.turn)
+        if (turn !== undefined) droppedByBudgetSeq.push(turn.firstSeq)
+        chunk.text = ''
+        continue
+      }
+      const result = truncateMiddle(chunk.text, remaining)
+      chunk.text = result.text
+      chunk.truncated = true
+      warnings.push(`${chunk.kind}${chunk.turn === undefined ? '' : ` turn ${chunk.turn}`} truncated by total budget`)
+      remaining = 0
+    }
+    const pending = chunks.find((chunk) => chunk.kind === 'pending-state')
+    if (pending !== undefined) {
+      const pendingLimit = Math.max(1, settings.maxTotalChars)
+      if (pending.text.length > pendingLimit) {
+        const result = truncateMiddle(pending.text, pendingLimit)
+        pending.text = result.text
+        pending.truncated = true
+        warnings.push('pending-state text truncated by total budget')
+      }
+    }
+  }
+
+  // v7.0 P1: whatever the two budget passes removed must be declared.
+  // The single-turn pass and the total-budget pass drop turns for different
+  // reasons, but the reader only needs one answer: which turns are missing and
+  // what seq range reads them back.
+  const omittedTurns = [
+    ...droppedTurns,
+    ...droppedByBudgetSeq
+      .map((seq) => recent.find((turn) => turn.firstSeq === seq))
+      .filter((turn): turn is GraftTapeTurn => turn !== undefined),
+  ]
+  const uniqueOmitted = [...new Map(omittedTurns.map((turn) => [turn.turn, turn])).values()].sort(
+    (left, right) => left.turn - right.turn,
+  )
+  const declarationIndex = chunks.findIndex((chunk) => chunk.kind === 'omitted-turns')
+  if (declarationIndex >= 0) chunks.splice(declarationIndex, 1)
+  if (uniqueOmitted.length > 0) {
+    const first = uniqueOmitted[0]
+    const last = uniqueOmitted[uniqueOmitted.length - 1]
+    const span = uniqueOmitted.length === 1 ? `Turn ${first.turn}` : `Turn ${first.turn}-${last.turn}`
+    const reason =
+      droppedTurns.length > 0 && droppedByBudgetSeq.length > 0
+        ? '单轮预算与总预算'
+        : droppedTurns.length > 0
+          ? '单轮预算'
+          : '总预算'
+    chunks.unshift({
+      kind: 'omitted-turns',
+      text:
+        `[已省略 ${span}：${uniqueOmitted.length} 轮因${reason}整段丢弃，未做截断；` +
+        `需要时用 graft_read_result 按 seq=${first.firstSeq}-${last.lastSeq} 回查]`,
+      truncated: false,
+    })
+  }
+
+  const filtered = chunks.filter((chunk) => chunk.text.length > 0)
+  return {
+    cwd,
+    boundary,
+    sourceTemplate: tape.sourceTemplate,
+    goal: tape.goal,
+    goalSource: tape.goalSource,
+    phase: tape.phase,
+    chunks: filtered,
+    // v7.0: two different questions, two different fields.
+    //
+    // `recentTurnCount` is the WINDOW depth the slice chose — the number of
+    // trailing turns it intended to replay. `recentInjectedCount` is how many of
+    // them actually survived the per-turn budget. Conflating them was how the
+    // report lost the distinction: it said "0 recent turns" for a slice whose
+    // window was 2 and whose two turns were each too large to keep.
+    recentTurnCount: recentCount,
+    recentInjectedCount: recent.length,
+    olderTurnCount: older.length,
+    adaptiveDepth: adaptive,
+    // v7.4 (decision 2): present only when autoAdaptiveTier made the choice, so a
+    // reader can tell "the tier was decided" from "the configured depth was used".
+    ...(tierDecision === undefined ? {} : { adaptiveTier: tierDecision }),
+    workspaceFiles,
+    pointerCount: tape.pointerCount,
+    olderPointerCount,
+    olderToolNames: [...olderToolNames],
+    constraints,
+    constraintSource,
+    taskStatus: taskState.todos,
+    ...(openTurnCarryover === undefined ? {} : { openTurnCarryover }),
+    subagentReports: taskState.subagentReports,
+    totalTapeChars: filtered.reduce((total, chunk) => total + chunk.text.length, 0),
+    warnings,
+  }
+}
+
+// ===========================================================================
+// Phase 3 — Skeleton and message injection
+// ===========================================================================
+
+/**
+ * v5.2 拟人化：目标写成自然语言，而不是给模型一段 JSON 去解析。
+ *
+ * 旧格式把 `{"kind":"persistent-capability-seed",...}` 放进 user/message，
+ * 轻量模型会对着括号发呆、或把字段名当指令复读。改成一段陈述 + 列表。
+ */
+function goalMessage(
+  cwd: string,
+  goal: string,
+  phase: string,
+  messageId: string,
+  sourceSessionId: string,
+  hasWorkspaceFiles = false,
+  constraints: readonly string[] = [],
+): Record<string, any> {
+  // v7.0 B4: read as a continuation, not as a handoff notice.
+  //
+  // v6.x opened with "【系统交接】上一段对话因为上下文满载，已经由系统安全接管
+  // 到这里。" and closed with "请顺接前文的思路直接继续，不必从头开始，也不必
+  // 复述这段说明。" Between them sat three more lines explaining the mechanism
+  // (where you are, that records still exist, that a file block is below).
+  //
+  // Every one of those lines describes the HANDOFF rather than the WORK. The
+  // target that reads them starts by orienting itself to a system event; the
+  // target that reads only what the user last said and what is still open starts
+  // by answering it. The acceptance criterion is "looks like a continuous
+  // conversation, not an outline" — a preamble about being relocated is the
+  // single largest source of outline-ness in the whole injection.
+  //
+  // What replaces it: the workspace as a fact (one line, because the model must
+  // resolve relative paths), the current goal as the user's own words, and the
+  // constraints. Nothing addresses the reader about the migration itself.
+  // v7.3.1: do not call this "当前要做的事" (the thing to do NOW).
+  //
+  // Measured on the live desktop. A source session had asked the agent to look up
+  // jet hub, then spent five turns finishing that work (4 of 5 todos completed).
+  // The goal extractor correctly captured the ORIGINAL request, but the label
+  // promised it was current:
+  //
+  //   当前要做的事：帮我看看jet hub这个插件最新版本，以及找个…插件市场
+  //   [Task Status]  … [x] 升级… [x] 安装… [x] 配置… [x] 启用… [ ] 重启后验证
+  //   [pending]      我接下来需要立刻执行：重启 DSH 后验证 Discover 页…
+  //
+  // The target read a task that was already DONE as its assignment and re-ran the
+  // research; the user's report was "the new session behaves like re-learning the
+  // content". The information to do otherwise was present — the label contradicted
+  // it.
+  //
+  // "这个会话的任务" states the session's task without asserting it is next. The
+  // next action is the pending state's job, and it always speaks in the present:
+  // "我接下来需要立刻执行：<open todo>". One owner per claim.
+  const lines = [
+    `工作目录 ${cwd}。`,
+    '',
+    `这个会话的任务：${goal}`,
+  ]
+  // v7.0 C1: constraints live HERE, not in the system head.
+  //
+  // The host replaces surface node 0 with its own rendered prompt on the
+  // target's first live step (SystemPromptProjection.project). A constraint
+  // block appended to the system message therefore survived only until the
+  // model's first request — the defence existed in the log and was dead by the
+  // time anything read it. A `user/message` is never rewritten that way.
+  //
+  // The enumeration is deliberately mechanical: the failure mode this guards
+  // against is a model that summarises "the main constraints" and silently
+  // drops the one it was about to violate.
+  if (constraints.length > 0) {
+    lines.push(
+      '',
+      'HARD CONSTRAINTS（从源会话用户消息中抽取，逐条有效，不可协商）:',
+      ...constraints.map((constraint, index) => `${index + 1}. [ ] ${constraint}`),
+      '',
+      'If asked about constraints or progress, you MUST enumerate every single item above without skipping or summarizing.',
+    )
+  }
+  if (sourceSessionId.length > 0) {
+    // Stated as a capability, not as an apology for having lost context:
+    // earlier turns are indexed above by seq, and this is where the full text
+    // lives. One line, no reassurance.
+    lines.push('', `更早的原文在源会话 ${sourceSessionId}，按上面索引里的 seq 用 graft_read_result 取。`)
+  }
+  if (hasWorkspaceFiles) {
+    lines.push('', '写过/改过的文件见下方 [Workspace Files]，不需要重新列目录。')
+  }
+  return {
+    id: messageId,
+    role: 'user',
+    content: [{ type: 'text', text: lines.join('\n') }],
+    // v7.0 P5: marked, so a later graft never reads this back as a real user
+    // turn. Without it, generation 2 replays generation 1's copy of the
+    // conversation, and each hop moves further from what was actually said.
+    source: { kind: GRAFT_REPLAY_SOURCE_KIND },
+  }
+}
+
+/**
+ * v5.2 标题清洗：提取到的"目标"有时是整段 JSON 或带方括号的原始载荷。
+ * 那种标题在侧边栏里不可读，直接回退成时间戳形式。
+ */
+/**
+ * v6.1: the sidebar title must distinguish two migrations of the same source.
+ *
+ * Two targets created from one session produced byte-identical titles, so the
+ * second looked like it had vanished from the sidebar — it was there, hiding
+ * under the first one's name. A per-target suffix makes them distinguishable.
+ */
+function sessionTitleForGoal(goal: string, targetSessionId?: string): string {
+  // v7.0: callers reach this with a possibly-absent goal (a report field that
+  // was not populated, a legacy caller). Coercing here keeps the sidebar title
+  // safe without every call site guarding the same thing.
+  const normalized = String(goal ?? '').replace(/\s+/gu, ' ').trim()
+  const stamp = new Date().toISOString().slice(5, 16).replace('T', ' ')
+  // v6.0：宁可回退到时间戳，也绝不让半个 JSON 括号出现在侧边栏。
+  const looksStructured =
+    normalized.length === 0 ||
+    /[{}[\]"]/u.test(normalized) ||
+    /"kind"\s*:/u.test(normalized) ||
+    /kind\s*:\s*persistent/u.test(normalized) ||
+    /persistent-capability-seed/u.test(normalized) ||
+    /^[\[{]/.test(normalized)
+  // The id tail is what makes two targets of one source distinct.
+  const suffix =
+    typeof targetSessionId === 'string' && targetSessionId.length > 6
+      ? ` · ${targetSessionId.slice(-6).replace(/^[-_]+/u, '')}`
+      : ''
+  if (looksStructured) return `[接续] ${stamp}${suffix}`
+  const head = Array.from(normalized).slice(0, 18).join('')
+  return `[接续] ${head || '会话交接'}${suffix}`
+}
+
+/**
+ * v7.0 C1: the system head must carry NOTHING that has to survive.
+ *
+ * Verified against DSH source (`dsh-agent-loop`, `SystemPromptProjection`):
+ *
+ *   project(rendered, { inHistory, startsSeries }) {
+ *     const head = nodes[0]
+ *     if (!inHistory || startsSeries || rendered.length === 0) {
+ *       const updates = nodes.slice(1).filter(n => n.text !== '').map(n => replace(n.seq, ''))
+ *       if (head.text !== rendered) updates.push(replace(head.seq, rendered))   // <-- node 0 REPLACED
+ *       return updates
+ *     }
+ *   }
+ *
+ * So on the target's first live step the host overwrites surface node 0 with its
+ * own rendered system prompt, and clears any extra system nodes. Anything grafted
+ * into the system head — including the HARD CONSTRAINTS block this file used to
+ * append there — is destroyed before the model ever reads it.
+ *
+ * The schema forces the choice: `system/message` must source `kind: 'system-prompt'`,
+ * and `deriveMessages()` emits it as `role: 'system'`, so it can never ride along
+ * as a durable user turn. The only structure that survives is node 0 holding a
+ * throwaway marker, with every payload moved to non-system surfaces.
+ *
+ * Constraints now travel in the goal `user/message` (see goalMessage), which the
+ * host does not rewrite.
+ */
+function systemMessage(
+  text: string,
+  skeletonTurn: number,
+  skeletonStep: number,
+  messageId: string,
+): Record<string, any> {
+  return {
+    turn: skeletonTurn,
+    step: skeletonStep,
+    message: {
+      id: messageId,
+      role: 'system',
+      content: [{ type: 'text', text }],
+      source: { kind: 'system-prompt' },
+    },
+  }
+}
+
+function assistantMessage(
+  text: string,
+  source: GraftSource,
+  skeletonTurn: number,
+  skeletonStep: number,
+  messageId: string,
+): Record<string, any> {
+  return {
+    turn: skeletonTurn,
+    step: skeletonStep,
+    message: {
+      id: messageId,
+      role: 'assistant',
+      content: [{ type: 'text', text }],
+      source,
+    },
+    // v2.1: synthetic or rewritten text has no model stream. Empty is the
+    // value both the seed and restore gates accept; copying a source stream
+    // would make content and stream disagree.
+    stream: [],
+  }
+}
+
+function assertLogOnly(event: SessionEventLike, type: string): void {
+  if (event.surfaceOp !== undefined) {
+    throw graftError('RED_LINE_SKELETON_SURFACE', `${type} must not carry surfaceOp`)
+  }
+  if (event.sourceEventSeqs !== undefined) {
+    throw graftError('RED_LINE_SKELETON_SURFACE', `${type} must not carry sourceEventSeqs`)
+  }
+}
+
+function assertMessageSurface(event: SessionEventLike, type: string): void {
+  if (event.surfaceOp !== 'append') {
+    throw graftError('RED_LINE_MESSAGE_SURFACE', `${type} must carry { surfaceOp: 'append' }`)
+  }
+  if (type === 'assistant/message' && event.sourceEventSeqs !== undefined) {
+    throw graftError('RED_LINE_ASSISTANT_SOURCE_EVENTS', 'assistant/message must not carry sourceEventSeqs')
+  }
+}
+
+function appendLogOnly(session: PreparedSessionLike, type: string, data: Record<string, any>): SessionEventLike {
+  const event = session.append(type, data)
+  assertLogOnly(event, type)
+  return event
+}
+
+function appendUserMessage(session: PreparedSessionLike, data: Record<string, any>): SessionEventLike {
+  const event = session.append('user/message', data, { surfaceOp: 'append' })
+  assertMessageSurface(event, 'user/message')
+  return event
+}
+
+function appendSystemMessage(session: PreparedSessionLike, data: Record<string, any>): SessionEventLike {
+  const event = session.append('system/message', data, { surfaceOp: 'append' })
+  assertMessageSurface(event, 'system/message')
+  if (event.sourceEventSeqs !== undefined) {
+    throw graftError('RED_LINE_SYSTEM_SOURCE_EVENTS', 'system/message must not carry sourceEventSeqs')
+  }
+  if (event.data?.message?.role !== 'system') {
+    throw graftError('RED_LINE_SYSTEM_ROLE', 'system/message data.message.role must be system')
+  }
+  if (event.data?.message?.source?.kind !== 'system-prompt') {
+    throw graftError('RED_LINE_SYSTEM_SOURCE', 'system/message source.kind must be system-prompt')
+  }
+  if (!Array.isArray(event.data?.message?.content) || event.data.message.content.length === 0) {
+    throw graftError('RED_LINE_SYSTEM_CONTENT', 'system/message must have non-empty content')
+  }
+  return event
+}
+
+function appendAssistantMessage(session: PreparedSessionLike, data: Record<string, any>): SessionEventLike {
+  const event = session.append('assistant/message', data, { surfaceOp: 'append' })
+  assertMessageSurface(event, 'assistant/message')
+  if (!Array.isArray(event.data?.stream) || event.data.stream.length !== 0) {
+    throw graftError('RED_LINE_ASSISTANT_STREAM', 'assistant/message stream must be []')
+  }
+  if (event.data?.message?.role !== 'assistant') {
+    throw graftError('RED_LINE_ASSISTANT_ROLE', 'assistant/message data.message.role must be assistant')
+  }
+  const sourceKind = event.data?.message?.source?.kind
+  if (typeof sourceKind !== 'string' || sourceKind.length === 0 || sourceKind === 'plugin') {
+    throw graftError('RED_LINE_SOURCE_KIND', 'assistant/message source.kind must be producer-owned, not plugin')
+  }
+  return event
+}
+
+function sourceForReport(source: GraftSource): GraftSource {
+  const copy: GraftSource = { kind: source.kind }
+  if (source.provider !== undefined) copy.provider = source.provider
+  if (source.model !== undefined) copy.model = source.model
+  return copy
+}
+
+/**
+ * A handoff session is a new top-level session, never a subagent/fork child.
+ * The real v4 header names the parent `parentSession`; older drafts used
+ * `parentSessionId`, and `lineage` is checked defensively for compatibility.
+ */
+function assertTopLevelHeader(header: SessionHeaderLike): void {
+  const candidate = header as any
+  const hasLineage =
+    candidate.parentSession !== undefined ||
+    candidate.parentSessionId !== undefined ||
+    candidate.lineage !== undefined ||
+    candidate.origin === 'subagent' ||
+    (typeof candidate.delegationDepth === 'number' && candidate.delegationDepth !== 0)
+  if (hasLineage) {
+    throw graftError('LINEAGE_NOT_EMPTY', 'GRAFT_ERROR: lineage must be empty')
+  }
+  if (candidate.isSeeded !== false) {
+    throw graftError('SEEDED_HEADER', 'GRAFT_ERROR: migrated header must be unseeded')
+  }
+}
+
+/** Build the full event list in memory and enforce every red line before any I/O. */
+function injectionSource(plan: GraftPlan, settings: Required<GraftConfig>): GraftSource {
+  if (plan.sourceTemplate.kind === 'model') return plan.sourceTemplate
+  // DSH's runtime validator requires injected assistant messages to carry a
+  // model source. Sources that contain no assistant turn (for example a
+  // single-turn RULER haystack) fall back to the configured extractor model.
+  return {
+    kind: 'model',
+    provider: settings.constraintProvider || 'deepseek-account',
+    model: settings.constraintModel || 'deepseek-flash',
+  }
+}
+
+/**
+ * v5.2: the runtime knobs DSH itself records as durable intent.
+ *
+ * These are NOT `request/header`. A `request/header` is one model call's epoch
+ * header: copying it into another session forges a request that never happened
+ * and corrupts restore. The events below are what DSH appends when the user
+ * changes a knob, and every one of them is folded by a registered projection:
+ *
+ *   model/selection    -> api-session-controller `modelSelection`
+ *   permission/preset  -> permission-presets `permissions`
+ *   sandbox/mode       -> permission-presets `permissions`
+ *   approval/policy    -> permission-presets `permissions`
+ *
+ * Writing them at seed time makes the target resume with the source's chosen
+ * model and permission posture, using the same mechanism the UI uses.
+ */
+export interface RuntimeIntent {
+  model?: { provider: string; model: string; reasoningEffort?: string }
+  permission?: { preset: string }
+  sandbox?: { mode: string }
+  approval?: { policy: string }
+}
+
+export function extractRuntimeIntent(events: readonly SessionEventLike[]): RuntimeIntent {
+  const intent: RuntimeIntent = {}
+  for (const event of events) {
+    if (event.type === 'model/selection') {
+      const provider = event.data?.provider
+      const model = event.data?.model
+      if (typeof provider === 'string' && provider.length > 0 && typeof model === 'string' && model.length > 0) {
+        intent.model = {
+          provider,
+          model,
+          ...(typeof event.data?.reasoningEffort === 'string' && event.data.reasoningEffort.length > 0
+            ? { reasoningEffort: event.data.reasoningEffort }
+            : {}),
+        }
+      }
+      continue
+    }
+    if (event.type === 'permission/preset') {
+      if (typeof event.data?.preset === 'string' && event.data.preset.length > 0) intent.permission = { preset: event.data.preset }
+      continue
+    }
+    if (event.type === 'sandbox/mode') {
+      if (typeof event.data?.mode === 'string' && event.data.mode.length > 0) intent.sandbox = { mode: event.data.mode }
+      continue
+    }
+    if (event.type === 'approval/policy') {
+      if (typeof event.data?.policy === 'string' && event.data.policy.length > 0) intent.approval = { policy: event.data.policy }
+    }
+  }
+  return intent
+}
+
+function buildInjectionEvents(
+  plan: GraftPlan,
+  settings: Required<GraftConfig>,
+  newSessionId: string,
+  sourceSessionId: string,
+  runtimeIntent?: RuntimeIntent,
+  /** v7.0 P1-1: the SOURCE log, scanned for an active `goal/change` to carry. */
+  goalSourceEvents?: readonly SessionEventLike[],
+): Array<{
+  type: string
+  data: Record<string, any>
+  surface: boolean
+}> {
+  const turn = settings.skeletonTurn
+  const step = settings.skeletonStep
+  if (!Number.isSafeInteger(turn) || turn < 0) throw graftError('INVALID_CONFIG', 'skeletonTurn must be a non-negative safe integer')
+  if (!Number.isSafeInteger(step) || step < 0) throw graftError('INVALID_CONFIG', 'skeletonStep must be a non-negative safe integer')
+  if (plan.chunks.length === 0) throw graftError('EMPTY_PLAN', 'injection plan contains no assistant chunks')
+
+  const events: Array<{ type: string; data: Record<string, any>; surface: boolean }> = []
+  events.push({ type: 'turn/start', data: { turn }, surface: false })
+  events.push({ type: 'step/start', data: { turn, step }, surface: false })
+  // v4 restore requires the first surface node to be a protected system head.
+  // Appending the resumed agent's system prompt after user/assistant nodes is
+  // rejected with "system/message requires a protected first surface head".
+  //
+  // v7.0 C1: this node is a throwaway. The host replaces it on the target's
+  // first live step, so no constraint or instruction is placed here.
+  events.push({
+    type: 'system/message',
+    data: systemMessage(MIGRATION_SYSTEM_PROMPT, turn, step, `graft-${newSessionId}-system`),
+    surface: true,
+  })
+  events.push({
+    type: 'user/message',
+    data: goalMessage(
+      plan.cwd,
+      plan.goal,
+      plan.phase,
+      `graft-${newSessionId}-goal`,
+      sourceSessionId,
+      plan.workspaceFiles.length > 0,
+      plan.constraints,
+    ),
+    surface: true,
+  })
+  // A durable, human-readable title for the sidebar. Log-only: it is not a
+  // surface event, so it cannot affect the protected system head.
+  events.push({
+    type: 'session/title',
+    data: {
+      title: sessionTitleForGoal(plan.goal, newSessionId),
+      // v7.3 CRITICAL: an EMPTY `messageSeqs` requires `source.kind: 'user'`.
+      //
+      // Verified against the host's own v3→v4 validator
+      // (`dsh-session-format-v3-to-v4`, `titleSources`):
+      //
+      //   if (event.type === "session/title"
+      //       && references.length === 0 !== (data.source.kind === "user"))
+      //     throw new SessionFormatError(
+      //       "session/title messageSeqs must be empty exactly for a user title")
+      //
+      //   for (const value of references) {
+      //     const source = events[seq]
+      //     if (seen.has(seq) || source?.type !== "user/message"
+      //         || source.data.source.kind !== "user")
+      //       throw new SessionFormatError(
+      //         "… messageSeqs must cite distinct earlier human user/message events")
+      //   }
+      //
+      // A graft target contains NO human user message — its only user/message is
+      // the plugin-authored goal (`plugin:graft-replay`). So there is no seq this
+      // title could legally cite, and the ONLY valid shape is empty refs paired
+      // with `kind: 'user'`. Writing `kind: 'fallback'` here produced a title the
+      // host refuses to load, which made EVERY target unopenable: 285 corrupt
+      // sessions in the live store before this was found.
+      messageSeqs: [],
+      source: { kind: 'user' },
+    },
+    surface: false,
+  })
+  for (const [index, chunk] of plan.chunks.entries()) {
+    events.push({
+      type: 'assistant/message',
+      data: assistantMessage(
+        chunk.text,
+        injectionSource(plan, settings),
+        turn,
+        step,
+        `graft-${newSessionId}-${index}`,
+      ),
+      surface: true,
+    })
+  }
+  // v7.0 P9: the wake directive is gone.
+  //
+  // v6.0 appended a final assistant block: "系统强制指令：不要复述上文，不要总结
+  // 你读到了什么，也不要描述你打算怎么做。立刻根据上面「接下来我需要……」那一句，
+  // 调用相应工具执行第一个动作。"
+  //
+  // It was written for a tape that read as a work log, where the model needed to
+  // be told not to summarise it. The tape is now a replay of 【用户】/【我】
+  // turns, so the natural next token IS a reply to the last user message — the
+  // directive has nothing left to correct.
+  //
+  // What it still does is cost: it occupies the recency position that belongs to
+  // the conversation, and it announces "you are reading a system document",
+  // which is precisely the outline feel the replay was built to remove. The
+  // natural-language nudge now lives at the end of the pending state, inside the
+  // assistant's own voice.
+  events.push({ type: 'step/end', data: { turn, step }, surface: false })
+  events.push({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } }, surface: false })
+  // Runtime intent last, after the closed turn, exactly where DSH writes it:
+  // these are log-only knob records folded by the modelSelection/permissions
+  // projections, never a forged model request.
+  if (runtimeIntent !== undefined) {
+    if (runtimeIntent.permission !== undefined) {
+      events.push({ type: 'permission/preset', data: runtimeIntent.permission, surface: false })
+    }
+    if (runtimeIntent.sandbox !== undefined) {
+      events.push({ type: 'sandbox/mode', data: runtimeIntent.sandbox, surface: false })
+    }
+    if (runtimeIntent.approval !== undefined) {
+      events.push({ type: 'approval/policy', data: runtimeIntent.approval, surface: false })
+    }
+    if (runtimeIntent.model !== undefined) {
+      events.push({ type: 'model/selection', data: runtimeIntent.model, surface: false })
+    }
+  }
+  // v7.0 P1-1: carry the source's active goal across the migration.
+  //
+  // A DSH goal is not external state — it is a `goal/change` EVENT appended to
+  // the session log (verified in `dsh-goal`: `agent.session.append("goal/change",
+  // change)`). The graft slices the log up to the last `turn/end` and copies only
+  // SURFACE events, so every `goal/change` — being log-only and typically written
+  // outside the retained window — is dropped. The target then resumes with no
+  // active goal even though the source had one.
+  //
+  // The event shape is copied verbatim from the source's newest change record,
+  // with `updatedAt` advanced so the target's own clock ordering holds. The
+  // projection reads the latest `goal/change` per session, so appending one here
+  // establishes the goal for the target without touching the goal service.
+  const goalChange = extractActiveGoalChange(goalSourceEvents ?? [])
+  if (goalChange !== undefined) {
+    events.push({ type: 'goal/change', data: goalChange, surface: false })
+  }
+  return events
+}
+
+function assertColdLog(
+  cold: SessionLogSnapshotLike,
+  cwd: string,
+  expectedTypes: readonly string[],
+  skeletonTurn: number,
+  skeletonStep: number,
+): void {
+  if (Number(cold.inheritedEventCount ?? 0) !== 0) {
+    throw graftError('COLD_READ_MISMATCH', `cold-read inheritedEventCount is ${String(cold.inheritedEventCount)}, expected 0`)
+  }
+  if (cold.session?.cwd !== cwd) {
+    throw graftError(
+      'COLD_READ_MISMATCH',
+      `cold-read cwd ${JSON.stringify(cold.session?.cwd)} is not the exact source cwd ${JSON.stringify(cwd)}`,
+    )
+  }
+  assertTopLevelHeader(cold.session)
+  const events = Array.isArray(cold.events) ? cold.events : []
+  if (events.length !== expectedTypes.length) {
+    throw graftError(
+      'COLD_READ_MISMATCH',
+      `cold-read event count ${events.length} does not match written count ${expectedTypes.length}`,
+    )
+  }
+  for (const [index, event] of events.entries()) {
+    if (Number(event.seq) !== index) {
+      throw graftError('COLD_READ_MISMATCH', `cold-read event ${index} has seq ${String(event.seq)}`)
+    }
+    if (event.type !== expectedTypes[index]) {
+      throw graftError(
+        'COLD_READ_MISMATCH',
+        `cold-read event ${index} is ${event.type}, expected ${expectedTypes[index]}`,
+      )
+    }
+    if (event.type === 'tool/result') {
+      throw graftError('RED_LINE_TOOL_RESULT', 'cold-read log contains a standalone tool/result')
+    }
+    if (event.type === 'turn/start') {
+      if (event.surfaceOp !== undefined || event.sourceEventSeqs !== undefined) {
+        throw graftError('RED_LINE_SKELETON_SURFACE', 'turn/start carries surface metadata in the cold-read log')
+      }
+      if (event.data?.turn !== skeletonTurn) {
+        throw graftError('COLD_READ_MISMATCH', `turn/start has turn ${String(event.data?.turn)}, expected ${skeletonTurn}`)
+      }
+      continue
+    }
+    if (event.type === 'step/start') {
+      if (event.surfaceOp !== undefined || event.sourceEventSeqs !== undefined) {
+        throw graftError('RED_LINE_SKELETON_SURFACE', 'step/start carries surface metadata in the cold-read log')
+      }
+      if (event.data?.turn !== skeletonTurn || event.data?.step !== skeletonStep) {
+        throw graftError('COLD_READ_MISMATCH', 'step/start does not match the configured skeleton')
+      }
+      continue
+    }
+    if (event.type === 'step/end') {
+      if (event.surfaceOp !== undefined || event.sourceEventSeqs !== undefined) {
+        throw graftError('RED_LINE_SKELETON_SURFACE', 'step/end carries surface metadata in the cold-read log')
+      }
+      if (event.data?.turn !== skeletonTurn || event.data?.step !== skeletonStep) {
+        throw graftError('COLD_READ_MISMATCH', 'step/end does not match the configured skeleton')
+      }
+      continue
+    }
+    if (event.type === 'turn/end') {
+      if (event.surfaceOp !== undefined || event.sourceEventSeqs !== undefined) {
+        throw graftError('RED_LINE_SKELETON_SURFACE', 'turn/end carries surface metadata in the cold-read log')
+      }
+      if (event.data?.turn !== skeletonTurn) {
+        throw graftError('COLD_READ_MISMATCH', 'turn/end does not match the configured skeleton')
+      }
+      continue
+    }
+    if (event.type === 'system/message') {
+      if (event.surfaceOp !== 'append') {
+        throw graftError('RED_LINE_MESSAGE_SURFACE', 'system/message is not an append surface event')
+      }
+      if (event.sourceEventSeqs !== undefined) {
+        throw graftError('RED_LINE_SYSTEM_SOURCE_EVENTS', 'system/message carries sourceEventSeqs')
+      }
+      if (event.data?.turn !== skeletonTurn || event.data?.step !== skeletonStep) {
+        throw graftError('COLD_READ_MISMATCH', 'system/message does not match the open skeleton step')
+      }
+      if (event.data?.message?.role !== 'system') {
+        throw graftError('RED_LINE_SYSTEM_ROLE', 'system/message data.message.role is not system')
+      }
+      if (event.data?.message?.source?.kind !== 'system-prompt') {
+        throw graftError('RED_LINE_SYSTEM_SOURCE', 'system/message source.kind is not system-prompt')
+      }
+      continue
+    }
+    if (event.type === 'session/title') {
+      if (event.surfaceOp !== undefined || event.sourceEventSeqs !== undefined) {
+        throw graftError('RED_LINE_TITLE_SURFACE', 'session/title must not carry surface metadata')
+      }
+      if (typeof event.data?.title !== 'string' || event.data.title.length === 0) {
+        throw graftError('RED_LINE_TITLE_EMPTY', 'session/title must carry a non-empty title')
+      }
+      // v7.3 CRITICAL: enforce the host's real title rule.
+      //
+      // The cold-log validator checked only "non-empty" and "no surface metadata",
+      // which is why 285 corrupt targets passed 181 tests and were then rejected by
+      // the host on load. The rule, copied from
+      // `dsh-session-format-v3-to-v4/titleSources`:
+      //
+      //   empty messageSeqs  <=>  source.kind === 'user'
+      //   non-empty          =>  every seq cites an EARLIER user/message whose
+      //                          source.kind === 'user' (a human message)
+      //
+      // A graft target has no human message, so the only valid shape is empty refs
+      // with `kind: 'user'`. Checking it here makes a regression fail locally
+      // instead of producing a session the host cannot open.
+      const titleRefs = Array.isArray(event.data?.messageSeqs) ? event.data.messageSeqs : []
+      const titleSourceKind =
+        typeof event.data?.source?.kind === 'string' ? event.data.source.kind : undefined
+      if ((titleRefs.length === 0) !== (titleSourceKind === 'user')) {
+        throw graftError(
+          'RED_LINE_TITLE_SOURCE',
+          'session/title messageSeqs must be empty exactly for a user title (empty refs require source.kind "user")',
+        )
+      }
+      if (titleRefs.length > 0) {
+        const seenTitleRefs = new Set<number>()
+        for (const value of titleRefs) {
+          const refSeq = Number(value)
+          if (!Number.isSafeInteger(refSeq) || refSeq >= Number(event.seq)) {
+            throw graftError('RED_LINE_TITLE_REF', `session/title cites seq ${String(value)}, which is not earlier`)
+          }
+          if (seenTitleRefs.has(refSeq)) {
+            throw graftError('RED_LINE_TITLE_REF', `session/title cites seq ${refSeq} twice`)
+          }
+          seenTitleRefs.add(refSeq)
+          const cited = events.find((candidate) => Number(candidate.seq) === refSeq)
+          if (cited === undefined || cited.type !== 'user/message') {
+            throw graftError('RED_LINE_TITLE_REF', `session/title cites seq ${refSeq}, which is not a user/message`)
+          }
+          if (cited.data?.source?.kind !== 'user') {
+            throw graftError(
+              'RED_LINE_TITLE_REF',
+              `session/title cites seq ${refSeq}, whose source.kind is not "user" (not a human message)`,
+            )
+          }
+        }
+      }
+      continue
+    }
+    if (event.type === 'user/message') {
+      if (event.surfaceOp !== 'append') {
+        throw graftError('RED_LINE_MESSAGE_SURFACE', 'user/message is not an append surface event')
+      }
+      continue
+    }
+    if (
+      event.type === 'model/selection' ||
+      event.type === 'permission/preset' ||
+      event.type === 'sandbox/mode' ||
+      event.type === 'approval/policy' ||
+      event.type === 'goal/change'
+    ) {
+      // Runtime-intent knobs and the carried goal: log-only, folded by their
+      // projections. They must never carry surface metadata.
+      if (event.surfaceOp !== undefined || event.sourceEventSeqs !== undefined) {
+        throw graftError('RED_LINE_SKELETON_SURFACE', `${event.type} must not carry surface metadata`)
+      }
+      continue
+    }
+    if (event.type === 'assistant/message') {
+      if (event.surfaceOp !== 'append') {
+        throw graftError('RED_LINE_MESSAGE_SURFACE', 'assistant/message is not an append surface event')
+      }
+      if (event.sourceEventSeqs !== undefined) {
+        throw graftError('RED_LINE_ASSISTANT_SOURCE_EVENTS', 'assistant/message carries sourceEventSeqs')
+      }
+      if (!Array.isArray(event.data?.stream) || event.data.stream.length !== 0) {
+        throw graftError('RED_LINE_ASSISTANT_STREAM', 'assistant/message stream is not []')
+      }
+      if (event.data?.turn !== skeletonTurn || event.data?.step !== skeletonStep) {
+        throw graftError('COLD_READ_MISMATCH', 'assistant/message does not match the open skeleton step')
+      }
+      const kind = event.data?.message?.source?.kind
+      if (typeof kind !== 'string' || kind.length === 0 || kind === 'plugin') {
+        throw graftError('RED_LINE_SOURCE_KIND', 'assistant/message source is not producer-owned')
+      }
+    }
+  }
+
+  const surfaceEvents = events.filter(
+    (event) => event.type === 'system/message' || event.type === 'user/message' || event.type === 'assistant/message',
+  )
+  if (surfaceEvents[0]?.type !== 'system/message') {
+    throw graftError('RED_LINE_SYSTEM_HEAD', 'the first surface event must be a system/message')
+  }
+}
+
+/**
+ * v7.0 P1-1: the newest `goal/change` record from a source log, if any.
+ *
+ * Only a change that leaves an ACTIVE goal is carried: a `clear`/`complete`
+ * operation at the tail means the source had no goal, and copying it would
+ * resurrect one the user already finished.
+ */
+function extractActiveGoalChange(events: readonly SessionEventLike[]): Record<string, unknown> | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'goal/change') continue
+    const data = event.data
+    if (!isRecord(data)) return undefined
+    const operation = typeof data.operation === 'string' ? data.operation : ''
+    // A terminal record means "there is no goal any more".
+    if (/^(clear|complete|abandon|block)$/iu.test(operation)) return undefined
+    const goal = data.goal
+    if (!isRecord(goal)) return undefined
+    const objective = goal.objective
+    if (typeof objective !== 'string' || objective.trim().length === 0) return undefined
+    // Copy the record as-is and refresh the mutation time: the goal service
+    // clamps backward wall-clock movement, so an older `updatedAt` on a newer
+    // event would be rejected as a stale mutation.
+    return {
+      ...data,
+      updatedAt: Math.max(
+        Date.now(),
+        typeof data.updatedAt === 'number' ? data.updatedAt : 0,
+      ),
+    }
+  }
+  return undefined
+}
+
+
+// ===========================================================================
+// Phase 4 — durable write, retirement and fallback read
+// ===========================================================================
+
+const retiredSessions = new Set<string>()
+const transferredSessions = new Map<string, { newSessionId: string; at: number; reason: string }>()
+const autoGraftInFlight = new Set<string>()
+const autoGraftStates = new Map<string, 'idle' | 'grafting' | 'done'>()
+const transitionCards = new Set<string>()
+const inFlight = new Set<string>()
+
+const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url))
+let retiredStorePath = join(PLUGIN_DIR, '.retired.json')
+let transferredStorePath = join(PLUGIN_DIR, '.transferred.json')
+/** v7.0: persisted graft-target marks (chain guard + protection across restarts). */
+let graftTargetsPath = join(PLUGIN_DIR, '.graft-targets.json')
+/**
+ * v7.4 P0-2: the durable transaction journal, one file per in-flight migration.
+ *
+ * The old `.incomplete` breadcrumb was a single overwritten file that NOTHING ever
+ * read: a crash left it lying there and the next start behaved as if the failed
+ * migration had never happened. It could not answer the two questions recovery
+ * needs — "which target was being built?" and "how far did it get?" — and because
+ * it was one file, two concurrent migrations would erase each other's evidence.
+ *
+ * One file per SOURCE session fixes both: the name identifies the migration, and
+ * the record carries the stage reached.
+ */
+let txnDirPath = join(PLUGIN_DIR, '.txn')
+/** The context captured by `configureRetiredStore`, reused by later store writes. */
+let storeCtx: PluginContextLike | undefined
+function ctxForStores(): PluginContextLike | undefined {
+  return storeCtx
+}
+let storeScope = 'plugin-dir'
+
+/**
+ * Resolve the profile-private directory that owns the retirement stores.
+ *
+ * Isolation matters: `.retired.json` decides which sessions a pre-step gate
+ * refuses. Sharing one file across profiles (or across work-spaces in one
+ * profile) lets a test retirement silently block a real session.
+ *
+ * Resolution order:
+ *   1. `ctx.paths.data`   — the profile's declared data dir, when the service
+ *                           is mounted (it is not in every profile).
+ *   2. `DSH_PROFILE_DIR`  — the launcher's own profile directory.
+ *   3. `DSH_HOME/profiles/<DSH_PROFILE>` — same value, derived by hand.
+ *   4. the plugin directory — last resort, logged as a warning because it is
+ *      shared by every profile that loads this plugin.
+ */
+function resolveStoreDir(ctx: PluginContextLike, explicit?: string): { dir: string; scope: string } {
+  if (typeof explicit === 'string' && explicit.length > 0) {
+    return { dir: explicit, scope: 'config.dataDir' }
+  }
+  let paths: unknown
+  try {
+    paths = typeof ctx.get === 'function' ? ctx.get('paths') : undefined
+  } catch {
+    // Cordis service proxies may reject undeclared property reads.
+    paths = undefined
+  }
+  if (isRecord(paths) && typeof paths.data === 'string' && paths.data.length > 0) {
+    return { dir: paths.data, scope: 'paths.data' }
+  }
+  const profileDir = process.env.DSH_PROFILE_DIR
+  if (typeof profileDir === 'string' && profileDir.length > 0) {
+    return { dir: join(profileDir, 'data', 'dsh-graft-slice'), scope: 'DSH_PROFILE_DIR' }
+  }
+  const home = process.env.DSH_HOME
+  const profile = process.env.DSH_PROFILE
+  if (typeof home === 'string' && home.length > 0) {
+    const suffix = typeof profile === 'string' && profile.length > 0 ? ['profiles', profile] : ['plugin-data']
+    return { dir: join(home, ...suffix, 'data', 'dsh-graft-slice'), scope: 'DSH_HOME' }
+  }
+  return { dir: PLUGIN_DIR, scope: 'plugin-dir' }
+}
+
+/** Load durable retirement IDs. Missing/corrupt files never block activation. */
+function configureRetiredStore(ctx: PluginContextLike, settings: Required<GraftConfig>): void {
+  const resolved = resolveStoreDir(ctx, settings.dataDir)
+  const dataDir = resolved.dir
+  storeScope = resolved.scope
+  storeCtx = ctx
+  retiredStorePath = join(dataDir, '.retired.json')
+  transferredStorePath = join(dataDir, '.transferred.json')
+  graftTargetsPath = join(dataDir, '.graft-targets.json')
+  txnDirPath = join(dataDir, '.txn')
+  constraintSectionsPath = join(dataDir, '.graft-constraint-sections.json')
+  pendingConstraintsPath = join(dataDir, '.pending-constraints.json')
+  draftsPath = join(dataDir, '.graft-drafts.json')
+  preparedStorePath = join(dataDir, '.graft-prepared.json')
+  leftoversStorePath = join(dataDir, '.graft-leftovers.json')
+  autoGraftSuppressedPath = join(dataDir, '.auto-graft-suppressed.json')
+  // Create the profile-private directory up front: it proves the location is
+  // writable at activation time instead of failing mid-migration, and it makes
+  // the isolation target observable.
+  try {
+    mkdirSync(dataDir, { recursive: true })
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(`[dsh-graft-slice] cannot create ${dataDir}: ${String((error as any)?.message ?? error)}`)
+    } catch {
+      // Logging must not block activation.
+    }
+  }
+  if (storeScope === 'plugin-dir') {
+    try {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] state is shared across profiles at ${dataDir}. Set config.dataDir per profile to isolate retirement and drafts.`,
+      )
+    } catch {
+      // Logging must not block activation.
+    }
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(transferredStorePath, 'utf8'))
+    if (isRecord(parsed)) {
+      for (const [id, value] of Object.entries(parsed)) {
+        if (!isRecord(value) || typeof value.newSessionId !== 'string') continue
+        transferredSessions.set(id, {
+          newSessionId: value.newSessionId,
+          at: typeof value.at === 'number' ? value.at : 0,
+          reason: typeof value.reason === 'string' ? value.reason : `已转移至新会话 ${value.newSessionId}`,
+        })
+      }
+    }
+  } catch (error) {
+    if ((error as any)?.code !== 'ENOENT') {
+      try {
+        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${transferredStorePath}: ${String((error as any)?.message ?? error)}`)
+      } catch {
+        // Logging must not block activation.
+      }
+    }
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(retiredStorePath, 'utf8'))
+    if (Array.isArray(parsed)) {
+      for (const id of parsed) {
+        if (typeof id === 'string' && id.length > 0) retiredSessions.add(id)
+      }
+    }
+  } catch (error) {
+    if ((error as any)?.code !== 'ENOENT') {
+      try {
+        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${retiredStorePath}: ${String((error as any)?.message ?? error)}`)
+      } catch {
+        // Logging must not block activation.
+      }
+    }
+  }
+}
+
+/**
+ * v5.2 补丁二：后台 LLM 约束提取。
+ *
+ * 迁移关键路径只用正则 FAST_CONSTRAINTS：LLM 调用随源历史增长而变慢，放在
+ * 关键路径上会直接推高「触发到看到新会话」的延迟。
+ *
+ * 流程：迁移完成 → 后台跑 LLM → 成功后暂存 pending 约束 → target 下一次
+ * pre-step 以 developer/message 静默注入一次。
+ *
+ * 失败时保留正则结果，不回滚迁移：约束质量下降是次要问题，迁移已经成功。
+ */
+interface PendingConstraintPayload {
+  sourceSessionId: string
+  targetSessionId: string
+  constraints: string[]
+  source: 'llm'
+  extractedAt: number
+}
+
+/**
+ * v6.0 补丁一：草稿捕获。
+ *
+ * 用户在旧会话被拦截的那一瞬间正在输入的内容，不应该凭空消失。
+ * 拦截时捕获，写盘；target 第一次收到输入时把草稿和新输入合并成一条，
+ * 然后立刻删除——只生效一次。
+ */
+interface DraftPayload {
+  sourceSessionId: string
+  targetSessionId: string
+  text: string
+  capturedAt: number
+}
+
+const draftPayloads = new Map<string, DraftPayload>()
+let draftsLoaded = false
+
+/**
+ * v7.0 (adopted from dsh-rollover-snapshot): report constraints that went missing.
+ *
+ * rollover-snapshot's measured finding is the reason this exists: across four
+ * production sessions, *every* context crossing lost rules while the checkpoint
+ * grew, and one crossing dropped a user's "do not install into the real
+ * desktop" constraint. The summary looked healthier (more text) while being less
+ * correct.
+ *
+ * The graft builder never drops a declared rule, but "the builder is correct" is
+ * exactly the assumption that failed there. The rules can shrink for reasons
+ * outside the builder: the LLM constraint refiner returns a shorter set, a
+ * config change narrows the source, an async refinement lands after the fact.
+ * Nothing else in the pipeline compares generation N-1 with generation N.
+ *
+ * Comparison is on normalized text (whitespace collapsed, lowercased) because a
+ * reflowed rule is still the same rule; a rule whose *number* changed is a
+ * different rule and does not count as drift.
+ */
+export interface ConstraintDrift {
+  constraint: string
+  previousSessionId: string
+}
+
+export function verifyHardConstraints(
+  previousConstraints: readonly string[],
+  nextConstraints: readonly string[],
+  previousSessionId: string,
+): ConstraintDrift[] {
+  const normalize = (text: string): string => text.replace(/\s+/gu, ' ').trim().toLowerCase()
+  const next = new Set(nextConstraints.map(normalize).filter((line) => line.length > 0))
+  const drift: ConstraintDrift[] = []
+  const seen = new Set<string>()
+  for (const constraint of previousConstraints) {
+    const line = normalize(constraint)
+    if (line.length === 0 || seen.has(line)) continue
+    seen.add(line)
+    if (next.has(line)) continue
+    drift.push({ constraint, previousSessionId })
+  }
+  return drift
+}
+
+/**
+ * v7.0 P0-5: the constraints this plugin keeps rendering into a target's system
+ * prompt, keyed by target session id.
+ *
+ * Separate from `pendingConstraints` (which is a one-shot queued refinement):
+ * this map is the durable, every-request source of truth for a target's standing
+ * rules. It is in-memory because the goal `user/message` already persists the
+ * same list — a restart loses this map and the section renders `''`, while the
+ * goal message still carries the constraints, so nothing is lost, only
+ * re-hardened once the session is grafted again.
+ */
+const targetConstraintSections = new Map<string, { constraints: string[]; at: number }>()
+
+/**
+ * v7.2: persist the standing-constraint sections.
+ *
+ * They were in-memory, which made the compaction shield evaporate on restart: the
+ * `systemPrompt.section` renderer reads this map, found nothing, and returned `''`
+ * — so the target resumed with its constraints only in the goal `user/message`,
+ * which is exactly the surface `/compact` can shadow. A shield that a restart
+ * removes is not a shield.
+ *
+ * Written on every new target and read once at activation, next to the other
+ * store files so profile isolation is unchanged.
+ */
+let constraintSectionsPath = join(PLUGIN_DIR, '.graft-constraint-sections.json')
+
+/**
+ * v7.2: atomic write — temp file in the same directory, then rename.
+ *
+ * `writeFileSync(target)` truncates first and writes second, so a crash (or a
+ * killed host during a migration) leaves a half-written JSON file. Every reader
+ * here tolerates a parse failure by falling back to empty state, which silently
+ * discards the very records that were being written — a corrupt retired set means
+ * a retired session comes back, a corrupt constraint set means the shield is gone.
+ *
+ * `rename` is atomic on the same volume on both NTFS and POSIX, so a reader either
+ * sees the old file or the new one, never a partial one.
+ */
+function writeJsonAtomic(path: string, value: unknown): void {
+  const temp = `${path}.tmp-${process.pid}-${Date.now().toString(36)}`
+  writeFileSync(temp, JSON.stringify(value, null, 2), 'utf8')
+  renameSync(temp, path)
+}
+
+function persistConstraintSections(ctx: PluginContextLike | undefined): void {
+  if (ctx === undefined) return
+  try {
+    mkdirSync(dirname(constraintSectionsPath), { recursive: true })
+    const payload: Record<string, { constraints: string[]; at: number }> = {}
+    for (const [id, entry] of [...targetConstraintSections.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      payload[id] = entry
+    }
+    writeJsonAtomic(constraintSectionsPath, payload)
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] cannot write ${constraintSectionsPath}: ${String((error as any)?.message ?? error)}`,
+      )
+    } catch {
+      // Logging must not change the migration result.
+    }
+  }
+}
+
+function loadConstraintSections(ctx: PluginContextLike): void {
+  try {
+    const parsed = JSON.parse(readFileSync(constraintSectionsPath, 'utf8'))
+    if (!isRecord(parsed)) return
+    for (const [id, value] of Object.entries(parsed)) {
+      if (!isRecord(value) || !Array.isArray(value.constraints)) continue
+      const constraints = value.constraints.filter((item: unknown): item is string => typeof item === 'string')
+      if (constraints.length === 0) continue
+      targetConstraintSections.set(id, {
+        constraints,
+        at: typeof value.at === 'number' ? value.at : 0,
+      })
+    }
+  } catch (error) {
+    if ((error as any)?.code !== 'ENOENT') {
+      try {
+        ctx.logger?.warn?.(
+          `[dsh-graft-slice] cannot read ${constraintSectionsPath}: ${String((error as any)?.message ?? error)}`,
+        )
+      } catch {
+        // Logging must not block activation.
+      }
+    }
+  }
+}
+
+/**
+ * v7.0 P0-5: sessions that already received the in-band constraint reminder.
+ *
+ * One per process. The system-prompt section is the durable channel; this is the
+ * one-shot fallback for a host (or a start-up ordering) where the section was
+ * not registered. Repeating it every step would make a standing rule read like
+ * a nag and cost the recency position on every request.
+ */
+const constraintsReasserted = new Set<string>()
+
+const pendingConstraints = new Map<string, PendingConstraintPayload>()
+const constraintsApplied = new Set<string>()
+let pendingConstraintsPath = join(PLUGIN_DIR, '.pending-constraints.json')
+let draftsPath = join(PLUGIN_DIR, '.graft-drafts.json')
+/** v7.4 P1-2: reviewed-but-not-committed slices live here. */
+let preparedStorePath = join(PLUGIN_DIR, '.graft-prepared.json')
+/**
+ * v7.4: sessions resumed from retirement, and when their auto-graft grace ends.
+ *
+ * Without this, "undo the migration" is a two-step loop: resume, speak once, get
+ * migrated again. The log does not shrink on resume, so the watermark is still
+ * over the ratio the moment the user types.
+ */
+const autoGraftSuppressedUntil = new Map<string, number>()
+const AUTO_GRAFT_RESUME_GRACE_MS = 30 * 60_000
+let autoGraftSuppressedPath = join(PLUGIN_DIR, '.auto-graft-suppressed.json')
+const constraintsInFlight = new Set<string>()
+
+function persistPendingConstraints(ctx: PluginContextLike): void {
+  try {
+    mkdirSync(dirname(pendingConstraintsPath), { recursive: true })
+    const payload = [...pendingConstraints.entries()].map(([targetId, value]) => ({ targetId, ...value }))
+    writeJsonAtomic(pendingConstraintsPath, payload)
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${pendingConstraintsPath}: ${String((error as any)?.message ?? error)}`)
+    } catch {
+      // Logging must not change the migration result.
+    }
+  }
+}
+
+/**
+ * v7.4b: durable audit of targets left behind by an interrupted migration.
+ *
+ * WHY A FILE AND NOT A TITLE
+ *
+ * `markTargetBroken` writes a `[损坏]` title, but only to a LIVE session handle.
+ * A target that failed before cold verification is cold: the host exposes no
+ * `open(id,'write')` here, so the plugin cannot relabel it. What it CAN do is
+ * keep a ledger of "these ids exist and are not a finished handoff", and say so
+ * in the next review. Measured on the L1/L2 crash scenarios: after a kill at
+ * `TARGET_FLUSHED` the leftover is a complete-looking session with no mark,
+ * which is exactly what a user would mistake for the handoff.
+ */
+export interface LeftoverTarget {
+  targetId: string
+  sourceSessionId: string
+  stage: string
+  reason: string
+  at: string
+}
+
+const leftoverTargets = new Map<string, LeftoverTarget>()
+const LEFTOVER_CAP = 20
+
+let leftoversStorePath = join(PLUGIN_DIR, '.graft-leftovers.json')
+
+function persistLeftovers(ctx: PluginContextLike): void {
+  try {
+    mkdirSync(dirname(leftoversStorePath), { recursive: true })
+    writeJsonAtomic(leftoversStorePath, [...leftoverTargets.values()])
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] cannot write ${leftoversStorePath}: ${String((error as any)?.message ?? error)}`,
+      )
+    } catch {
+      // Logging must not change the migration result.
+    }
+  }
+}
+
+export function loadLeftovers(ctx: PluginContextLike): void {
+  try {
+    const parsed = JSON.parse(readFileSync(leftoversStorePath, 'utf8'))
+    if (!Array.isArray(parsed)) return
+    for (const item of parsed) {
+      if (!isRecord(item)) continue
+      if (typeof item.targetId !== 'string' || item.targetId.length === 0) continue
+      leftoverTargets.set(item.targetId, {
+        targetId: item.targetId,
+        sourceSessionId: typeof item.sourceSessionId === 'string' ? item.sourceSessionId : '',
+        stage: typeof item.stage === 'string' ? item.stage : 'unknown',
+        reason: typeof item.reason === 'string' ? item.reason : '',
+        at: typeof item.at === 'string' ? item.at : new Date().toISOString(),
+      })
+    }
+  } catch (error) {
+    if ((error as any)?.code !== 'ENOENT') {
+      try {
+        ctx.logger?.warn?.(
+          `[dsh-graft-slice] cannot read ${leftoversStorePath}: ${String((error as any)?.message ?? error)}`,
+        )
+      } catch {
+        // Logging must not block activation.
+      }
+    }
+  }
+}
+
+function recordLeftover(
+  ctx: PluginContextLike,
+  record: { targetId: string; sourceSessionId: string; stage: string; reason: string },
+): void {
+  leftoverTargets.set(record.targetId, { ...record, at: new Date().toISOString() })
+  if (leftoverTargets.size > LEFTOVER_CAP) {
+    const ordered = [...leftoverTargets.values()].sort((a, b) => a.at.localeCompare(b.at))
+    for (const stale of ordered.slice(0, ordered.length - LEFTOVER_CAP)) leftoverTargets.delete(stale.targetId)
+  }
+  persistLeftovers(ctx)
+}
+
+/** One line for the review: a leftover is NOT a usable handoff. */
+export function leftoverWarningLine(): string | undefined {
+  if (leftoverTargets.size === 0) return undefined
+  const ids = [...leftoverTargets.keys()].slice(0, 5).join(', ')
+  const more = leftoverTargets.size > 5 ? ` 等 ${leftoverTargets.size} 个` : ''
+  return (
+    `注意：有 ${leftoverTargets.size} 个未完成的迁移残留（${ids}${more}），` +
+    `它们看起来能续接，但不是这次交接——不要从它们继续，也不要再切同一个源。`
+  )
+}
+
+function persistDrafts(ctx: PluginContextLike): void {
+  try {
+    mkdirSync(dirname(draftsPath), { recursive: true })
+    writeJsonAtomic(draftsPath, [...draftPayloads.values()])
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${draftsPath}: ${String((error as any)?.message ?? error)}`)
+    } catch {
+      // Logging must not change the migration result.
+    }
+  }
+}
+
+function loadDrafts(ctx: PluginContextLike): void {
+  if (draftsLoaded) return
+  draftsLoaded = true
+  try {
+    const parsed = JSON.parse(readFileSync(draftsPath, 'utf8'))
+    if (!Array.isArray(parsed)) return
+    for (const item of parsed) {
+      if (!isRecord(item)) continue
+      if (typeof item.targetSessionId !== 'string' || typeof item.text !== 'string') continue
+      if (item.text.trim().length === 0) continue
+      draftPayloads.set(item.targetSessionId, {
+        sourceSessionId: typeof item.sourceSessionId === 'string' ? item.sourceSessionId : '',
+        targetSessionId: item.targetSessionId,
+        text: item.text,
+        capturedAt: typeof item.capturedAt === 'number' ? item.capturedAt : 0,
+      })
+    }
+  } catch (error) {
+    if ((error as any)?.code !== 'ENOENT') {
+      try {
+        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${draftsPath}: ${String((error as any)?.message ?? error)}`)
+      } catch {
+        // Logging must not block activation.
+      }
+    }
+  }
+}
+
+/** The last human text in a pre-step message list, or undefined. */
+function lastUserText(messages: unknown): string | undefined {
+  if (!Array.isArray(messages)) return undefined
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (!isRecord(message) || message.role !== 'user') continue
+    const text = textOfMessage(message)
+    if (text.length > 0) return text
+  }
+  return undefined
+}
+
+function loadPendingConstraints(ctx: PluginContextLike): void {
+  try {
+    const parsed = JSON.parse(readFileSync(pendingConstraintsPath, 'utf8'))
+    if (!Array.isArray(parsed)) return
+    for (const item of parsed) {
+      if (!isRecord(item)) continue
+      if (typeof item.targetId !== 'string' || !Array.isArray(item.constraints)) continue
+      const constraints = item.constraints.filter((value: unknown): value is string => typeof value === 'string')
+      if (constraints.length === 0) continue
+      pendingConstraints.set(item.targetId, {
+        sourceSessionId: typeof item.sourceSessionId === 'string' ? item.sourceSessionId : '',
+        targetSessionId: item.targetId,
+        constraints,
+        source: 'llm',
+        extractedAt: typeof item.extractedAt === 'number' ? item.extractedAt : 0,
+      })
+    }
+  } catch (error) {
+    if ((error as any)?.code !== 'ENOENT') {
+      try {
+        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${pendingConstraintsPath}: ${String((error as any)?.message ?? error)}`)
+      } catch {
+        // Logging must not block activation.
+      }
+    }
+  }
+}
+
+/** Persist the retirement set; a failed write is reported but never blocks a migration. */
+function persistRetiredStore(ctx: PluginContextLike): void {
+  try {
+    mkdirSync(dirname(retiredStorePath), { recursive: true })
+    writeJsonAtomic(retiredStorePath, [...retiredSessions].sort())
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${retiredStorePath}: ${String((error as any)?.message ?? error)}`)
+    } catch {
+      // Logging must not change the migration result.
+    }
+  }
+}
+
+/**
+ * The first surface node injected into every migrated session.
+ *
+ * v4 restore requires a protected system head: a later `system/message`
+ * appended by the resumed agent is rejected with
+ * `system/message requires a protected first surface head` unless the very
+ * first surface node is a system message. The v2.1 skeleton did not include
+ * one; this minimal prompt supplies the head without copying the source
+ * runtime context.
+ */
+/**
+ * v7.0 P2-1: the system prompt must describe the pointers that actually exist.
+ *
+ * The old second line taught the model to look for
+ * `[tool name=xx seq=YY expand_result(...)]` — the v5.2 bracketed form. Since
+ * v6.0 the tape writes first-person recollections instead:
+ *
+ *   （回顾：刚才我已经调用 write 完成了这一步，结果已折叠…读 seq=1234）
+ *
+ * So the instruction described a shape that appears nowhere in the injected
+ * history. A literal-minded model either never recognises a pointer (and then
+ * fabricates the missing output) or keeps hunting for a bracket that is not
+ * there. The rule survives; only its example is corrected to the real form, and
+ * both forms are named so a legacy tape still matches.
+ *
+ * What is deliberately NOT here: anything that must survive. The host replaces
+ * surface node 0 on the target's first live step (v7.0 C1), so constraints and
+ * goals live in the goal `user/message`, not in this prompt.
+ */
+const MIGRATION_SYSTEM_PROMPT = [
+  'You are a helpful assistant continuing a migrated coding session. Follow the injected goal and history.',
+  // v7.4 P4-1（方案 B）: the tape now writes compact runs, e.g.
+  //   - pwsh(seq=364,372,380) · read(seq=398)
+  // One line per contiguous run of the same tool; the seqs are in time order,
+  // "!" marks the call that came back as an error, "(unavailable here)" means
+  // the target does not have that tool mounted. The legacy shapes are still
+  // named so an older tape still matches.
+  'Tool output is folded into compact pointer lines such as "- pwsh(seq=364,372,380) · read(seq=398)" — one line per contiguous run of the same tool, seqs in time order; a "!" after a seq means that call came back as an error, and "(unavailable here)" means the tool is not mounted in this session. Older tapes may use the long form "（回顾：…）" or the bracketed form [tool name=xx seq=YY]; both mean the same thing. When you need the actual output behind one of those seq numbers to make a decision, call graft_read_result(sourceSessionId, seq). NEVER guess or fabricate a tool result.',
+  'Do NOT read the source session log directly via shell or other tools unless graft_read_result fails. Use graft_read_result to fetch pointer contents.',
+  'If asked about constraints or progress, you MUST enumerate every single item without skipping or summarizing.',
+  "If you encounter a 'SetNamedSecurityInfoW failed' error, the workspace is in restricted mode. Ask the user to run with danger-full-access or use non-destructive read-only tools.",
+].join('\n\n')
+
+function persistTransferredStore(ctx: PluginContextLike): void {
+  try {
+    mkdirSync(dirname(transferredStorePath), { recursive: true })
+    const payload: Record<string, { newSessionId: string; at: number; reason: string }> = {}
+    for (const id of [...transferredSessions.keys()].sort()) {
+      const value = transferredSessions.get(id)
+      if (value !== undefined) payload[id] = value
+    }
+    writeJsonAtomic(transferredStorePath, payload)
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${transferredStorePath}: ${String((error as any)?.message ?? error)}`)
+    } catch {
+      // Logging must not change the migration result.
+    }
+  }
+}
+
+/** Test/diagnostic view of source→target transfers. */
+export function getTransferredSessions(): ReadonlyMap<string, { newSessionId: string; at: number; reason: string }> {
+  return transferredSessions
+}
+
+/** Test/diagnostic view of the in-memory retired set. */
+export function getRetiredSessions(): ReadonlySet<string> {
+  return retiredSessions
+}
+
+/** Clear the in-memory retired set. Intended for tests and explicit operator resets. */
+export function resetRetiredSessions(): void {
+  retiredSessions.clear()
+  transferredSessions.clear()
+  autoGraftInFlight.clear()
+  autoGraftStates.clear()
+  transitionCards.clear()
+  graftTargets.clear()
+  leftoverTargets.clear()
+  // v7.0: these are per-session state too. Leaving them behind makes a reset
+  // partial, so a later test (or an operator's explicit reset) sees a session
+  // that is still marked as "already overflowed" or "already redirected".
+  overflowRetries.clear()
+  deferredOverflowTargets.clear()
+  pendingConfirms.clear()
+  pendingGraftSources.clear()
+  constraintsApplied.clear()
+  constraintsInFlight.clear()
+  targetConstraintSections.clear()
+  constraintsReasserted.clear()
+  watermarkCache.clear()
+  taskBoundaryDeferrals.clear()
+  // v7.4: a reset must also drop the resume grace, or a test that resumes a
+  // session poisons every later test that expects the watermark to fire.
+  autoGraftSuppressedUntil.clear()
+  graftTargets.clear()
+}
+
+/** Test/diagnostic view of graft-target marks (v7.0 C2). */
+export function getGraftTargets(): ReadonlyMap<string, GraftTargetMark> {
+  return graftTargets
+}
+
+/**
+ * v7.3: undo a retirement — the "regret pill".
+ *
+ * A migration is a judgement call made at 60% context by a plugin, and sometimes
+ * the judgement is wrong: the tape lost the one detail that mattered, or the user
+ * simply wants the old window back. Without a way out, a bad migration is
+ * permanent and the only recourse is editing JSON on disk by hand.
+ *
+ * This is the supported way out. It removes the session from the retired set and
+ * from the transfer map, forgets the chain-guard mark and the overflow latch, and
+ * persists all of it, so the session becomes usable again on the next pre-step.
+ *
+ * What it deliberately does NOT do: delete the target. The target may already
+ * hold work, and silently destroying it to "undo" would be a worse surprise than
+ * the one being repaired. The caller decides what to do with it.
+ */
+/**
+ * v7.3.1: the title a session carried BEFORE this plugin marked it.
+ *
+ * When a graft retires its source, the plugin rewrites the source's sidebar title
+ * to `[已转移] → <target>`. That marker is a signpost, and it is only true while
+ * the source is actually retired. Undoing the retirement must take the signpost
+ * down, or the source keeps claiming it moved — which is worse than a stale
+ * label: the source and the target become indistinguishable in the sidebar, and
+ * opening the source looks like "the target is just the old session renamed".
+ *
+ * The original title is recoverable from the log itself: the newest
+ * `session/title` that this plugin did NOT write. Its cited seqs are re-validated
+ * against the host rule (earlier, `user/message`, human source) before reuse; if
+ * they do not hold, the text is restored with empty refs, which is always legal.
+ */
+const PLUGIN_TITLE_MARKERS = ['[已转移]', '[损坏]', '[已恢复]']
+
+function restorableTitle(
+  events: readonly SessionEventLike[],
+): { title: string; messageSeqs: number[] } | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'session/title') continue
+    const title = typeof event.data?.title === 'string' ? event.data.title : ''
+    if (title.length === 0) continue
+    if (PLUGIN_TITLE_MARKERS.some((marker) => title.startsWith(marker))) continue
+    // Re-validate the refs before reusing them: the host rejects a title that
+    // cites anything other than an earlier human message.
+    const refs = Array.isArray(event.data?.messageSeqs) ? event.data.messageSeqs : []
+    const valid = refs.every((value) => {
+      const seq = Number(value)
+      const cited = events.find((candidate) => Number(candidate.seq) === seq)
+      return (
+        Number.isSafeInteger(seq) &&
+        seq < Number(event.seq) &&
+        cited?.type === 'user/message' &&
+        cited.data?.source?.kind === 'user'
+      )
+    })
+    return { title, messageSeqs: valid ? refs.map(Number) : [] }
+  }
+  return undefined
+}
+
+export function resumeSession(
+  ctx: PluginContextLike | undefined,
+  sessionId: string,
+): { resumed: boolean; wasRetired: boolean; wasTransferred: boolean; targetSessionId?: string } {
+  const wasRetired = retiredSessions.has(sessionId)
+  const transfer = transferredSessions.get(sessionId)
+  retiredSessions.delete(sessionId)
+  transferredSessions.delete(sessionId)
+  // Clear every latch that would otherwise reject the session on its next step.
+  deferredOverflowTargets.delete(sessionId)
+  overflowRetries.delete(sessionId)
+  autoGraftStates.delete(sessionId)
+  pendingGraftSources.delete(sessionId)
+  pendingConfirms.delete(sessionId)
+  // v7.4: and give it a grace window, or the next single message grafts it again.
+  autoGraftSuppressedUntil.set(sessionId, Date.now() + AUTO_GRAFT_RESUME_GRACE_MS)
+  // Forget that it was a target, so the chain guard does not keep protecting it.
+  graftTargets.delete(sessionId)
+
+  const target = ctx ?? ctxForStores()
+  if (target !== undefined) {
+    persistRetiredStore(target)
+    persistTransferredStore(target)
+    persistGraftTargetStore(target)
+    persistAutoGraftSuppression(target)
+    // v7.3.1: take the `[已转移]` signpost down.
+    //
+    // This runs even when the session was not currently retired, so the call is
+    // idempotent: re-running it on an already-resumed session still repairs a
+    // marker left by an earlier version.
+    try {
+      const live = (target.get?.('sessions') as any)?.get?.(sessionId)
+      if (live !== undefined && typeof live.append === 'function') {
+        const events = typeof live.snapshotEvents === 'function' ? live.snapshotEvents(0) : []
+        const restored = restorableTitle(events)
+        const current = [...events].reverse().find((event: any) => event?.type === 'session/title')
+        const currentTitle = typeof current?.data?.title === 'string' ? current.data.title : ''
+        const needsRestore = PLUGIN_TITLE_MARKERS.some((marker) => currentTitle.startsWith(marker))
+        if (needsRestore || restored !== undefined) {
+          live.append('session/title', {
+            title: restored?.title ?? `[已恢复] ${sessionId}`,
+            messageSeqs: restored?.messageSeqs ?? [],
+            // Empty refs must pair with 'user'; non-empty refs cite human messages,
+            // so 'fallback' is the correct companion and matches the host's own form.
+            source: { kind: (restored?.messageSeqs.length ?? 0) > 0 ? 'fallback' : 'user' },
+          })
+        }
+      }
+    } catch (error) {
+      try {
+        target.logger?.warn?.(
+          `[dsh-graft-slice] could not restore the title for ${sessionId}: ${String((error as any)?.message ?? error)}`,
+        )
+      } catch {
+        // The title is cosmetic; never let it fail the resume.
+      }
+    }
+    try {
+      target.logger?.info?.(
+        `[dsh-graft-slice] resumed ${sessionId} (wasRetired=${wasRetired}, wasTransferred=${transfer !== undefined})`,
+      )
+    } catch {
+      // Logging must not change the outcome.
+    }
+  }
+  return {
+    resumed: wasRetired || transfer !== undefined,
+    wasRetired,
+    wasTransferred: transfer !== undefined,
+    ...(transfer === undefined ? {} : { targetSessionId: transfer.newSessionId }),
+  }
+}
+
+/**
+ * v7.0 C2: derive a tape budget from the model's real context window.
+ *
+ * `maxTotalChars: 0` means "no cap", and that is the shipped default. It is
+ * safe for a hand-run `graft_slice_and_inject` where a human watches the result,
+ * but it is unsafe for `autoGraft`: the tape is copied into a NEW session, and
+ * a tape larger than the window means the target is born already over budget —
+ * which is exactly the condition that re-triggers a graft and starts the chain.
+ *
+ * CJK counts ~1 token per char, Latin ~1 per 4, so 0.5 token/char is a
+ * deliberately pessimistic conversion: the derived budget errs small.
+ */
+/**
+ * v7.3: derive a character budget from a token window.
+ *
+ * The previous formula was `Math.floor(contextWindow * ratio / 0.5)`, i.e. it
+ * multiplied by two. That was written for a mixed Latin corpus where a token is
+ * ~4 characters, and it is exactly wrong for Chinese: 1 CJK character is ~1
+ * token, so "half the window in characters" is half the window in TOKENS on a
+ * Chinese tape — but the old formula turned a 200k window into a 200k-character
+ * budget, which on Chinese content is 200k tokens, i.e. the whole window with no
+ * headroom left for the system prompt, tools, or the reply.
+ *
+ * Measured on this machine: a 2,300-character Chinese sample prices at ~2,300
+ * tokens under the same heuristic the plugin uses (1 per CJK char, 1 per 4 Latin
+ * chars). So the honest conversion at ratio r is:
+ *
+ *     chars ≈ tokens * r        (CJK worst case, 1 char = 1 token)
+ *
+ * Using the CJK worst case for every corpus is deliberate: it errs small, and a
+ * budget that errs small is a budget that cannot overflow the target. A Latin
+ * tape will simply get a budget it does not need — the tape is built first and
+ * the budget only trims, so the unused headroom costs nothing.
+ */
+export function deriveAutoTapeBudget(contextWindow: number, ratio = 0.5): number {
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return 0
+  const safeRatio = Number.isFinite(ratio) && ratio > 0 && ratio <= 1 ? ratio : 0.5
+  return Math.max(0, Math.floor(contextWindow * safeRatio))
+}
+
+/**
+ * Phase 4: retire the source for the live `agent/pre-step` waterfall.
+ * Retirement never writes to the source log; it is an in-memory gate.
+ */
+export function isRetired(sessionId: string): boolean {
+  return retiredSessions.has(sessionId)
+}
+
+/**
+ * v7.4b: refuse to migrate a source that was already migrated, unless told twice.
+ *
+ * Retirement exists so one conversation cannot grow two divergent targets. This
+ * project's own ledger shows it happening anyway: `session-source-demo` produced
+ * three targets (`auto-graft-demo-1`, `auto-graft-demo-2`,
+ * `handoff-demo`) because the manual path never consulted the
+ * retired/transferred ledger — only the auto path did.
+ *
+ * `graft_resume_session` stays the sanctioned undo: it clears the flag, and the
+ * session becomes slicable again with no extra argument.
+ */
+export function assertResliceAllowed(sessionId: string, allowReslice: boolean): void {
+  if (allowReslice) return
+  const transferred = transferredSessions.get(sessionId)
+  if (transferred !== undefined) {
+    throw graftError(
+      'SOURCE_ALREADY_MIGRATED',
+      `source ${sessionId} was already migrated to ${transferred.newSessionId}; ` +
+        `pass allowReslice: true to slice it again, or call graft_resume_session to undo that migration`,
+    )
+  }
+  if (isRetired(sessionId)) {
+    throw graftError(
+      'SOURCE_ALREADY_MIGRATED',
+      `source ${sessionId} is retired: it already handed off to a target; ` +
+        `pass allowReslice: true to slice it again, or call graft_resume_session to undo the migration`,
+    )
+  }
+}
+
+/**
+ * Slice a source session and create a durable, cold-resumable handoff session.
+ *
+ * Red lines enforced here:
+ *   - no ctx.sessions.fork()
+ *   - skeleton events carry no surfaceOp and no sourceEventSeqs
+ *   - user/message and assistant/message carry { surfaceOp: 'append' }
+ *   - assistant/message carries stream: [] and no sourceEventSeqs
+ *   - no standalone tool/result event
+ *   - open turn refused before any write
+ */
+/**
+ * v7.4 P1-2：两阶段切片（prepare / commit），取代单步 confirm。
+ *
+ * confirm 模式只问"要不要迁移"，用户看不到磁带里装了什么——目标对不对、进度到哪、
+ * 约束是否完整、还剩什么没做。选错的代价是一整轮工作被送到一个不能用的窗口里。
+ *
+ * 所以拆成两步：
+ *   graft_prepare  只读、不写盘、不退休：产出一份可审阅的切片摘要 + 内容哈希。
+ *   graft_commit   提交前校验三件事：preparedId 未过期、哈希仍是用户看过的那个、
+ *                  源会话的最后一个 seq 没有变（否则用户审的是旧切片）。
+ *
+ * 哈希覆盖 goal / pending-state / 约束 / 每一轮重放文本——也就是用户真正读到的部分。
+ */
+export interface PreparedSlice {
+  preparedId: string
+  sourceSessionId: string
+  targetSessionId: string
+  boundarySeq: number
+  sourceLastSeq: number
+  digest: string
+  createdAt: number
+  goal: string
+  pendingStateText: string
+  constraints: string[]
+  turnCount: number
+  pointerCount: number
+  tapeChars: number
+  review: string
+  /** v7.4: the reviewed chunk bodies, for tail-vs-history comparison at commit. */
+  chunks?: Array<{ kind: string; text: string }>
+}
+
+const preparedSlices = new Map<string, PreparedSlice>()
+/** How long a reviewed slice stays commit-able. */
+const PREPARED_TTL_MS = 30 * 60 * 1000
+
+function sliceDigest(_input: {
+  goal: string
+  pendingStateText: string
+  constraints: readonly string[]
+  turns: readonly { turn: number; text: string }[]
+}): string {
+  // Retained for callers that already hold turns; digestOfPlan covers the tape.
+  return createHash('sha256').update(JSON.stringify(_input)).digest('hex')
+}
+
+function digestOfPlan(plan: any): string {
+  // v7.4 P1-2: hash exactly what the user reviews — the goal plus every injected
+  // chunk (`buildInjectionPlan` exposes the tape as chunks, not as turns, so an
+  // earlier draft that hashed `plan.turns` hashed an empty array and every plan
+  // digested the same way).
+  const chunks = Array.isArray(plan?.chunks)
+    ? plan.chunks.map((chunk: any) => [String(chunk?.kind ?? ''), String(chunk?.text ?? '')])
+    : []
+  const constraints: string[] = Array.isArray(plan?.constraints) ? plan.constraints.map(String) : []
+  return createHash('sha256')
+    .update(JSON.stringify({ goal: String(plan?.goal ?? ''), constraints, chunks }))
+    .digest('hex')
+}
+
+async function readSourceForPreview(ctx: PluginContextLike, sourceSessionId: string): Promise<any> {
+  const raw = await ctx.sessionQuery.readSession(sourceSessionId)
+  if (!isRecord(raw) || !Array.isArray(raw.events)) {
+    throw graftError('RED_LINE_SOURCE_UNREADABLE', `session "${sourceSessionId}" could not be read`)
+  }
+  return raw
+}
+
+export async function prepareSlice(
+  ctx: PluginContextLike,
+  config: GraftConfig,
+  sourceSessionId: string,
+  targetSessionId?: string,
+): Promise<PreparedSlice> {
+  const settings = normalizeConfig(config)
+  const sourceId = asNonEmptyString(sourceSessionId, 'sourceSessionId')
+  const raw = await readSourceForPreview(ctx, sourceId)
+  if (!hasClosedTurn(raw.events)) {
+    throw graftError('NO_CLOSED_TURN', `session "${sourceId}" has no closed turn yet; nothing to review`)
+  }
+  const plan = buildInjectionPlan(raw, settings)
+  const digest = digestOfPlan(plan)
+  const sourceLastSeq = Number(raw.events.at(-1)?.seq ?? 0)
+  const boundarySeq = Number(plan?.boundary?.boundarySeq ?? 0)
+  // v7.4 P1-2: the tape is exposed as `chunks`, so read the review material from
+  // there. Reading `plan.turns`/`plan.pendingStateText` (which do not exist on
+  // this object) produced an empty review and a digest over nothing.
+  const chunks: any[] = Array.isArray(plan?.chunks) ? plan.chunks : []
+  const constraints: string[] = Array.isArray(plan?.constraints) ? plan.constraints.map(String) : []
+  const pendingStateText = String(
+    chunks.find((chunk) => chunk?.kind === 'pending-state')?.text ?? '',
+  )
+  const goal = String(plan?.goal ?? '')
+  const tapeChars = Number(plan?.totalTapeChars ?? 0)
+  const turnCount = Number(plan?.recentTurnCount ?? 0)
+
+  const preparedId = `prep-${digest.slice(0, 12)}-${Date.now().toString(36)}`
+  const target = typeof targetSessionId === 'string' && targetSessionId.length > 0
+    ? targetSessionId
+    : autoTargetId(settings)
+
+  const review = [
+    `准备就绪：切片来自 ${sourceId}（最后一轮 Turn ${plan?.boundary?.lastTurn ?? '?'}，边界 seq=${boundarySeq}）。`,
+    '',
+    `目标会话 id：${target}`,
+    `重放轮数：${turnCount} 轮 / ${tapeChars} 字符；可回读指针 ${Number(plan?.pointerCount ?? 0)} 处`,
+    `注入块：${chunks.map((chunk) => `${String(chunk?.kind ?? '?')}(${String(chunk?.text ?? '').length})`).join(' · ')}`,
+    '',
+    '【目标】',
+    goal.slice(0, 600),
+    '',
+    '【进度与下一步】',
+    pendingStateText.slice(0, 900),
+    '',
+    constraints.length > 0 ? `【约束 ${constraints.length} 条】\n- ${constraints.slice(0, 10).join('\n- ')}` : '【约束】无',
+    '',
+    ...(leftoverWarningLine() === undefined ? [] : ['', leftoverWarningLine()]),
+    `切片哈希：${digest}`,
+    `preparedId：${preparedId}（30 分钟内可用 graft_commit 提交）`,
+  ].join('\n')
+
+  const entry: PreparedSlice = {
+    preparedId,
+    sourceSessionId: sourceId,
+    targetSessionId: target,
+    boundarySeq,
+    sourceLastSeq,
+    digest,
+    createdAt: Date.now(),
+    goal,
+    pendingStateText,
+    constraints,
+    turnCount,
+    pointerCount: Number(plan?.pointerCount ?? 0),
+    tapeChars,
+    review,
+    // v7.4: keep the chunk bodies so commit can tell a stale TAIL (expected while
+    // the session slices itself) from a changed HISTORY (a real reason to refuse).
+    chunks: (Array.isArray(plan?.chunks) ? plan.chunks : []).map((chunk: any) => ({
+      kind: String(chunk?.kind ?? ''),
+      text: String(chunk?.text ?? ''),
+    })),
+  }
+  preparedSlices.set(preparedId, entry)
+  persistPrepared()
+  return entry
+}
+
+export async function commitPreparedSlice(
+  ctx: PluginContextLike,
+  config: GraftConfig,
+  preparedId: string,
+  expectedDigest: string,
+): Promise<GraftReport> {
+  const settings = normalizeConfig(config)
+  loadPrepared()
+  const entry = preparedSlices.get(preparedId)
+  if (entry === undefined) {
+    throw graftError('PREPARED_UNKNOWN', `no prepared slice "${preparedId}"; call graft_prepare first`)
+  }
+  if (Date.now() - entry.createdAt > PREPARED_TTL_MS) {
+    preparedSlices.delete(preparedId)
+    persistPrepared()
+    throw graftError('PREPARED_EXPIRED', `prepared slice "${preparedId}" is older than 30 minutes; prepare again`)
+  }
+  if (typeof expectedDigest !== 'string' || expectedDigest.length === 0) {
+    throw graftError('SLICE_DIGEST_REQUIRED', 'graft_commit needs the digest shown by graft_prepare')
+  }
+  if (expectedDigest !== entry.digest) {
+    throw graftError('SLICE_DIGEST_MISMATCH', `digest does not match the prepared slice (${entry.digest.slice(0, 12)}…)`)
+  }
+  // Rebuild from the source as it is NOW.
+  //
+  // v7.4: the hard invariant is the BOUNDARY, not the last seq.
+  //
+  // Comparing `lastSeq` made the two-phase path unusable for the case it exists
+  // for: a session slicing ITSELF. Every tool call during the review appends
+  // events, so the last seq always moves and commit always refuses. Observed
+  // immediately on the first self-slice attempt: 14578 -> 14583, refused.
+  //
+  // The boundary is what the tape's structure depends on: it fixes which turns are
+  // replayed, which are indexed, and the seq range of the read-back index. Events
+  // appended after it belong to the OPEN turn and only affect the carryover and
+  // the pending state — the live tail, which is expected to move.
+  //
+  // So: a moved boundary invalidates the review (the user approved a different
+  // slice); a moved tail does not, and is reported instead of silently accepted.
+  const raw = await readSourceForPreview(ctx, entry.sourceSessionId)
+  const boundaryNow = locateBoundary(raw.events).boundarySeq
+  if (boundaryNow !== entry.boundarySeq) {
+    throw graftError(
+      'SOURCE_DRIFT',
+      `the source closed another turn since the review (boundary ${entry.boundarySeq} -> ${boundaryNow}); prepare again`,
+    )
+  }
+  const rebuilt = buildInjectionPlan(raw, settings)
+  // The tail may have grown while the user was reading. Name what changed rather
+  // than pretending it did not.
+  //
+  // v7.4: compare BY POSITION, not by kind. `recent-turn` (and `subagent-reports`)
+  // legitimately appear several times, so a `Map<kind, text>` keeps only the last
+  // one and reports every earlier occurrence as changed — a false mismatch that
+  // refused every commit with "differs in recent-turn, recent-turn, recent-turn".
+  const tailKinds = new Set(['open-turn-carryover', 'pending-state', 'workspace-files', 'task-status', 'open-work'])
+  const before = Array.isArray(entry.chunks) ? entry.chunks : []
+  const after = Array.isArray(rebuilt?.chunks) ? rebuilt.chunks : []
+  // v7.4b: compare the STABLE chunks against each other, ignoring tail chunks on
+  // BOTH sides.
+  //
+  // Comparing positionally over the full list looked correct while the tail chunk
+  // already existed in both tapes (live case: carryover 277 → 370). It breaks the
+  // moment the open turn gains its FIRST chunk — e.g. the model writes one
+  // paragraph before committing: `open-turn-carryover` appears at the front and
+  // every later position shifts by one, so recent-turn/readback-index are
+  // reported as changed and a legitimate tail refresh is refused.
+  const isTail = (chunk: { kind?: unknown }): boolean => tailKinds.has(String(chunk.kind ?? '').replace(/#\d+$/u, ''))
+  const stableBefore = before.filter((chunk) => !isTail(chunk))
+  const stableAfter = after.filter((chunk) => !isTail(chunk))
+  const changed: string[] = []
+  if (stableBefore.length !== stableAfter.length) {
+    const describe = (list: Array<{ kind: string }>): string => list.map((chunk) => chunk.kind).join('|')
+    throw graftError(
+      'SLICE_DIGEST_MISMATCH',
+      `the slice rebuilt from the source has a different structure` +
+        ` (reviewed: ${describe(before)}; rebuilt: ${describe(after)}); prepare again`,
+    )
+  }
+  for (let index = 0; index < stableBefore.length; index += 1) {
+    const a = stableBefore[index]
+    const b = stableAfter[index]
+    if (String(a.kind) !== String(b.kind) || String(a.text) !== String(b.text)) {
+      changed.push(String(b.kind))
+    }
+  }
+  // The tail is allowed to move, but every move must be named.
+  for (const kind of tailKinds) {
+    const a = before.find((chunk) => String(chunk.kind).replace(/#\d+$/u, '') === kind)
+    const b = after.find((chunk) => String(chunk.kind).replace(/#\d+$/u, '') === kind)
+    if (a === undefined && b === undefined) continue
+    if (a === undefined || b === undefined || String(a.text) !== String(b.text)) changed.push(kind)
+  }
+  const stableChanged = changed.filter((kind) => !tailKinds.has(kind.replace(/#\d+$/u, '')))
+  if (stableChanged.length > 0) {
+    // v7.4: name BOTH structures. "differs in recent-turn, recent-turn, recent-turn"
+    // is unactionable — a reader cannot tell a shifted layout from changed text.
+    const describe = (list: Array<{ kind: string }>): string => list.map((chunk) => chunk.kind).join('|')
+    throw graftError(
+      'SLICE_DIGEST_MISMATCH',
+      `the slice rebuilt from the source differs from the reviewed one in ${[...new Set(stableChanged)].join(', ')}` +
+        ` (reviewed: ${describe(before)}; rebuilt: ${describe(after)}); prepare again`,
+    )
+  }
+  const tailRefreshed = changed.length > 0
+  // v7.4b: the review approved a specific tape; a refreshed tail means we wrote
+  // something newer. That has to reach the CALLER (the model/UI reading the tool
+  // result), not just the host log.
+  //
+  // Measured on `handoff-demo`: prepare reviewed `open-turn-carryover(277)`,
+  // then the model wrote one more paragraph before calling commit, so the tape
+  // written to disk carried 370 chars of carryover. The result still said
+  // "Committed the reviewed slice to handoff-demo." — a silent difference
+  // between what was approved and what was committed.
+  const tailRefresh = tailRefreshed
+    ? {
+        kinds: [...new Set(changed)],
+        reviewedChars: before
+          .filter((chunk) => tailKinds.has(chunk.kind.replace(/#\d+$/u, '')))
+          .reduce((sum, chunk) => sum + String(chunk.text ?? '').length, 0),
+        committedChars: after
+          .filter((chunk) => tailKinds.has(chunk.kind.replace(/#\d+$/u, '')))
+          .reduce((sum, chunk) => sum + String(chunk.text ?? '').length, 0),
+      }
+    : undefined
+
+  const report = await graftSliceAndInject(ctx, config, entry.sourceSessionId, entry.targetSessionId)
+  preparedSlices.delete(preparedId)
+  persistPrepared()
+  // v7.4: surface that the live tail moved during the review, so the caller knows
+  // the committed tape is fresher than what it approved — not silently different.
+  if (tailRefreshed) {
+    try {
+      ctx.logger?.info?.(
+        `[dsh-graft-slice] commit refreshed the live tail while the review was open (${[...new Set(changed)].join(', ')})`,
+      )
+    } catch {
+      // Reporting must not change the result.
+    }
+  }
+  return tailRefresh === undefined ? report : { ...report, tailRefreshed: tailRefresh }
+}
+
+function loadPrepared(): void {
+  if (preparedStorePath.length === 0) return
+  try {
+    const parsed = JSON.parse(readFileSync(preparedStorePath, 'utf8'))
+    if (!isRecord(parsed)) return
+    for (const [id, value] of Object.entries(parsed)) {
+      if (!isRecord(value)) continue
+      if (typeof value.digest !== 'string' || typeof value.sourceSessionId !== 'string') continue
+      preparedSlices.set(id, {
+        preparedId: id,
+        sourceSessionId: value.sourceSessionId,
+        targetSessionId: typeof value.targetSessionId === 'string' ? value.targetSessionId : '',
+        boundarySeq: Number(value.boundarySeq ?? 0),
+        sourceLastSeq: Number(value.sourceLastSeq ?? 0),
+        digest: value.digest,
+        createdAt: Number(value.createdAt ?? 0),
+        goal: String(value.goal ?? ''),
+        pendingStateText: String(value.pendingStateText ?? ''),
+        constraints: Array.isArray(value.constraints) ? value.constraints.map(String) : [],
+        turnCount: Number(value.turnCount ?? 0),
+        pointerCount: Number(value.pointerCount ?? 0),
+        tapeChars: Number(value.tapeChars ?? 0),
+        review: String(value.review ?? ''),
+        // v7.4: chunks must survive the round-trip. This loader rebuilds the entry
+        // field by field, so a field missing from this list is silently dropped —
+        // and a dropped `chunks` makes commit compare against an empty `before`,
+        // which reports EVERY stable block as changed and refuses a valid commit.
+        chunks: Array.isArray(value.chunks)
+          ? value.chunks
+              .filter((chunk: any) => isRecord(chunk))
+              .map((chunk: any) => ({ kind: String(chunk.kind ?? ''), text: String(chunk.text ?? '') }))
+          : undefined,
+      })
+    }
+  } catch {
+    // A missing or corrupt prepared store only costs the pending review.
+  }
+}
+
+function persistPrepared(): void {
+  if (preparedStorePath.length === 0) return
+  try {
+    const payload: Record<string, PreparedSlice> = {}
+    for (const [id, entry] of preparedSlices) payload[id] = entry
+    mkdirSync(dirname(preparedStorePath), { recursive: true })
+    writeJsonAtomic(preparedStorePath, payload)
+  } catch {
+    // Best effort: a lost prepared slice is recoverable by preparing again.
+  }
+}
+
+/** v7.4: keep the resume grace across restarts, or a restart re-enables the trap. */
+function persistAutoGraftSuppression(ctx: PluginContextLike): void {
+  try {
+    const payload: Record<string, number> = {}
+    for (const [id, until] of autoGraftSuppressedUntil) {
+      if (Number.isFinite(until)) payload[id] = until
+    }
+    mkdirSync(dirname(autoGraftSuppressedPath), { recursive: true })
+    writeJsonAtomic(autoGraftSuppressedPath, payload)
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] cannot write ${autoGraftSuppressedPath}: ${String((error as any)?.message ?? error)}`,
+      )
+    } catch {
+      // A failed write only shortens the grace window; it must not fail a resume.
+    }
+  }
+}
+
+function loadAutoGraftSuppression(): void {
+  try {
+    const parsed = JSON.parse(readFileSync(autoGraftSuppressedPath, 'utf8'))
+    if (!isRecord(parsed)) return
+    const now = Date.now()
+    for (const [id, until] of Object.entries(parsed)) {
+      if (typeof until !== 'number' || !Number.isFinite(until)) continue
+      if (until > now) autoGraftSuppressedUntil.set(id, until)
+    }
+  } catch {
+    // Missing or corrupt: an empty suppression set is the safe default only if
+    // auto-graft is off; with it on, the resume grace is re-armed on each resume.
+  }
+}
+
+export async function graftSliceAndInject(
+  ctx: PluginContextLike,
+  config: GraftConfig,
+  sourceSessionId: string,
+  newSessionId: string,
+  signal?: AbortSignal,
+  options?: {
+    sourceSnapshot?: { session: any; events: any[] }
+    /** Runtime knobs read from the full log; a truncated snapshot cannot carry them. */
+    runtimeIntent?: RuntimeIntent
+    /** Background constraint refinement supplied by apply(); keeps the migration non-blocking. */
+    refineConstraints?: (sourceSessionId: string, targetSessionId: string, events: readonly SessionEventLike[]) => void
+    /**
+     * v7.3.1: the agent that invoked the graft, used as the tool-availability
+     * scope when the source has no live agent. Without any scope the lookup falls
+     * back to the GLOBAL view, which omits preset-scoped tools and therefore
+     * downgrades every pointer in the tape.
+     */
+    callingAgent?: unknown
+  },
+): Promise<GraftReport> {
+  const settings = normalizeConfig(config)
+  const sourceId = asNonEmptyString(sourceSessionId, 'sourceSessionId')
+  const newId = asNonEmptyString(newSessionId, 'newSessionId')
+  if (sourceId === newId) {
+    throw graftError('SAME_SESSION', 'sourceSessionId and newSessionId must differ')
+  }
+  if (inFlight.has(newId)) {
+    throw graftError('DUPLICATE_IN_FLIGHT', `a graft for newSessionId ${newId} is already in flight`)
+  }
+
+  // Preflight: never overwrite a live or persisted identity.
+  if (ctx.sessions.get(newId) !== undefined) {
+    throw graftError('SESSION_EXISTS', `session ${newId} is already live`)
+  }
+  const persistence = ctx.get('sessionPersistence')
+  if (!isRecord(persistence) || typeof persistence.create !== 'function') {
+    throw graftError(
+      'PERSISTENCE_REQUIRED',
+      'ctx.sessionPersistence is not mounted; a bare ctx.sessions.create session is not durable and cannot be cold-resumed',
+    )
+  }
+  if (typeof persistence.stat === 'function') {
+    const existing = await persistence.stat(newId)
+    if (existing !== undefined && existing !== null) {
+      throw graftError('SESSION_EXISTS', `session ${newId} already exists in durable storage`)
+    }
+  }
+
+  inFlight.add(newId)
+  try {
+    // Phase 1 + 2: read, validate, locate boundary, build tape and plan.
+    const raw = options?.sourceSnapshot ?? await ctx.sessionQuery.readSession(sourceId)
+    if (options?.sourceSnapshot !== undefined && raw.session?.id !== sourceId) {
+      throw graftError('SOURCE_MISMATCH', 'sourceSnapshot header does not match sourceSessionId')
+    }
+    if (!Array.isArray(raw.events)) {
+      throw graftError('INVALID_SOURCE', `source session ${sourceId} returned no event array`)
+    }
+    // v6.1: a subagent session is not a user session.
+    //
+    // It has no independent goal, it inherits DSH's delegation boilerplate
+    // ("send your result to that agent"), and migration deliberately strips
+    // lineage — so any such instruction becomes an illegal action for a
+    // top-level target. Real E2E produced exactly that: the migrated session
+    // called send_message against an agent it does not belong to.
+    const sourceHeader = (raw.session ?? {}) as any
+    const sourceOrigin = sourceHeader.origin
+    const sourceDepth = sourceHeader.delegationDepth
+    const isSubagent =
+      sourceOrigin === 'subagent' ||
+      (typeof sourceDepth === 'number' && sourceDepth > 0) ||
+      sourceHeader.parentSession !== undefined ||
+      sourceHeader.parentSessionId !== undefined
+    if (isSubagent) {
+      throw graftError(
+        'GRAFT_REFUSED',
+        'GRAFT_REFUSED: source is a subagent session (origin=' +
+          String(sourceOrigin ?? 'none') +
+          ', delegationDepth=' +
+          String(sourceDepth ?? 0) +
+          '). Subagent sessions have no independent goal and carry delegation-only ' +
+          'instructions that are illegal for a top-level target. Migrate the top-level session instead.',
+      )
+    }
+
+    // v5.2 补丁二：关键路径只用正则，LLM 提取移交后台。
+    // 同步等待会随源历史增长而变慢，直接推高「触发到新会话」的延迟。
+    const fastConstraints = extractConstraints(raw.events)
+    // v7.0 P0-1: probe the tool registry through its REAL contract.
+    //
+    // The previous version called `ctx.get('tools').list()`. That method does
+    // not exist — `ToolService` exposes `get(name, scope?)`, `schemas(scope?)`,
+    // `register`, `restrict`, `guard`, `execute`, `presentAs`, `executionMode`.
+    // The `typeof tools.list !== 'function'` guard therefore returned `undefined`
+    // on every real host, and `availableTools === undefined` means "assume all
+    // tools are available" — so F3 downgrade never fired in production. The
+    // unit tests passed because the fixture provided a `list()` that the host
+    // does not have: a defence that existed only in the harness.
+    //
+    // `schemas()` is the right call rather than a single `get()` per pointer:
+    // it returns the scope-visible set in one pass, which is exactly the
+    // question "which tools can the target actually call".
+    // v7.3.1 CRITICAL: resolve availability in the RIGHT scope, and never
+    // downgrade on an incomplete view.
+    //
+    // Measured on the live desktop. The previous call was `tools.schemas()` with
+    // no scope, and the contract says: "the viewing scope (the agent); omitted =
+    // the GLOBAL view". Core tools are registered per-AGENT scope (through the
+    // preset), so the global view listed almost none of the tools the source had
+    // actually used. Every pointer was therefore marked
+    // `（历史记录：使用了当前环境不支持的工具 X…）`, and because the readback
+    // index's name extractor did not recognise that shape, the whole index
+    // collapsed to:
+    //
+    //   - seq=360  Turn 5 · tool
+    //   - seq=364  Turn 5 · tool
+    //
+    // A target reading that has no reason to fetch anything, so it re-explored
+    // the filesystem with pwsh/read instead of retrieving. The scope bug did not
+    // merely mislabel pointers; it destroyed the retrieval path the whole design
+    // depends on.
+    //
+    // Two changes, because either alone is insufficient:
+    //   1. ask in the SOURCE agent's scope (the target inherits its preset, so
+    //      that scope is the honest proxy for what the target will see);
+    //   2. cross-check every name the projection did not list through
+    //      `get(name, scope)` before concluding it is absent. A scope-filtered
+    //      projection is not evidence of absence; the old code treated it as
+    //      such. A downgrade now requires BOTH lookups to fail.
+    const availableTools = (() => {
+      try {
+        const tools = ctx.get('tools') as any
+        if (tools === undefined || tools === null) return undefined
+        const scope = (() => {
+          try {
+            const agents = ctx.get('agents') as any
+            const source = typeof agents?.get === 'function' ? agents.get(sourceSessionId) : undefined
+            if (source !== undefined) return source
+          } catch {
+            // Fall through to the calling scope.
+          }
+          return options?.callingAgent
+        })()
+        const names = new Set<string>()
+        // Preferred: the model-facing projection for that scope.
+        if (typeof tools.schemas === 'function') {
+          const schemas = scope === undefined ? tools.schemas() : tools.schemas(scope)
+          for (const entry of Array.isArray(schemas) ? schemas : []) {
+            const name = typeof entry === 'string' ? entry : entry?.name
+            if (typeof name === 'string' && name.length > 0) names.add(name)
+          }
+        }
+        // Independent check for every tool the source actually called. This is
+        // bounded by the number of DISTINCT tool names, not by the number of
+        // calls, and it is what stops an incomplete projection from producing a
+        // false "this tool does not exist".
+        if (typeof tools.get === 'function') {
+          const used = new Set<string>()
+          for (const event of raw.events) {
+            if (event.type !== 'tool/call') continue
+            const name = typeof event.data?.name === 'string' ? event.data.name : ''
+            if (name.length > 0) used.add(name)
+          }
+          for (const name of used) {
+            if (names.has(name)) continue
+            const resolved = scope === undefined ? tools.get(name) : tools.get(name, scope)
+            if (resolved !== undefined) names.add(name)
+          }
+        }
+        // An empty set means "we could not see anything", not "nothing exists".
+        // Returning it would downgrade every pointer in the tape.
+        return names.size > 0 ? names : undefined
+      } catch {
+        return undefined
+      }
+    })()
+    const plan = buildInjectionPlan(raw, settings, fastConstraints, 'regex-fallback', availableTools)
+    const runtimeIntent = options?.runtimeIntent ?? extractRuntimeIntent(raw.events)
+    const events = buildInjectionEvents(plan, settings, newId, sourceId, runtimeIntent, raw.events)
+    const types = events.map((event) => event.type)
+    // v7.3.1 CRITICAL: carry the EFFECTIVE agent preset, not the header's initial
+    // one.
+    //
+    // Measured on the live desktop. The source session's header said
+    // `agentPreset: 'standard'`, but at seq 9 it emitted
+    //
+    //   agent-preset/selected { agentPreset: 'cordis' }
+    //
+    // and every later `request/header` listed 40-41 tools INCLUDING
+    // `plugin_manager`, `plugin_market` and `cordis_inspect_*`. Those tools come
+    // from the `cordis` preset. Copying only the header resumed the target under
+    // `standard`, so it had 37 tools and was missing exactly the four the task
+    // needed ("check the plugin installation"). The target's own reasoning said
+    // so: "plugin_manager isn't in my tool list".
+    //
+    // The header is immutable creation metadata; `agent-preset/selected` is the
+    // durable record of a preset change. The LAST such event is the current
+    // preset, so that is what must be carried.
+    const sourceAgentPreset = (() => {
+      let selected: string | undefined
+      for (const event of raw.events) {
+        if (event?.type !== 'agent-preset/selected') continue
+        const value = (event.data as any)?.agentPreset
+        if (typeof value === 'string' && value.length > 0) selected = value
+      }
+      if (selected !== undefined) return selected
+      const fromHeader = (raw.session as any)?.agentPreset
+      return typeof fromHeader === 'string' && fromHeader.length > 0 ? String(fromHeader) : undefined
+    })()
+
+    // Phase 3: prepare a detached zero-inheritance session. This is the same
+    // primitive sessions.create() calls internally, but it does not enter the
+    // live store; a later agents.resume() can therefore open it for write.
+    const prepared = ctx.sessions.prepare(newId, {
+      meta: { cwd: plan.cwd, ...(sourceAgentPreset === undefined ? {} : { agentPreset: sourceAgentPreset }) },
+    })
+    if (ctx.sessions.get(newId) !== undefined) {
+      throw graftError('SESSION_LEAKED_LIVE', `session ${newId} unexpectedly entered the live store`)
+    }
+    if (prepared.header.cwd !== plan.cwd) {
+      throw graftError('CWD_MISMATCH', 'prepared session cwd is not the exact source cwd')
+    }
+    assertTopLevelHeader(prepared.header)
+
+    // Phase 3: BUILD AND VALIDATE IN MEMORY, before touching durable storage.
+    //
+    // v7.4 P0-1a, the real fix. The previous order was create → append → flush →
+    // verify, and the verify step had no cleanup. Cleanup cannot save it either:
+    // the host's `SessionPersistence` contract exposes only `create`/`open`/
+    // `flush`/`stat`/`list` — there is NO delete, so `discardPartialTarget` can
+    // only log "the id stays reserved". An artifact that failed verification
+    // would therefore stay on disk forever, listed but unopenable.
+    //
+    // The only reliable guarantee is that an invalid tape never gets written. The
+    // prepared session is a detached, purely in-memory object, so the whole tape
+    // can be built and run through the SAME `assertColdLog` the reader uses, and
+    // only then handed to the persistence layer.
+    const appended: SessionEventLike[] = []
+    for (const item of events) {
+      if (item.surface) {
+        const event =
+          item.type === 'system/message'
+            ? appendSystemMessage(prepared, item.data)
+            : item.type === 'user/message'
+              ? appendUserMessage(prepared, item.data)
+              : appendAssistantMessage(prepared, item.data)
+        appended.push(event)
+      } else {
+        // v7.3 CRITICAL: do NOT point the title at the goal message.
+        //
+        // This used to set `messageSeqs = [goalSeq]`. The host's validator
+        // requires every cited seq to be an EARLIER `user/message` whose
+        // `source.kind === 'user'` — a HUMAN message. The goal is authored by
+        // this plugin (`plugin:graft-replay`), so citing it is exactly the
+        // "must cite distinct earlier human user/message events" rejection.
+        //
+        // A target has no human message to cite, so the title keeps its empty
+        // `messageSeqs` (paired with `kind: 'user'`, see buildInjectionEvents).
+        appended.push(appendLogOnly(prepared, item.type, item.data))
+      }
+    }
+
+    const snapshot = prepared.snapshotEvents(0)
+    if (snapshot.length !== events.length) {
+      throw graftError('APPEND_COUNT_MISMATCH', `prepared session has ${snapshot.length} events, expected ${events.length}`)
+    }
+    // Pre-write validation. Same function the cold reader uses, same rules: an
+    // invalid title, a broken turn/step skeleton, or a stray surface op fails HERE,
+    // while the cost of failing is zero.
+    assertColdLog(
+      { inheritedEventCount: 0, session: prepared.header, events: snapshot },
+      plan.cwd,
+      types,
+      settings.skeletonTurn,
+      settings.skeletonStep,
+    )
+
+    // v7.4 P0-2: journal the intent BEFORE reserving the id.
+    //
+    // Write-ahead is what makes recovery possible: a process killed right after
+    // `create()` has a record saying which source was migrating and that a target
+    // may exist, so the next start can mark it instead of presenting it as usable.
+    writeGraftTxn(ctx, {
+      sourceSessionId: sourceId,
+      targetSessionId: newId,
+      state: 'PREPARING',
+      stage: 'persistence.create',
+      updatedAt: new Date().toISOString(),
+    })
+
+    // Phase 3 + 4: only now take write ownership and make it durable.
+    const handle = await persistence.create(prepared.header, { inheritedEventCount: 0, ...(signal === undefined ? {} : { signal }) })
+    let failed: unknown
+    try {
+      await handle.append(snapshot)
+      // The spec's ctx.sessions.flush() is a live-store barrier; a detached
+      // prepared session is rejected by liveEntryFor(). The handle flush is the
+      // durability barrier for this artifact and close() releases the writer
+      // ownership so a later resume can open it.
+      await handle.flush()
+      await handle.close()
+      writeGraftTxn(ctx, {
+        sourceSessionId: sourceId,
+        targetSessionId: newId,
+        state: 'TARGET_FLUSHED',
+        stage: 'persistence.flush',
+        updatedAt: new Date().toISOString(),
+      })
+    } catch (error) {
+      failed = error
+      try {
+        await handle.close()
+      } catch {
+        // Preserve the primary failure.
+      }
+      // v7.0 P0-4: a failed flush must not leave a half-written target behind.
+      //
+      // `create()` reserves the id immediately, so by the time `append` or
+      // `flush` throws, a header — and possibly a partial event log — is already
+      // on disk under the target's name. Since `retireSource` runs later, the
+      // source stays alive, but the target id is now OCCUPIED by a corrupt
+      // artifact. The user sees a session in the sidebar that cannot resume, and
+      // a retry with the same id fails with SESSION_EXISTS.
+      //
+      // The host exposes no `delete` on SessionPersistence, so cleanup is
+      // best-effort and layered:
+      //   1. `discardPrepared` (if the store offers it) drops the reservation.
+      //   2. `persistence.remove`/`delete` (if a backend offers one) removes the
+      //      artifact.
+      //   3. The prepared session is detached, so dropping the in-memory handle
+      //      is enough to keep it out of the live store.
+      // Whatever refuses to go is reported, because a silent failure here is how
+      // a phantom session survives a migration that claimed to fail.
+      // v7.2: mark the wreckage BEFORE trying to remove it.
+      //
+      // Cleanup is best-effort (the host exposes no delete on SessionPersistence),
+      // so a failed target can survive. When it does, it must not look resumable:
+      // a `[损坏]` title and a breadcrumb are what stop a user from opening it and
+      // concluding the migration "half worked".
+      //
+      // Order matters — mark first, then discard. If the process dies between the
+      // two, the mark is what remains, which is the safe direction.
+      //
+      // v7.4 P0-2: the breadcrumb is now a real transaction record (see
+      // `.txn/`), so recovery after a restart is possible instead of merely
+      // informative.
+      markTargetBroken(ctx, newId, String((error as any)?.message ?? error), {
+        sourceSessionId: sourceId,
+        stage: 'persistence.flush',
+      })
+      await discardPartialTarget(ctx, newId)
+      throw error
+    } finally {
+      if (failed === undefined) {
+        // close() already ran on the success path; this is intentionally empty.
+      }
+    }
+
+    // Phase 4: cold-read verification of what was ACTUALLY persisted.
+    //
+    // The tape was already validated in memory before the write, so a failure here
+    // means the persistence round-trip corrupted it — rare, and not something the
+    // plugin can undo: the host exposes no delete. What it CAN do is make sure the
+    // wreckage cannot be mistaken for a usable session, and keep the source alive.
+    let verified = false
+    if (settings.verifyReadBack) {
+      try {
+        const cold = await ctx.sessionQuery.readSession(newId)
+        assertColdLog(cold, plan.cwd, types, settings.skeletonTurn, settings.skeletonStep)
+        verified = true
+        writeGraftTxn(ctx, {
+          sourceSessionId: sourceId,
+          targetSessionId: newId,
+          state: 'COLD_VERIFIED',
+          stage: 'cold-read',
+          updatedAt: new Date().toISOString(),
+        })
+      } catch (error) {
+        plan.warnings.push(`cold verification failed; target marked broken: ${String((error as any)?.message ?? error)}`)
+        markTargetBroken(ctx, newId, `冷读校验失败：${String((error as any)?.message ?? error)}`, {
+          sourceSessionId: sourceId,
+          stage: 'cold-read',
+        })
+        await discardPartialTarget(ctx, newId)
+        throw error
+      }
+    }
+
+    // Mount the detached artifact into the source workspace group so the
+    // sidebar does not show it as "未分组". The registry is optional in
+    // headless/base-only profiles; a failure is a warning, not a lost handoff.
+    let workspaceAttached = false
+    let workspaceId: string | null = null
+    const workspaceRegistry = ctx.get('workspaceRegistry')
+    if (isRecord(workspaceRegistry) && typeof workspaceRegistry.resolveByPath === 'function') {
+      try {
+        let workspace = await workspaceRegistry.resolveByPath(plan.cwd)
+        if (workspace === undefined && typeof workspaceRegistry.create === 'function') {
+          workspace = await workspaceRegistry.create(plan.cwd)
+        }
+        if (isRecord(workspace) && typeof workspace.attachSession === 'function') {
+          await workspace.attachSession(newId)
+          workspaceAttached = true
+          workspaceId = typeof workspace.id === 'string' ? workspace.id : null
+        }
+      } catch (error) {
+        plan.warnings.push(`workspace attach failed: ${String((error as any)?.message ?? error)}`)
+      }
+    }
+
+    // v7.3.1: announce the new session to the CLIENT.
+    //
+    // The Web UI learns about sessions exclusively from `api-session/added`,
+    // which `dsh-api-session-controller` emits on `session/created` — i.e. only
+    // for sessions PUBLISHED into the live store:
+    //
+    //   ctx.on("session/created", (session) => {
+    //     ctx.emit("api-session/added", this.listState.summaryFor(session));
+    //   });
+    //
+    // This plugin deliberately creates targets through `sessionPersistence`
+    // instead, because publishing them would BREAK resumability: resume does
+    // `persistence.open(id, "write")` and then the agent factory's
+    // `sessions.enter(session)`, which throws when the id is already in the
+    // store. A published target would be visible and unopenable — the exact
+    // failure this plugin has already been through once.
+    //
+    // So the target stays cold and we emit the notification ourselves.
+    // `dsh-api-remotes` forwards this event to peers, keyed by
+    // `resources.session = (summary) => summary.sessionId`, and the client
+    // applies it through `handleSessionAdded` -> `mergeSummary`.
+    //
+    // The payload is field-for-field what the host's own `summarizeCold(record)`
+    // produces for a persisted session, with `projections` omitted: the client
+    // only calls `applyListBlock` when that field is present, and a hand-built
+    // projection frame is not worth risking the user's sidebar for. The title
+    // gap is covered by the source session's `[已转移] → <id>` marker, which
+    // names this session.
+    //
+    // Best-effort: an absent `emit` (older host) or a refused emit must never
+    // turn a completed handoff into a failure.
+    try {
+      const emit = (ctx as any).emit
+      if (typeof emit === 'function') {
+        const createdAt = Date.now()
+        emit('api-session/added', {
+          sessionId: newId,
+          // summarizeCold: updatedAt = max(createdAt, metadata.lastPromptAt ?? 0)
+          updatedAt: createdAt,
+          agentAvailable: false,
+          formatStatus: 'current',
+          running: false,
+          blank: false,
+          ...(plan.cwd === undefined ? {} : { cwd: plan.cwd }),
+        })
+      }
+    } catch (error) {
+      plan.warnings.push(`client announcement failed: ${String((error as any)?.message ?? error)}`)
+    }
+
+    const retired = settings.retireSource
+    // v7.0 C2: remember that this id is OUR target, so the auto path cannot
+    // graft it again merely because its seeded tape already sits above the
+    // ratio. Marked before retirement so a crash mid-way still leaves the mark.
+    markGraftTarget(newId, sourceId)
+    // v7.0 P0-5: register the durable, every-request constraint section for
+    // this target. The goal message carries the same list; the section is the
+    // copy that compaction cannot reach.
+    if (plan.constraints.length > 0) {
+      targetConstraintSections.set(newId, { constraints: [...plan.constraints], at: Date.now() })
+      persistConstraintSections(ctxForStores())
+    }
+    if (retired) {
+      retiredSessions.add(sourceId)
+      transferredSessions.set(sourceId, {
+        newSessionId: newId,
+        at: Date.now(),
+        reason: `已转移至新会话 ${newId}`,
+      })
+      persistRetiredStore(ctx)
+      persistTransferredStore(ctx)
+      // v7.4 P0-2: the source is now retired AND durable, so the migration is
+      // committed and the journal entry has served its purpose.
+      writeGraftTxn(ctx, {
+        sourceSessionId: sourceId,
+        targetSessionId: newId,
+        state: 'COMMITTED',
+        stage: 'retire',
+        updatedAt: new Date().toISOString(),
+      })
+      clearGraftTxn(sourceId)
+      // Best-effort in-session redirect notice. DSH exposes no cross-session
+      // focus API here; a title event is visible in the sidebar and survives
+      // a reload, while pre-step blocks further input.
+      try {
+        const live = ctx.sessions.get(sourceId) as any
+        if (live !== undefined && typeof live.append === 'function') {
+          live.append('session/title', {
+            title: `[已转移] → ${newId}`,
+            messageSeqs: [],
+            source: { kind: 'user' },
+          })
+        }
+      } catch (error) {
+        plan.warnings.push(`old-session redirect title failed: ${String((error as any)?.message ?? error)}`)
+      }
+    }
+    // The migration reached its end without retiring (retireSource: false). The
+    // journal entry is still finished, so a later start must not "recover" it.
+    clearGraftTxn(sourceId)
+
+    try {
+      ctx.logger?.info?.(
+        `[dsh-graft-slice] grafted ${sourceId} -> ${newId}: ${events.length} events, boundary seq ${plan.boundary.boundarySeq}`,
+      )
+    } catch {
+      // Logging must never change the migration result.
+    }
+
+    const firstSeq = 0
+    const lastSeq = events.length - 1
+    // v5.2 补丁二：迁移已经落盘并可用，LLM 精修在后台进行。
+    // 这里刻意不 await：它不该影响「用户看到新会话」的时间。
+    options?.refineConstraints?.(sourceId, newId, raw.events)
+    return {
+      ok: true,
+      sourceSessionId: sourceId,
+      newSessionId: newId,
+      cwd: plan.cwd,
+      goal: plan.goal,
+      goalSource: plan.goalSource,
+      boundarySeq: plan.boundary.boundarySeq,
+      sourceEventCount: raw.events.length,
+      turns: plan.recentTurnCount + plan.olderTurnCount,
+      recentTurnCount: plan.recentTurnCount,
+      recentInjectedCount: plan.recentInjectedCount,
+      olderTurnCount: plan.olderTurnCount,
+      adaptiveDepth: plan.adaptiveDepth,
+      injected: {
+        system: 1,
+        goal: 1,
+        title: 1,
+        oldSummary: plan.chunks.filter((chunk) => chunk.kind === 'old-summary').length,
+        taskStatus: plan.chunks.filter((chunk) => chunk.kind === 'task-status').length,
+        subagentReports: plan.chunks.filter((chunk) => chunk.kind === 'subagent-reports').length,
+        tape: plan.chunks.filter((chunk) => chunk.kind === 'recent-turn').length,
+        pending: plan.chunks.filter((chunk) => chunk.kind === 'pending-state').length,
+        // v7.0: the remaining chunk kinds, so the report's parts always sum to
+        // its total. A report whose arithmetic silently omits a block is how a
+        // reader concludes a block was not injected.
+        workspaceFiles: plan.chunks.filter((chunk) => chunk.kind === 'workspace-files').length,
+        openTurn: plan.chunks.filter((chunk) => chunk.kind === 'open-turn-carryover').length,
+        omittedTurns: plan.chunks.filter((chunk) => chunk.kind === 'omitted-turns').length,
+        readback: plan.chunks.filter((chunk) => chunk.kind === 'readback-index').length,
+        total: 3 + plan.chunks.length,
+      },
+      pointers: {
+        total: plan.pointerCount,
+        recent: plan.pointerCount - plan.olderPointerCount,
+        older: plan.olderPointerCount,
+        olderToolNames: plan.olderToolNames,
+      },
+      constraints: plan.constraints,
+      constraintSource: plan.constraintSource,
+      taskStatus: plan.taskStatus,
+      subagentReports: plan.subagentReports,
+      workspace: {
+        attached: workspaceAttached,
+        id: workspaceId,
+      },
+      eventSeqRange: { first: firstSeq, last: lastSeq },
+      sourceTemplate: sourceForReport(plan.sourceTemplate),
+      skeleton: { turn: settings.skeletonTurn, step: settings.skeletonStep, closed: true },
+      durability: {
+        attached: true,
+        appended: events.length,
+        barrier: 'sessionPersistence.handle.flush',
+        verified,
+      },
+      retired: { source: retired },
+      warnings: plan.warnings,
+    }
+  } finally {
+    inFlight.delete(newId)
+  }
+}
+
+/** Extract one tool/result payload from a source log, as specified in v2.1. */
+export function extractToolResultText(event: SessionEventLike): string | undefined {
+  if (event.type !== 'tool/result') return undefined
+  const message = event.data?.message
+  const blocks = Array.isArray(message?.content) ? message.content : []
+  const toolBlocks = blocks.filter((block: any) => block?.type === 'tool-result')
+  const target = toolBlocks.length > 0 ? toolBlocks : blocks
+  const text = target
+    .flatMap((block: any) => (block?.type === 'tool-result' && Array.isArray(block.content) ? block.content : [block]))
+    .map((block: any) => block?.text)
+    .filter((value: unknown): value is string => typeof value === 'string' && value.length > 0)
+    .join('\n')
+  return text.length > 0 ? text : ''
+}
+
+/**
+ * v7.3: search a source session's log by substring or regular expression.
+ *
+ * Why this is the missing half of the "read it back by seq" design:
+ *
+ * `graft_read_result` answers "what is at seq N". Nothing answered "which seq
+ * mentions AssertionError". So the read-back philosophy only worked for a reader
+ * that already knew the number — which, after a migration, it never does. The
+ * injected index names the *recent* pointers (capped at 24) and the oldest
+ * constraint block; everything else was reachable in principle and unreachable in
+ * practice. A target that needed an older error had to guess seq numbers or
+ * re-run the command.
+ *
+ * Scope is deliberately the two payload-bearing event types: `assistant/message`
+ * (reasoning and answers) and `tool/result` (command output, diffs, test logs).
+ * Those are what a reader searches for. Adding user messages would mostly return
+ * the goal it already has; adding tool calls would return commands it can see in
+ * the pointers.
+ */
+export interface GraftSearchHit {
+  seq: number
+  /** v7.4 P1-1: `user/message` joined the searchable set. */
+  type: 'assistant/message' | 'tool/result' | 'user/message'
+  /** Match position in characters, for a reader who wants to look around it. */
+  offset: number
+  /** Up to 50 characters either side of the match, whitespace-collapsed. */
+  preview: string
+  /** Total characters in the matched event, so the reader knows what it is buying. */
+  totalChars: number
+  /** How many times the query occurs in this event (v7.3). */
+  matchCount: number
+  /**
+   * v7.4 P1-1: the author of a `user/message`, always `'user'` here.
+   *
+   * Present only for user messages, because only they have this ambiguity: the
+   * same event type carries this plugin's goal and the host's runtime context.
+   * The gate above excludes everything that is not a human, so a hit with this
+   * field set is genuinely something the user typed.
+   */
+  sourceKind?: string
+}
+
+export interface GraftSearchResult {
+  found: boolean
+  query: string
+  /** True when the query was parsed as a regular expression. */
+  regex: boolean
+  /** Total individual matches across the log, before `limit` was applied. */
+  totalMatches: number
+  /** v7.3: how many distinct EVENTS matched. This is what `limit` caps. */
+  totalHits: number
+  /** True when `totalHits` exceeded the returned hits. */
+  truncated: boolean
+  hits: GraftSearchHit[]
+  /** Set when the query was meant as a regex but could not be compiled. */
+  error?: string
+}
+
+const SEARCH_PREVIEW_RADIUS = 50
+
+/** Collapse whitespace so a preview stays one readable line. */
+function previewAround(text: string, index: number, length: number): string {
+  const start = Math.max(0, index - SEARCH_PREVIEW_RADIUS)
+  const end = Math.min(text.length, index + length + SEARCH_PREVIEW_RADIUS)
+  const body = text.slice(start, end).replace(/\s+/gu, ' ').trim()
+  return `${start > 0 ? '…' : ''}${body}${end < text.length ? '…' : ''}`
+}
+
+export async function graftSearchHistory(
+  ctx: PluginContextLike,
+  sourceSessionId: string,
+  query: string,
+  limit = 10,
+  useRegex = false,
+): Promise<GraftSearchResult> {
+  const sourceId = asNonEmptyString(sourceSessionId, 'sourceSessionId')
+  const needle = asNonEmptyString(query, 'query')
+  const cap = Math.max(1, Math.min(100, asSafeInteger(limit, 'limit')))
+
+  let matcher: RegExp
+  if (useRegex) {
+    try {
+      matcher = new RegExp(needle, 'giu')
+    } catch (error) {
+      // A malformed pattern is a caller mistake, not a crash: report it so the
+      // model can retry with a literal search instead of losing the session.
+      return {
+        found: false,
+        query: needle,
+        regex: true,
+        totalMatches: 0,
+        truncated: false,
+        hits: [],
+        error: `invalid regular expression: ${String((error as any)?.message ?? error)}`,
+      }
+    }
+  } else {
+    // Literal search: escape every metacharacter so "a.b(" is a substring, not a
+    // pattern. Case-insensitive because log text casing varies by tool.
+    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+    matcher = new RegExp(escaped, 'giu')
+  }
+
+  const raw = await ctx.sessionQuery.readSession(sourceId)
+  const hits: GraftSearchHit[] = []
+  let totalMatches = 0
+  let totalHits = 0
+
+  for (const event of raw.events) {
+    const type = event.type
+    if (type !== 'assistant/message' && type !== 'tool/result' && type !== 'user/message') continue
+    // v7.4 P1-1: user/message is searchable ONLY when a human wrote it.
+    //
+    // The user's own words are the one thing a resumed target cannot reconstruct
+    // from anything else: "绝对不能使用 import re" lives in a `user/message`, and
+    // before this change `graft_search_history('import re')` returned zero hits.
+    // The goal summary may have truncated exactly the clause that mattered.
+    //
+    // But a `user/message` is not automatically a human's: this plugin writes the
+    // goal into one (`plugin:graft-replay`), and the host injects runtime context,
+    // time context, skill catalogs and job reports into the same event type. Letting
+    // those through would make the search answer "the user said X" when the user
+    // said nothing of the kind — the exact class of mistake v7.0 P5 fixed for
+    // replays. Only `kind === 'user'` is a human.
+    let sourceKind: string | undefined
+    if (type === 'user/message') {
+      sourceKind = typeof event.data?.source?.kind === 'string' ? event.data.source.kind : undefined
+      if (sourceKind !== 'user') continue
+    }
+    // Each event type carries its text in a different place:
+    //   tool/result   → data.message (a tool payload; several possible shapes)
+    //   assistant     → data.message
+    //   user/message  → data ITSELF is the message (no `.message` wrapper)
+    // Getting this wrong returns empty text, which reads as "no match" rather than
+    // as a bug — the first version of this change did exactly that.
+    const text =
+      type === 'tool/result'
+        ? extractToolResultText(event) ?? ''
+        : type === 'user/message'
+          ? textOfMessage(event.data)
+          : textOfMessage(event.data?.message)
+    if (text.length === 0) continue
+    matcher.lastIndex = 0
+    let match: RegExpExecArray | null
+    // v7.3: ONE hit per event, not one per match.
+    //
+    // Measured on the live host: a query of "jet hub" returned limit=5 results
+    // that were ALL `seq=152`, because that one event (a grep dump) contained the
+    // phrase 24 times. Every result slot went to the same event, so the reader
+    // learned nothing about the other 23 matching events — the index stopped
+    // doing the one thing it exists for, which is telling you WHERE to look.
+    //
+    // `limit` now caps distinct events. `matchCount` keeps the density visible, so
+    // "this event mentions it 24 times" is still information rather than a reason
+    // to repeat the same row.
+    let matchCount = 0
+    let first: { index: number; length: number } | undefined
+    while ((match = matcher.exec(text)) !== null) {
+      totalMatches += 1
+      matchCount += 1
+      if (first === undefined) first = { index: match.index, length: Math.max(1, match[0].length) }
+      // A zero-length match would spin forever on patterns like "(?:)".
+      if (match[0].length === 0) matcher.lastIndex += 1
+      if (matcher.lastIndex > text.length) break
+    }
+    if (matchCount === 0 || first === undefined) continue
+    totalHits += 1
+    if (hits.length < cap) {
+      hits.push({
+        seq: Number(event.seq),
+        type,
+        offset: first.index,
+        preview: previewAround(text, first.index, first.length),
+        totalChars: text.length,
+        matchCount,
+        // Only present for user/message, where it is always 'user' by the gate
+        // above. Its absence on the other types is meaningful: those were not
+        // authored by a human.
+        ...(sourceKind === undefined ? {} : { sourceKind }),
+      })
+    }
+  }
+
+  return {
+    found: hits.length > 0,
+    query: needle,
+    regex: useRegex,
+    totalMatches,
+    totalHits,
+    // Truncation is about EVENTS withheld, since that is what limit caps now.
+    truncated: totalHits > hits.length,
+    hits,
+  }
+}
+
+/**
+ * Fallback reader for a tool pointer. It bypasses the native tool-layer
+ * authorization by reading the source log directly; it does not write.
+ */
+export async function graftReadResult(
+  ctx: PluginContextLike,
+  sourceSessionId: string,
+  seq: number,
+  maxChars = 100000,
+  lineRange?: { start: number; end: number },
+): Promise<GraftReadResult> {
+  const sourceId = asNonEmptyString(sourceSessionId, 'sourceSessionId')
+  const targetSeq = asSafeInteger(seq, 'seq')
+  const raw = await ctx.sessionQuery.readSession(sourceId)
+  // A pointer may name a tool/result (tool pointer), an assistant/message
+  // (codeblock pointer), or — v7.4 P1-1 — a user/message, which is where the
+  // user's own constraints live.
+  const event = raw.events.find(
+    (candidate) =>
+      Number(candidate.seq) === targetSeq &&
+      (candidate.type === 'tool/result' ||
+        candidate.type === 'assistant/message' ||
+        candidate.type === 'user/message'),
+  )
+  if (event === undefined) {
+    return { found: false, seq: targetSeq, text: null, truncated: false, totalChars: 0 }
+  }
+  // v7.4 P1-1: label the author of a user/message.
+  //
+  // Reading is allowed for every author — the log is a fact and hiding it would be
+  // dishonest. What must never happen is a reader mistaking this plugin's goal, or
+  // the host's runtime context, for something the user said. So the payload carries
+  // the source kind and the renderer states it; the text itself stays verbatim.
+  const sourceKind =
+    event.type === 'user/message' && typeof event.data?.source?.kind === 'string'
+      ? event.data.source.kind
+      : undefined
+  let text =
+    event.type === 'tool/result'
+      ? extractToolResultText(event) ?? ''
+      : event.type === 'user/message'
+        ? textOfMessage(event.data)
+        : textOfMessage(event.data?.message)
+  if (lineRange !== undefined) {
+    const start = asSafeInteger(lineRange.start, 'lineRange.start')
+    const end = asSafeInteger(lineRange.end, 'lineRange.end')
+    const total = lineCount(text)
+    return {
+      found: true,
+      seq: targetSeq,
+      text: sliceLines(text, start, end),
+      truncated: false,
+      totalChars: text.length,
+      lineRange: { start, end, totalLines: total },
+      ...(sourceKind === undefined ? {} : { sourceKind }),
+    }
+  }
+  const limit = asFiniteInteger(maxChars, 100000, 'maxChars')
+  if (limit > 0 && text.length > limit) {
+    return {
+      found: true,
+      seq: targetSeq,
+      text: text.slice(0, limit),
+      truncated: true,
+      totalChars: text.length,
+      ...(sourceKind === undefined ? {} : { sourceKind }),
+    }
+  }
+  return {
+    found: true,
+    seq: targetSeq,
+    text,
+    truncated: false,
+    totalChars: text.length,
+    ...(sourceKind === undefined ? {} : { sourceKind }),
+  }
+}
+
+// ===========================================================================
+// Host plugin surface
+// ===========================================================================
+
+/** Agent event used for retirement. */
+export const PRE_STEP_EVENT = 'agent/pre-step'
+/** Agent event reserved for a later turn-boundary hook. */
+export const TURN_STOPPING_EVENT = 'agent/turn-stopping'
+
+/** Placeholder marker for the optional turn-stopping hook. No logic is attached. */
+export const TURN_STOPPING_PLACEHOLDER = {
+  installed: true,
+  todo: 'connect handoff finalization / retired-set cleanup at the turn boundary later',
+} as const
+
+/**
+ * Register the tools and hooks.
+ *
+ * `apply` is the Cordis/DSh entry; `activate` is exported as the spec-requested
+ * alias. Both are synchronous: registration must finish before the plugin is
+ * considered active.
+ */
+function estimateTokensFromText(text: string): number {
+  const cjk = (text.match(/[\u3000-\u9fff\uff00-\uffef]/gu) ?? []).length
+  return Math.ceil(cjk + (text.length - cjk) / 4)
+}
+
+export interface TokenWatermark {
+  tokens: number
+  contextWindow: number
+  ratio: number
+  /**
+   * v7.0 P0-2: which mechanism produced this number.
+   *
+   * `tokenMeter` is the host's fold and the only one comparable with the
+   * compaction engine's own threshold. `incremental` is this plugin's fold over
+   * the live log, which consumes only newly appended events. `usage` is real
+   * provider data read from a full snapshot (detached session). `estimate` is a
+   * character-count guess. Logging the source is what makes "why did it migrate
+   * at 60%?" answerable after the fact.
+   */
+  source: 'tokenMeter' | 'incremental' | 'usage' | 'estimate'
+}
+
+/**
+ * v7.0: per-session incremental fold state for the watermark.
+ *
+ * `scannedUpTo` is the event count the cached figures were computed at, so a
+ * later call only consumes the tail. Cleared by `resetRetiredSessions()`.
+ */
+const watermarkCache = new Map<
+  string,
+  { scannedUpTo: number; contextWindow: number; usageTokens: number }
+>()
+
+/**
+ * v4.0 / v7.0 P0-2: token pressure, measured by the HOST first.
+ *
+ * The plugin used to compute this itself: read `contextWindow` from the last
+ * `request/context`, read `usage.inputTokens` from the last `assistant/message`,
+ * and if neither existed, estimate from a character count. That estimate is a
+ * different number from the one the host's compaction engine acts on
+ * (`tokenMeter.measure()` prices per surface node, reuses provider usage only
+ * when the request envelope matches, and re-prices the whole surface
+ * otherwise). Two owners of one session disagreeing about "how full is it" is
+ * how a plugin migrates at 60% while the engine thinks it is at 43%.
+ *
+ * The order below is deliberate:
+ *
+ *   1. `ctx.tokenMeter.measure(session)` — the authoritative measurement. The
+ *      session must be LIVE for this (the meter folds over a Session object, not
+ *      a snapshot), so it is skipped when the session is not in the store.
+ *   2. Provider usage + context window from the log — still real data, just not
+ *      the host's fold. Used when the meter is absent or the session is detached.
+ *   3. Character estimate — last resort, and it says so in the returned source.
+ *
+ * The `source` field is not decoration: a migration log that cannot say which
+ * of the three produced the number is unauditable.
+ */
+export async function readTokenWatermark(
+  ctx: PluginContextLike,
+  sourceSessionId: string,
+  settings: Required<GraftConfig>,
+): Promise<TokenWatermark | undefined> {
+  // --- 1. the host's own measurement -------------------------------------
+  try {
+    const meter = ctx.get?.('tokenMeter')
+    const live = ctx.get?.('sessions')?.get?.(sourceSessionId)
+    if (meter !== undefined && meter !== null && typeof meter.measure === 'function' && live !== undefined) {
+      const measurement = meter.measure(live)
+      const total = Number(measurement?.totalTokens)
+      const window = Number(
+        live?.requestContext?.()?.contextWindow ?? 0,
+      )
+      const contextWindow = settings.contextWindowTokens > 0 ? settings.contextWindowTokens : window
+      if (Number.isFinite(total) && total > 0 && Number.isFinite(contextWindow) && contextWindow > 0) {
+        return { tokens: total, contextWindow, ratio: total / contextWindow, source: 'tokenMeter' }
+      }
+    }
+  } catch {
+    // Fall through: a meter that throws must not stop the migration check.
+  }
+
+  // --- 2. incremental fold over the LIVE log -----------------------------
+  //
+  // The old path called `ctx.sessionQuery.readSession()` on every pre-step, which
+  // replays and validates the ENTIRE log — O(n) per step, on a session that is
+  // already the largest thing in the process. That is the wrong complexity for a
+  // check that runs before every model request.
+  //
+  // When the session is live we can fold incrementally instead: keep the cached
+  // watermark per session plus the log length it was computed at, and on each
+  // call consume only the events appended since. The two facts that matter
+  // (newest `contextWindow`, newest provider usage) are both "last one wins", so
+  // an incremental fold is exact, not an approximation.
+  //
+  // The full read stays as the fallback for a detached session, where there is
+  // no live log to fold and the snapshot is the only source.
+  const liveForFold = (() => {
+    try {
+      return ctx.get?.('sessions')?.get?.(sourceSessionId)
+    } catch {
+      return undefined
+    }
+  })()
+  if (liveForFold !== undefined && typeof liveForFold.snapshotEvents === 'function') {
+    try {
+      const events = liveForFold.snapshotEvents(0) as readonly SessionEventLike[]
+      const cached = watermarkCache.get(sourceSessionId)
+      let contextWindow = cached?.contextWindow ?? 0
+      let usageTokens = cached?.usageTokens ?? 0
+      let from = cached?.scannedUpTo ?? 0
+      // A shorter log than we remember means the store was replaced (restore,
+      // migration, HMR). Recompute from scratch rather than trusting the fold.
+      if (cached !== undefined && events.length < cached.scannedUpTo) {
+        contextWindow = 0
+        usageTokens = 0
+        from = 0
+      }
+      for (let index = from; index < events.length; index += 1) {
+        const event = events[index]
+        if (event?.type === 'request/context') {
+          const window = Number(event.data?.contextWindow)
+          if (Number.isFinite(window) && window > 0) contextWindow = window
+          continue
+        }
+        if (event?.type === 'assistant/message') {
+          const usage = event.data?.usage
+          const candidate =
+            typeof usage?.inputTokens === 'number'
+              ? usage.inputTokens
+              : typeof usage?.totalTokens === 'number'
+                ? usage.totalTokens
+                : 0
+          if (candidate > 0) usageTokens = candidate
+        }
+      }
+      watermarkCache.set(sourceSessionId, { scannedUpTo: events.length, contextWindow, usageTokens })
+      const effectiveWindow = settings.contextWindowTokens > 0 ? settings.contextWindowTokens : contextWindow
+      if (usageTokens > 0 && Number.isFinite(effectiveWindow) && effectiveWindow > 0) {
+        return {
+          tokens: usageTokens,
+          contextWindow: effectiveWindow,
+          ratio: usageTokens / effectiveWindow,
+          source: 'incremental',
+        }
+      }
+    } catch {
+      // Fall through to the full read.
+    }
+  }
+
+  let snapshot: any
+  try {
+    snapshot = await ctx.sessionQuery.readSession(sourceSessionId)
+  } catch {
+    return undefined
+  }
+  const events: any[] = Array.isArray(snapshot?.events) ? snapshot.events : []
+  if (events.length === 0) return undefined
+  let contextWindow = 0
+  for (const event of events) {
+    if (event.type === 'request/context' && typeof event.data?.contextWindow === 'number' && event.data.contextWindow > 0) {
+      contextWindow = event.data.contextWindow
+    }
+  }
+  if (settings.contextWindowTokens > 0) contextWindow = settings.contextWindowTokens
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return undefined
+  let usageTokens = 0
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event.type !== 'assistant/message') continue
+    const usage = event.data?.usage
+    const candidate =
+      typeof usage?.inputTokens === 'number'
+        ? usage.inputTokens
+        : typeof usage?.totalTokens === 'number'
+          ? usage.totalTokens
+          : 0
+    if (candidate > 0) {
+      usageTokens = candidate
+      break
+    }
+  }
+  // --- 2. provider usage, when the log carries one ------------------------
+  if (usageTokens > 0) {
+    return { tokens: usageTokens, contextWindow, ratio: usageTokens / contextWindow, source: 'usage' }
+  }
+  // --- 3. character estimate, last resort --------------------------------
+  const text = events
+    .map((event) => {
+      const message = event.data?.message ?? event.data
+      return textOfMessage(message) || String(event.data?.arguments ?? '')
+    })
+    .join('\n')
+  const tokens = Math.max(usageTokens, estimateTokensFromText(text))
+  return { tokens, contextWindow, ratio: tokens / contextWindow, source: 'estimate' }
+}
+
+function autoTargetId(settings: Required<GraftConfig>): string {
+  const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+  return `${settings.autoGraftIdPrefix}-${suffix}`
+}
+
+// ===========================================================================
+// v7.4 P0-2: the graft transaction journal
+// ===========================================================================
+
+export type GraftTxnState = 'PREPARING' | 'TARGET_FLUSHED' | 'COLD_VERIFIED' | 'COMMITTED'
+
+export interface GraftTxnRecord {
+  sourceSessionId: string
+  targetSessionId: string
+  state: GraftTxnState
+  /** The stage that produced the current record, for a readable recovery log. */
+  stage: string
+  updatedAt: string
+  /** Present once something went wrong; recovery reports it. */
+  error?: string
+}
+
+/**
+ * Why a journal and not just ordering.
+ *
+ * Ordering already guarantees the one thing that matters most: the source is
+ * retired LAST, so a crash anywhere earlier leaves the source usable. That is the
+ * invariant `sourceUsable ∨ targetUsable`, and it holds without any journal.
+ *
+ * What ordering cannot do is clean up. A process killed between `create()` and
+ * `flush()` leaves a reserved id with a partial log; between `flush()` and
+ * retirement it leaves a complete-but-unretired target. Neither is visible to the
+ * next start unless something durable says "this was in flight". That is the
+ * journal's only job.
+ */
+function txnFileFor(sourceSessionId: string): string {
+  // The id is already restricted to safe characters by asNonEmptyString + the
+  // host's id policy; encode anyway so a future host that permits other shapes
+  // cannot escape the directory.
+  return join(txnDirPath, `${encodeURIComponent(sourceSessionId)}.json`)
+}
+
+function writeGraftTxn(ctx: PluginContextLike | undefined, record: GraftTxnRecord): void {
+  if (ctx === undefined) return
+  try {
+    mkdirSync(txnDirPath, { recursive: true })
+    writeJsonAtomic(txnFileFor(record.sourceSessionId), record)
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write transaction record: ${String((error as any)?.message ?? error)}`)
+    } catch {
+      // The journal must never change a migration's outcome.
+    }
+  }
+}
+
+function clearGraftTxn(sourceSessionId: string): void {
+  try {
+    rmSync(txnFileFor(sourceSessionId), { force: true })
+  } catch {
+    // A stuck record is reported by the next recovery pass, not swallowed.
+  }
+}
+
+/**
+ * Mark a half-built target so it cannot be mistaken for a usable session.
+ *
+ * The host exposes no delete on `SessionPersistence`, so "discard" is advisory.
+ * The durable, always-available mark is the session's own title: `[损坏]` is what
+ * a user sees in the sidebar, and it survives everything.
+ */
+function markTargetBroken(
+  ctx: PluginContextLike,
+  targetId: string,
+  reason: string,
+  extra: { sourceSessionId?: string; stage?: string } = {},
+): void {
+  try {
+    const live = (ctx.get('sessions') as any)?.get?.(targetId)
+    if (live !== undefined && typeof live.append === 'function') {
+      live.append('session/title', {
+        title: `[损坏] 迁移未完成 ${targetId}`,
+        messageSeqs: [],
+        // v7.3: empty refs require 'user' — see buildInjectionEvents.
+        source: { kind: 'user' },
+      })
+    }
+  } catch {
+    // A mark that cannot be written must not replace the primary failure.
+  }
+  if (extra.sourceSessionId !== undefined) {
+    writeGraftTxn(ctx, {
+      sourceSessionId: extra.sourceSessionId,
+      targetSessionId: targetId,
+      state: 'PREPARING',
+      stage: extra.stage ?? 'unknown',
+      updatedAt: new Date().toISOString(),
+      error: reason,
+    })
+    recordLeftover(ctx, {
+      targetId,
+      sourceSessionId: extra.sourceSessionId,
+      stage: extra.stage ?? 'unknown',
+      reason,
+    })
+  }
+}
+
+/**
+ * v7.4 P0-2: recover every migration that did not reach COMMITTED.
+ *
+ * The recovery direction is fixed and deliberately boring: **make the source
+ * usable and make the target honest.**
+ *
+ *   - Never retire a source on the basis of a partial record.
+ *   - Never resurrect a target; if one exists it is marked `[损坏]` so the sidebar
+ *     stops presenting it as a choice.
+ *   - Always delete the record, so the next start does not repeat the work.
+ *
+ * Running this twice is a no-op the second time, which is what makes it safe to
+ * call on every activation.
+ */
+export function recoverGraftTransactions(ctx: PluginContextLike): { scanned: number; rolledBack: string[] } {
+  const rolledBack: string[] = []
+  let files: string[] = []
+  try {
+    files = readdirSync(txnDirPath).filter((name) => name.endsWith('.json'))
+  } catch (error) {
+    // v7.4b: an ABSENT directory means "nothing was interrupted" — the normal
+    // first start. Anything else (a missing import, a permission denial) used to
+    // be swallowed here and reported as "0 records", which is indistinguishable
+    // from a clean start. That is exactly how a `readdirSync` that was never
+    // imported survived a whole release: every journal was ignored and every
+    // crash looked like a clean start. Name the failure; activation still runs.
+    if ((error as any)?.code !== 'ENOENT') {
+      try {
+        ctx.logger?.warn?.(
+          `[dsh-graft-slice] transaction scan failed (${String((error as any)?.code ?? 'unknown')}): ` +
+            `${String((error as any)?.message ?? error)}; path ${txnDirPath}`,
+        )
+      } catch {
+        // Logging must not block activation.
+      }
+    }
+    return { scanned: 0, rolledBack }
+  }
+  for (const file of files) {
+    const path = join(txnDirPath, file)
+    let record: GraftTxnRecord
+    try {
+      const parsed = JSON.parse(readFileSync(path, 'utf8'))
+      if (!isRecord(parsed) || typeof parsed.sourceSessionId !== 'string') throw new Error('malformed record')
+      record = parsed as unknown as GraftTxnRecord
+    } catch {
+      // A corrupt journal entry cannot describe a migration we can repair; drop it.
+      try {
+        rmSync(path, { force: true })
+      } catch {
+        // Ignore: the next pass retries.
+      }
+      continue
+    }
+    if (record.state === 'COMMITTED') {
+      // The migration finished; the record is merely stale.
+      try {
+        rmSync(path, { force: true })
+      } catch {
+        // Ignore.
+      }
+      continue
+    }
+    // Roll back.
+    try {
+      // A source must never stay retired because of an unfinished migration.
+      if (retiredSessions.has(record.sourceSessionId) || transferredSessions.has(record.sourceSessionId)) {
+        resumeSession(ctx, record.sourceSessionId)
+      }
+      // A target that exists is not a session we may present as usable.
+      if (typeof record.targetSessionId === 'string' && record.targetSessionId.length > 0) {
+        markTargetBroken(ctx, record.targetSessionId, record.error ?? `interrupted at ${record.stage}`, {
+          sourceSessionId: record.sourceSessionId,
+          stage: record.stage,
+        })
+        void discardPartialTarget(ctx, record.targetSessionId)
+      }
+      rolledBack.push(record.sourceSessionId)
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] rolled back an interrupted migration ${record.sourceSessionId} → ${record.targetSessionId} (state ${record.state}, stage ${record.stage})`,
+      )
+    } catch (error) {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] rollback of ${record.sourceSessionId} failed: ${String((error as any)?.message ?? error)}`,
+      )
+    } finally {
+      // Even a failed rollback removes the record: retrying the same broken
+      // artifact on every start is worse than leaving it marked.
+      try {
+        rmSync(path, { force: true })
+      } catch {
+        // Ignore.
+      }
+    }
+  }
+  return { scanned: files.length, rolledBack }
+}
+
+/**
+ * v7.0 P0-4: best-effort removal of a target that failed to become durable.
+ *
+ * Called only from the failure path of the persistence write, so the goal is
+ * narrow: leave no artifact that pretends to be a resumable session.
+ *
+ * `create()` reserves the id immediately, so by the time `append` or `flush`
+ * throws, a header — and possibly a partial event log — already exists on disk
+ * under the target's name. The source stays alive (retirement runs later), but
+ * the target id is now OCCUPIED by a corrupt artifact: the sidebar shows a
+ * session that cannot resume, and a retry with the same id fails with
+ * SESSION_EXISTS.
+ *
+ * Every step is optional and independently guarded. A backend that offers none
+ * of these leaves the reservation in place, which is reported rather than
+ * hidden — the caller already throws the original error, and a phantom session
+ * is the kind of thing that only surfaces days later as a mysterious ENOENT.
+ */
+async function discardPartialTarget(ctx: PluginContextLike, targetId: string): Promise<void> {
+  const notes: string[] = []
+  const persistence = (() => {
+    try {
+      return ctx.get('sessionPersistence') as any
+    } catch {
+      return undefined
+    }
+  })()
+  const sessions = (() => {
+    try {
+      return ctx.get('sessions') as any
+    } catch {
+      return undefined
+    }
+  })()
+  // 1. The prepared reservation, if the backend exposes a discard.
+  for (const method of ['discardPrepared', 'discard', 'forget']) {
+    if (persistence === undefined || typeof persistence[method] !== 'function') continue
+    try {
+      await persistence[method](targetId)
+      notes.push(`persistence.${method}`)
+    } catch (error) {
+      notes.push(`persistence.${method} failed: ${String((error as any)?.message ?? error)}`)
+    }
+    break
+  }
+  // 2. A durable artifact, if the backend offers a removal.
+  for (const method of ['remove', 'delete']) {
+    if (persistence === undefined || typeof persistence[method] !== 'function') continue
+    try {
+      await persistence[method](targetId)
+      notes.push(`persistence.${method}`)
+    } catch (error) {
+      notes.push(`persistence.${method} failed: ${String((error as any)?.message ?? error)}`)
+    }
+    break
+  }
+  // 3. A live-store entry, if one was ever published.
+  if (sessions !== undefined && typeof sessions.get === 'function' && sessions.get(targetId) !== undefined) {
+    for (const method of ['remove', 'delete', 'dispose']) {
+      if (typeof sessions[method] !== 'function') continue
+      try {
+        await sessions[method](targetId)
+        notes.push(`sessions.${method}`)
+      } catch (error) {
+        notes.push(`sessions.${method} failed: ${String((error as any)?.message ?? error)}`)
+      }
+      break
+    }
+  }
+  try {
+    ctx.logger?.warn?.(
+      notes.length === 0
+        ? `[dsh-graft-slice] failed target ${targetId} could not be removed (no delete API on this host); the id stays reserved`
+        : `[dsh-graft-slice] discarded failed target ${targetId} (${notes.join(', ')})`,
+    )
+  } catch {
+    // Logging must not replace the primary failure.
+  }
+}
+
+/**
+ * v4.0: automatic graft at the turn-stopping watermark. The graft is deferred
+ * until the current turn/end is durable; OPEN_TURN is retried briefly.
+ */
+
+/**
+ * v6.3 module 1: Safe Harbor.
+ *
+ * Migrating while a tool call is still pending, or while the model is streaming,
+ * cuts a half-finished step. The target then inherits a dangling call with no
+ * result — the model sees work it cannot account for.
+ *
+ * A session is NOT at a safe harbor when:
+ *   - a tool/call has no matching tool/result yet
+ *   - an assistant/message has a non-empty stream that never closed
+ *
+ * When unsafe, the caller records `pendingGraft` and retries at the next
+ * turn/end, which is by construction a quiet boundary.
+ */
+export interface HarborState {
+  safe: boolean
+  reason: string
+}
+
+/**
+ * v7.3: task-boundary probe — a second, orthogonal gate next to the harbour check.
+ *
+ * `checkSafeHarbor` answers a PHYSICAL question: is the log quiet right now (no
+ * dangling tool call, no live stream)? This answers a SEMANTIC one: if we cut
+ * here, does the target inherit a task that is mid-hole — a failing test nobody
+ * has fixed yet, or a todo list with unfinished items?
+ *
+ * Why it matters even when the harbour is safe. The watermark trips on token
+ * pressure, which has nothing to do with where the work is. In a debugging
+ * session the most common shape at that moment is: a test just failed, the fix is
+ * not written yet. Cutting there hands the target "a test is red" with no
+ * knowledge of what the person was about to try — and the failure text, though
+ * now inlined, describes a state that is about to become stale the moment anyone
+ * edits a file. Waiting one turn turns "here is a failure" into "here is the
+ * failure and the change it produced".
+ *
+ * The wait is bounded. `maxDeferTurns` (default 1) is enforced by the caller
+ * through a per-session deferral counter, so a session with a permanently red
+ * test — an expected one, a flaky one, one the user has decided to ignore — still
+ * migrates on the next opportunity instead of never.
+ */
+export interface TaskBoundaryState {
+  /** True when cutting now would split an unfinished task. */
+  shouldDefer: boolean
+  reason: string
+  /** How many todos the model itself left unchecked. */
+  openTodoCount: number
+  /** True when the most recent completed tool call produced a failure. */
+  lastCallFailed: boolean
+}
+
+export function checkTaskBoundary(
+  events: readonly SessionEventLike[],
+  openTodos: readonly string[] = [],
+): TaskBoundaryState {
+  // The most recent tool outcome, newest first. Only "completed" results count:
+  // an unresolved call is the harbour's problem, not this one.
+  let lastCallFailed = false
+  let sawResult = false
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'tool/result') continue
+    const message = event.data?.message
+    const text = textOfMessage(message)
+    lastCallFailed =
+      message?.isError === true ||
+      event.data?.error !== undefined ||
+      /^\s*(error|dsh:\s*error)\b/iu.test(text) ||
+      /\b(?:AssertionError|FAIL(?:ED)?\b|tests? failed|exit code [1-9])/u.test(text)
+    sawResult = true
+    break
+  }
+
+  const openTodoCount = openTodos.length
+  const reasons: string[] = []
+  if (openTodoCount > 0) reasons.push(`${openTodoCount} todo item(s) still open`)
+  if (sawResult && lastCallFailed) reasons.push('the last tool call failed')
+
+  if (reasons.length === 0) {
+    return { shouldDefer: false, reason: 'clean boundary', openTodoCount, lastCallFailed }
+  }
+  return {
+    shouldDefer: true,
+    reason: reasons.join(' and '),
+    openTodoCount,
+    lastCallFailed,
+  }
+}
+
+export function checkSafeHarbor(events: readonly SessionEventLike[]): HarborState {
+  const openCalls = new Set<string>()
+  let streaming = false
+
+  for (const event of events) {
+    if (event.type === 'tool/call') {
+      const callId = typeof event.data?.callId === 'string' ? event.data.callId : ''
+      if (callId.length > 0) openCalls.add(callId)
+      continue
+    }
+    if (event.type === 'tool/result') {
+      const message = event.data?.message
+      const callId = message?.toolCallId ?? message?.source?.callId
+      if (typeof callId === 'string') openCalls.delete(callId)
+      continue
+    }
+    if (event.type === 'assistant/message') {
+      const stream = event.data?.stream
+      // A committed assistant message carries its completed stream; an in-flight
+      // one is represented by assistant/chunk, which we also watch below.
+      if (Array.isArray(stream) && stream.length > 0) streaming = false
+      continue
+    }
+    if (event.type === 'assistant/chunk' || event.type === 'assistant/attempt') {
+      // v7.2: `assistant/attempt` is a record of an ATTEMPT, not proof that a
+      // stream is still open.
+      //
+      // Verified on the seven surviving real logs: every one contains 8-15
+      // `assistant/attempt` events and every one still computes `safe: true`,
+      // because a `turn/end` clears the flag. So the claim "attempt makes the
+      // harbour permanently unsafe" is wrong for a well-formed log.
+      //
+      // But the shape below is not well-formed, and it is exactly what a crash or
+      // an interrupted turn leaves behind:
+      //
+      //   turn/end {turn:1}      <- the turn closed
+      //   assistant/attempt {turn:2}   <- a later attempt that never closed
+      //
+      // In that shape the flag is set AFTER the last clearing event, nothing ever
+      // clears it again, and every future pre-step reports unsafe — which means
+      // P6's overflow recovery can never run, on the one session that needs it
+      // most. An attempt carries `stream: []` when it never produced output, and
+      // a live stream always has `assistant/chunk` events alongside it, so the
+      // honest reading is: chunks prove streaming, attempts do not.
+      if (event.type === 'assistant/attempt') {
+        const stream = event.data?.stream
+        if (Array.isArray(stream) && stream.length > 0) streaming = true
+        continue
+      }
+      streaming = true
+      continue
+    }
+    if (event.type === 'turn/end') {
+      streaming = false
+    }
+  }
+
+  if (openCalls.size > 0) {
+    return {
+      safe: false,
+      reason: `${openCalls.size} tool call(s) still awaiting a result`,
+    }
+  }
+  if (streaming) {
+    return { safe: false, reason: 'an assistant response is still streaming' }
+  }
+  return { safe: true, reason: 'quiet boundary' }
+}
+
+/**
+ * v6.3 module 4: confirmation valve.
+ *
+ * Silent migration is the right default, but a user mid-sentence can be
+ * startled by a context switch. In 'confirm' mode the watermark only arms a
+ * question; the migration itself waits for explicit agreement.
+ */
+interface PendingConfirm {
+  targetId: string
+  askedAt: number
+  ratio: number
+}
+
+const pendingConfirms = new Map<string, PendingConfirm>()
+/** v6.3 module 1: sessions that hit a busy step and must retry at turn/end. */
+const pendingGraftSources = new Set<string>()
+
+/**
+ * v7.0 P6: sessions whose request overflowed once already.
+ *
+ * The retry the host performs after a successful recovery must not become a
+ * migration loop: if the freshly built tape is itself larger than the window,
+ * the retried request overflows again, and a second migration would produce the
+ * same tape. One attempt per session is the honest limit — the second overflow
+ * is surfaced to the caller instead of being papered over.
+ */
+const overflowRetries = new Set<string>()
+
+/**
+ * v7.0 P6: overflow recoveries that produced a target but deliberately did NOT
+ * retire the source.
+ *
+ * The retry has to run in the source session, so retirement cannot happen
+ * before it. These entries are consumed by the source's next `agent/pre-step`,
+ * which is the earliest moment the user can be redirected to the target.
+ */
+const deferredOverflowTargets = new Map<string, string>()
+
+/**
+ * v7.3: per-session count of task-boundary deferrals.
+ *
+ * The cap exists so a session whose "task" never reaches a clean boundary — an
+ * expected failure, a flaky test, a red the user decided to live with — still
+ * migrates. Without it, the probe converts "wait for a good moment" into "never
+ * move", which is worse than cutting in an awkward place.
+ */
+const taskBoundaryDeferrals = new Map<string, number>()
+
+/** The provider failure code that means "this request does not fit". */
+const CONTEXT_WINDOW_EXCEEDED = 'CONTEXT_WINDOW_EXCEEDED'
+
+/**
+ * v7.0 C2: sessions this plugin CREATED as a graft target.
+ *
+ * Why this exists — the chain-migration failure:
+ *
+ * `autoGraftIfNeeded` only refused sessions in `retiredSessions` /
+ * `transferredSessions`. A freshly created target is in neither: it is a brand
+ * new id nobody retired. But the watermark is computed from
+ * `assistant/message.usage.inputTokens`, and a target is seeded with a tape that
+ * can already be large. So the moment a target's first real request reports a
+ * ratio at or above `autoGraftAtRatio`, the plugin grafts the target into
+ * another target — before the user has typed anything.
+ *
+ * Each hop resets the session but carries the same tape, so the next hop can
+ * trip the same threshold again. That is an unbounded migration chain, and
+ * every link buries the original intent one generation deeper.
+ *
+ * The guard is deliberately a *generation* counter, not a boolean: a target may
+ * legitimately be grafted once more after it has done real work, but it must
+ * never be grafted as a direct consequence of being created.
+ */
+interface GraftTargetMark {
+  /** The session this target was created from. */
+  sourceSessionId: string
+  /** When the target was created, epoch ms. */
+  createdAt: number
+  /** How many migrations deep this session already is. */
+  generation: number
+}
+
+const graftTargets = new Map<string, GraftTargetMark>()
+
+/** Sessions already grafted at least once; a target inherits source generation + 1. */
+function graftGenerationOf(sessionId: string): number {
+  return graftTargets.get(sessionId)?.generation ?? 0
+}
+
+function markGraftTarget(sessionId: string, sourceSessionId: string): void {
+  graftTargets.set(sessionId, {
+    sourceSessionId,
+    createdAt: Date.now(),
+    generation: graftGenerationOf(sourceSessionId) + 1,
+  })
+  // v7.0: persist the mark.
+  //
+  // The in-memory map is rebuilt empty on every start, so a target created
+  // before a restart became an ordinary session afterwards — precisely the one
+  // session the chain guard exists for. The store file is the same `dataDir`
+  // the retired/transferred sets already use, so isolation is unchanged.
+  persistGraftTargetStore(ctxForStores())
+}
+
+/**
+ * v7.0: the graft-target marks, persisted alongside the retired/transferred sets.
+ *
+ * Written on every new target (small, bounded by the number of migrations this
+ * profile has performed) and read once at activation.
+ */
+function persistGraftTargetStore(ctx: PluginContextLike | undefined): void {
+  if (ctx === undefined) return
+  try {
+    mkdirSync(dirname(graftTargetsPath), { recursive: true })
+    const payload: Record<string, GraftTargetMark> = {}
+    for (const [id, mark] of [...graftTargets.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+      payload[id] = mark
+    }
+    writeJsonAtomic(graftTargetsPath, payload)
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${graftTargetsPath}: ${String((error as any)?.message ?? error)}`)
+    } catch {
+      // Logging must not change the migration result.
+    }
+  }
+}
+
+function loadGraftTargetStore(ctx: PluginContextLike): void {
+  try {
+    const parsed = JSON.parse(readFileSync(graftTargetsPath, 'utf8'))
+    if (!isRecord(parsed)) return
+    for (const [id, value] of Object.entries(parsed)) {
+      if (!isRecord(value) || typeof value.sourceSessionId !== 'string') continue
+      graftTargets.set(id, {
+        sourceSessionId: value.sourceSessionId,
+        createdAt: typeof value.createdAt === 'number' ? value.createdAt : 0,
+        generation: typeof value.generation === 'number' ? value.generation : 1,
+      })
+    }
+  } catch (error) {
+    if ((error as any)?.code !== 'ENOENT') {
+      try {
+        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${graftTargetsPath}: ${String((error as any)?.message ?? error)}`)
+      } catch {
+        // Logging must not block activation.
+      }
+    }
+  }
+}
+
+/**
+ * Whether a session must not be grafted right now because it IS a graft target.
+ *
+ * A target is protected for a grace window measured in *completed turns* rather
+ * than wall-clock time: the dangerous case is "the first request already crosses
+ * the ratio", which happens inside the first turn regardless of how long the
+ * user takes to type. After the grace turns elapse the session is an ordinary
+ * session again and may migrate on its own merits.
+ */
+function isProtectedGraftTarget(
+  sessionId: string,
+  events: readonly SessionEventLike[] | undefined,
+  graceTurns: number,
+): boolean {
+  const mark = graftTargets.get(sessionId)
+  if (mark === undefined) return false
+  if (graceTurns <= 0) return false
+  if (events === undefined) return true
+  const completed = events.filter((event) => event.type === 'turn/end').length
+  return completed <= graceTurns
+}
+
+function isConfirmAffirmative(text: string): boolean {
+  const normalized = text.replace(/\s+/gu, '').trim()
+  if (normalized.length === 0) return false
+  return /^(确认|确定|同意|好|可以|是|yes|y|ok|sure|go|proceed|continue|doit)$/iu.test(normalized)
+}
+
+async function autoGraftIfNeeded(
+  ctx: PluginContextLike,
+  settings: Required<GraftConfig>,
+  sourceSessionId: string,
+  options?: {
+    targetId?: string
+    ignoreTransferGuard?: boolean
+    /** v6.3: set when the user answered the confirm prompt. */
+    confirmed?: boolean
+    /** Supplied by apply(): the background refinement lives in that closure. */
+    refineConstraints?: (
+      sourceSessionId: string,
+      targetSessionId: string,
+      events: readonly SessionEventLike[],
+    ) => void
+  },
+): Promise<GraftReport | undefined> {
+  if (!settings.autoGraft) return undefined
+  if (options?.ignoreTransferGuard !== true) {
+    if (retiredSessions.has(sourceSessionId) || transferredSessions.has(sourceSessionId)) return undefined
+  }
+  // v7.0 C2: a target must never be grafted as a consequence of being created.
+  // Checked before the watermark so a large seeded tape cannot bootstrap a chain.
+  if (options?.ignoreTransferGuard !== true) {
+    const targetEvents = (() => {
+      const live = ctx.sessions.get(sourceSessionId) as any
+      if (live !== undefined && typeof live.snapshotEvents === 'function') return live.snapshotEvents(0) as SessionEventLike[]
+      return undefined
+    })()
+    if (isProtectedGraftTarget(sourceSessionId, targetEvents, settings.graftTargetGraceTurns)) {
+      ctx.logger?.info?.(
+        `[dsh-graft-slice] refusing to re-graft a graft target (${sourceSessionId}); generation ${graftGenerationOf(sourceSessionId)}`,
+      )
+      return undefined
+    }
+  }
+  if (autoGraftInFlight.has(sourceSessionId) || inFlight.has(sourceSessionId)) return undefined
+  // v7.4: a session the user just brought back must not be killed again by the
+  // very next message.
+  //
+  // Measured twice on this project: `graft_resume_session` clears the retirement,
+  // the user says one sentence, and the watermark — still ≥0.75 because the log
+  // never shrank — grafts it straight back into a NEW target and retires it
+  // again. From the user's side the undo simply does not work.
+  const suppressedUntil = autoGraftSuppressedUntil.get(sourceSessionId)
+  if (suppressedUntil !== undefined) {
+    if (Date.now() < suppressedUntil) {
+      ctx.logger?.info?.(
+        `[dsh-graft-slice] auto-graft suppressed for a resumed session ${sourceSessionId} until ${new Date(suppressedUntil).toISOString()}`,
+      )
+      return undefined
+    }
+    autoGraftSuppressedUntil.delete(sourceSessionId)
+    try {
+      persistAutoGraftSuppression(ctx)
+    } catch {
+      // A stale record only suppresses once more; it is not worth failing here.
+    }
+  }
+  autoGraftInFlight.add(sourceSessionId)
+  try {
+    const watermark = await readTokenWatermark(ctx, sourceSessionId, settings)
+    if (watermark === undefined || watermark.ratio < settings.autoGraftAtRatio) return undefined
+
+    // v6.3 module 1: never cut a half-finished step.
+    const snapshotForHarbor = (() => {
+      const live = ctx.sessions.get(sourceSessionId) as any
+      if (live !== undefined && typeof live.snapshotEvents === 'function') return live.snapshotEvents(0)
+      return undefined
+    })()
+    if (snapshotForHarbor !== undefined) {
+      const harbor = checkSafeHarbor(snapshotForHarbor)
+      if (!harbor.safe) {
+        // Arm the retry; the next turn/end is a quiet boundary by construction.
+        pendingGraftSources.add(sourceSessionId)
+        ctx.logger?.info?.(
+          `[dsh-graft-slice] safe-harbor: deferring graft for ${sourceSessionId} (${harbor.reason})`,
+        )
+        return undefined
+      }
+      // v7.3: the semantic gate. A quiet log can still be the middle of a task.
+      //
+      // Bounded deferral: after `taskBoundaryMaxDeferTurns` attempts the watermark
+      // wins. A permanently red test (expected, flaky, or one the user chose to
+      // ignore) must not pin a session at the watermark forever — "wait for a
+      // clean boundary" degrades into "never migrate" the moment one never comes.
+      const boundary = checkTaskBoundary(
+        snapshotForHarbor,
+        extractTaskState(snapshotForHarbor).openTodos,
+      )
+      if (boundary.shouldDefer) {
+        const deferred = (taskBoundaryDeferrals.get(sourceSessionId) ?? 0) + 1
+        taskBoundaryDeferrals.set(sourceSessionId, deferred)
+        if (deferred <= settings.taskBoundaryMaxDeferTurns) {
+          pendingGraftSources.add(sourceSessionId)
+          ctx.logger?.info?.(
+            `[dsh-graft-slice] task-boundary: deferring graft for ${sourceSessionId} ` +
+              `(${boundary.reason}; attempt ${deferred}/${settings.taskBoundaryMaxDeferTurns})`,
+          )
+          return undefined
+        }
+        ctx.logger?.warn?.(
+          `[dsh-graft-slice] task-boundary: waited ${deferred} attempt(s) for ${sourceSessionId}; migrating anyway`,
+        )
+      }
+      taskBoundaryDeferrals.delete(sourceSessionId)
+      pendingGraftSources.delete(sourceSessionId)
+    }
+
+    // v6.3 module 4: in confirm mode the watermark only asks; it does not act.
+    if (settings.graftMode === 'confirm' && options?.confirmed !== true) {
+      const existing = pendingConfirms.get(sourceSessionId)
+      if (existing === undefined) {
+        pendingConfirms.set(sourceSessionId, {
+          targetId: autoTargetId(settings),
+          askedAt: Date.now(),
+          ratio: watermark.ratio,
+        })
+        ctx.logger?.info?.(
+          `[dsh-graft-slice] confirm mode: waiting for user agreement before grafting ${sourceSessionId}`,
+        )
+      }
+      return undefined
+    }
+
+    const targetId = options?.targetId ?? autoTargetId(settings)
+    const live = ctx.sessions.get(sourceSessionId) as any
+    let sourceSnapshot: { session: any; events: any[] } | undefined
+    let runtimeIntent: RuntimeIntent | undefined
+    if (live !== undefined && typeof live.snapshotEvents === 'function') {
+      const events = live.snapshotEvents(0)
+      // Read the knobs from the FULL log: DSH writes these log-only records
+      // after the last turn/end.
+      runtimeIntent = extractRuntimeIntent(events)
+      // v7.4 P0-3b: hand the log over as it is.
+      //
+      // The turn that is running when the watermark fires is the most recent
+      // work in the session, and its user message is the breakpoint. The old
+      // code truncated the snapshot at the last turn/end, which made
+      // `extractOpenTurnCarryover` see an empty tail — so an entire round,
+      // including the instruction that started it, vanished from the tape and
+      // the target re-read the PREVIOUS round as "the task". `locateBoundary`
+      // still cuts the skeleton at the last closed turn; the open turn rides
+      // along in the carryover block, which is injected first.
+      if (hasClosedTurn(events)) sourceSnapshot = { session: live.header, events }
+    }
+    if (sourceSnapshot === undefined) {
+      const raw = await ctx.sessionQuery.readSession(sourceSessionId)
+      runtimeIntent = extractRuntimeIntent(raw.events)
+      if (!hasClosedTurn(raw.events)) return undefined
+      sourceSnapshot = { session: raw.session, events: raw.events }
+    }
+    // v7.0 C2: an unattended graft must never produce a tape the target cannot
+    // hold. `maxTotalChars: 0` (the shipped default) is fine when a human runs
+    // the tool by hand, but in auto mode an over-window tape is what bootstraps
+    // the migration chain. Derive a cap from the real window unless the operator
+    // already set a tighter one.
+    const derivedBudget = deriveAutoTapeBudget(watermark.contextWindow)
+    const autoTotalChars =
+      settings.maxTotalChars > 0 && (derivedBudget <= 0 || settings.maxTotalChars < derivedBudget)
+        ? settings.maxTotalChars
+        : derivedBudget
+    if (autoTotalChars > 0 && derivedBudget > 0 && settings.maxTotalChars === 0) {
+      ctx.logger?.info?.(
+        `[dsh-graft-slice] auto-graft derived maxTotalChars=${autoTotalChars} from contextWindow=${watermark.contextWindow}`,
+      )
+    }
+    const report = await graftSliceAndInject(
+      ctx,
+      { ...settings, retireSource: true, maxTotalChars: autoTotalChars },
+      sourceSessionId,
+      targetId,
+      undefined,
+      {
+        sourceSnapshot,
+        ...(runtimeIntent === undefined ? {} : { runtimeIntent }),
+        ...(options?.refineConstraints === undefined ? {} : { refineConstraints: options.refineConstraints }),
+      },
+    )
+    ctx.logger?.info?.(
+      `[dsh-graft-slice] auto-grafted ${sourceSessionId} -> ${targetId} at ${(watermark.ratio * 100).toFixed(1)}% (${watermark.tokens}/${watermark.contextWindow})`,
+    )
+    return report
+  } catch (error) {
+    if ((error as any)?.code === 'OPEN_TURN') {
+      // The turn-stopping hook fires just before turn/end is appended.
+      autoGraftInFlight.delete(sourceSessionId)
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      return autoGraftIfNeeded(ctx, settings, sourceSessionId)
+    }
+    ctx.logger?.warn?.(`[dsh-graft-slice] auto-graft skipped: ${String((error as any)?.message ?? error)}`)
+    return undefined
+  } finally {
+    autoGraftInFlight.delete(sourceSessionId)
+  }
+}
+
+/**
+ * v7.4 P4-3: give archived forks a sidebar entry.
+ *
+ * `sessions.fork` writes a copy but never PUBLISHES it, and the Web UI learns
+ * about sessions exclusively from `api-session/added`, which the host emits on
+ * `session/created` — i.e. for published sessions only. So a fork kept as an
+ * experiment sample is loadable, resumable, and invisible. Measured on this
+ * project: `baseline-fork-demo` (1,200 events, on disk, absent from the sidebar).
+ *
+ * Targets are excluded on purpose: they have their own announcement path, and a
+ * target is protected from re-grafting by a grace window that an "archive"
+ * announcement would only muddy.
+ */
+async function attachSessionToWorkspace(
+  ctx: PluginContextLike,
+  sessionId: string,
+  cwd: string | undefined,
+): Promise<boolean> {
+  if (cwd === undefined || cwd.length === 0) return false
+  const registry = ctx.get('workspaceRegistry')
+  if (!isRecord(registry) || typeof registry.resolveByPath !== 'function') return false
+  try {
+    let workspace = await (registry.resolveByPath as (path: string) => Promise<unknown>)(cwd)
+    if (workspace === undefined && typeof registry.create === 'function') {
+      workspace = await (registry.create as (path: string) => Promise<unknown>)(cwd)
+    }
+    if (isRecord(workspace) && typeof workspace.attachSession === 'function') {
+      await (workspace.attachSession as (id: string) => Promise<unknown>)(sessionId)
+      return true
+    }
+  } catch {
+    // Best effort: an unregistered workspace must not cost the announcement.
+  }
+  return false
+}
+
+export async function registerArchivedForks(
+  ctx: PluginContextLike,
+  settings: Required<GraftConfig>,
+): Promise<number> {
+  if (settings.registerArchivedForks !== true) return 0
+  const query = ctx.get('sessionQuery') as any
+  if (!isRecord(query) || typeof query.listSessions !== 'function') return 0
+  let records: unknown
+  try {
+    records = await query.listSessions()
+  } catch (error) {
+    ctx.logger?.warn?.(
+      `[dsh-graft-slice] cannot list sessions for fork registration: ${String((error as any)?.message ?? error)}`,
+    )
+    return 0
+  }
+  if (!Array.isArray(records)) return 0
+  const emit = (ctx as any).emit
+  let announced = 0
+  for (const record of records) {
+    if (!isRecord(record)) continue
+    const header = isRecord(record.header) ? record.header : undefined
+    const id = typeof header?.id === 'string' ? header.id : undefined
+    if (id === undefined) continue
+    if (record.live === true) continue
+    if (graftTargets.has(id)) continue
+    // Only fork-shaped ids: a cold ordinary session the host already knows about
+    // must not be re-announced as an archive.
+    if (!/-fork-/u.test(id)) continue
+    const cwd = typeof header?.cwd === 'string' ? header.cwd : undefined
+    await attachSessionToWorkspace(ctx, id, cwd)
+    if (typeof emit !== 'function') continue
+    try {
+      emit('api-session/added', {
+        sessionId: id,
+        // summarizeCold: updatedAt = max(createdAt, metadata.lastPromptAt ?? 0)
+        updatedAt: typeof header?.createdAt === 'number' ? header.createdAt : Date.now(),
+        agentAvailable: false,
+        formatStatus: typeof record.formatStatus === 'string' ? record.formatStatus : 'current',
+        running: false,
+        blank: false,
+        ...(cwd === undefined ? {} : { cwd }),
+      })
+      announced += 1
+    } catch {
+      // A refused emit must not abort the sweep.
+    }
+  }
+  return announced
+}
+
+export function apply(ctx: PluginContextLike, config: GraftConfig = {}): void {
+  const settings = normalizeConfig(config)
+  configureRetiredStore(ctx, settings)
+  // v7.0: the chain guard must survive a restart, so its marks are durable.
+  loadGraftTargetStore(ctx)
+  // v7.2: so must the compaction shield. A section that only exists in memory
+  // disappears on restart, leaving the constraints reachable by `/compact`.
+  loadConstraintSections(ctx)
+  loadPendingConstraints(ctx)
+  loadDrafts(ctx)
+  loadLeftovers(ctx)
+  loadAutoGraftSuppression()
+  // v7.4 P0-2: roll back migrations that never reached COMMITTED.
+  //
+  // Runs AFTER the retired/transferred stores are loaded, because rollback must
+  // know whether the interrupted migration had already retired its source. It
+  // runs on every activation, and is idempotent: a clean start finds no records.
+  try {
+    const recovery = recoverGraftTransactions(ctx)
+    lastRecovery = recovery
+    if (recovery.scanned > 0) {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] transaction recovery: scanned ${recovery.scanned}, rolled back ${recovery.rolledBack.length}` +
+          (recovery.rolledBack.length > 0 ? ` (${recovery.rolledBack.join(', ')})` : ''),
+      )
+    }
+  } catch (error) {
+    ctx.logger?.warn?.(`[dsh-graft-slice] transaction recovery failed: ${String((error as any)?.message ?? error)}`)
+  }
+  // v7.4 P4-3: archived forks are invisible until someone announces them.
+  void registerArchivedForks(ctx, settings).catch((error) => {
+    ctx.logger?.warn?.(
+      `[dsh-graft-slice] archived-fork registration failed: ${String((error as any)?.message ?? error)}`,
+    )
+  })
+  const captured = new Map<string, unknown>()
+  for (const service of ['sessionPersistence', 'workspaceRegistry', 'paths', 'sessionQuery', 'sessions', 'agents']) {
+    try {
+      captured.set(service, ctx.get(service))
+    } catch {
+      // Optional service or inactive proxy.
+    }
+  }
+/**
+ * Background LLM refinement of the fast regex constraints.
+ *
+ * Never throws: a failure leaves the regex constraints in place, which is a
+ * quality regression at worst, not a broken migration. The result is queued
+ * for the target's next pre-step rather than appended now, because the target
+ * is a detached artifact at this point — there is no live session to append to.
+ */
+async function refineConstraintsInBackground(
+  ctx: PluginContextLike,
+  settings: Required<GraftConfig>,
+  sourceSessionId: string,
+  targetSessionId: string,
+  events: readonly SessionEventLike[],
+): Promise<void> {
+  if (constraintsInFlight.has(targetSessionId)) return
+  constraintsInFlight.add(targetSessionId)
+  try {
+    const result = await llmExtractConstraints(ctx, events, settings)
+    if (result.source !== 'llm' || result.constraints.length === 0) return
+    // The fast regex set is already in the target's system head. Replacing it
+    // with a shorter LLM set silently drops rules the user never revoked, so
+    // the two are unioned instead: LLM adds precision, regex keeps coverage.
+    const baseline = extractConstraints(events)
+    const merged: string[] = []
+    for (const item of [...result.constraints, ...baseline]) {
+      const normalized = item.replace(/\s+/gu, ' ').trim()
+      if (normalized.length === 0) continue
+      if (merged.some((existing) => nearDuplicate(existing, normalized))) continue
+      merged.push(normalized)
+    }
+    if (result.constraints.length < baseline.length) {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] LLM returned ${result.constraints.length} constraint(s) but regex found ${baseline.length}; keeping the union`,
+      )
+    }
+    // v7.0 (adopted from dsh-rollover-snapshot): verify the generation-to-
+    // generation handoff instead of trusting the builder.
+    //
+    // The union above is a local guarantee: it cannot lose a rule that the
+    // regex extractor still finds. It says nothing about the set that was
+    // *already committed to the target's goal message* a moment earlier. If a
+    // config change, a preset, or a differently-shaped refinement produces a
+    // narrower set than the one already injected, the target ends up carrying
+    // fewer rules than its own first message claimed, and nothing would notice.
+    //
+    // rollover-snapshot measured exactly this: every crossing lost rules while
+    // the checkpoint grew. The comparison is cheap and independent, so it runs
+    // on every refinement.
+    const drift = verifyHardConstraints(baseline, merged, sourceSessionId)
+    if (drift.length > 0) {
+      for (const item of drift) {
+        ctx.logger?.warn?.(
+          `[dsh-graft-slice] constraint drift: "${item.constraint}" was declared in ${item.previousSessionId} but is absent from the refined set`,
+        )
+      }
+    }
+    pendingConstraints.set(targetSessionId, {
+      sourceSessionId,
+      targetSessionId,
+      constraints: merged,
+      source: 'llm',
+      extractedAt: Date.now(),
+    })
+    persistPendingConstraints(ctx)
+    ctx.logger?.info?.(
+      `[dsh-graft-slice] async constraints ready for ${targetSessionId}: ${result.constraints.length} item(s)`,
+    )
+  } catch (error) {
+    ctx.logger?.warn?.(`[dsh-graft-slice] async constraint extraction failed: ${String((error as any)?.message ?? error)}`)
+  } finally {
+    constraintsInFlight.delete(targetSessionId)
+  }
+}
+
+/**
+ * v6.0 补丁一：拦截旧会话前，把用户正在输入的内容存下来。
+ *
+ * 只在真正会 reject 的分支调用。空文本、已捕获过的来源都不重复写。
+ */
+function captureDraft(ctx: PluginContextLike, sourceId: string, targetId: string, messages: unknown): void {
+  // v6.4 F2: this was `isRecord(ctx) === false && false` — always false, so the
+  // guard never fired and the "defence" was decorative. It must reject a missing
+  // context, which is what the intent always was.
+  if (isRecord(ctx) === false) return
+  const text = lastUserText(messages)
+  if (text === undefined) return
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return
+  // v7.0 P1-4: a steering word is not a draft.
+  //
+  // The draft channel exists to save something the user was TYPING when the
+  // session was cut off — an unfinished thought. In confirm mode the message
+  // that triggers the migration is literally "确认". Carrying that into the
+  // target produces a session whose first message is
+  //
+  //   [系统提示：用户在上一个会话被拦截前，正在输入：「确认」]
+  //   [用户新输入：「继续。」]
+  //
+  // which reads as the user having asked for the same thing twice, and trains
+  // them to ignore the notice. Same rule as the goal extractor: a bare
+  // acknowledgement or a slash command carries steering, not content.
+  if (isSteeringOnly(trimmed)) return
+  const existing = draftPayloads.get(targetId)
+  if (existing !== undefined && existing.text === trimmed) return
+  draftPayloads.set(targetId, {
+    sourceSessionId: sourceId,
+    targetSessionId: targetId,
+    text: trimmed,
+    capturedAt: Date.now(),
+  })
+  try {
+    mkdirSync(dirname(draftsPath), { recursive: true })
+    writeJsonAtomic(draftsPath, [...draftPayloads.values()])
+  } catch {
+    // A failed capture must never block the rejection itself.
+  }
+}
+
+/**
+ * v7.0 P1-4: whether a message is only steering.
+ *
+ * Deliberately narrow. It matches a short message (<= 12 chars after trimming
+ * trailing punctuation) whose entire content is an acknowledgement, a
+ * continuation, or a slash command. Anything longer is real content even if it
+ * opens with "好，" — a user who writes "好，但是别动 JSX" is asking for
+ * something, and dropping it would lose a constraint.
+ */
+function isSteeringOnly(text: string): boolean {
+  const compact = text.replace(/[\s。.!！?？,，、~～]+$/gu, '').trim()
+  if (compact.length === 0) return true
+  if (compact.startsWith('/')) return true
+  if (compact.length > 12) return false
+  return /^(请?继续|继续吧?|好的?|可以|行|嗯+|是|对|确认|确定|同意|开始|ok|okay|yes|y|sure|go|proceed|continue|doit)$/iu.test(
+    compact,
+  )
+}
+
+/**
+ * v6.0 补丁一：把草稿和 target 的新输入合并成一条消息，然后删除草稿。
+ *
+ * 只生效一次：拿到就删，避免用户每轮都看到同一段旧草稿。
+ */
+function takeDraftMerge(agentId: string, messages: unknown): { messages: any[] } | undefined {
+  const draft = draftPayloads.get(agentId)
+  if (draft === undefined) return undefined
+  draftPayloads.delete(agentId)
+  persistDrafts(ctx)
+  const current = lastUserText(messages) ?? ''
+  const merged = [
+    `[系统提示：用户在上一个会话被拦截前，正在输入：「${draft.text}」]`,
+    `[用户新输入：「${current.trim().length === 0 ? '继续' : current.trim()}」]`,
+    '',
+    '请把这两段当成同一个连续意图来处理。',
+  ].join('\n')
+  const injected = {
+    id: `graft-draft-${agentId}` as any,
+    role: 'user',
+    content: [{ type: 'text', text: merged }],
+    source: { kind: 'user' },
+  }
+  return { messages: [injected] }
+}
+
+/**
+ * Inject queued constraints into the target exactly once.
+ *
+ * The message goes in as `developer/message` — a system-level instruction the
+ * UI renders as context, not as conversation — so the user's next prompt is
+ * not preceded by a wall of policy text they did not write.
+ */
+/**
+ * v5.2 补丁二：把后台提取的约束注入 target 的下一轮。
+ *
+ * 走的是 DSH 自己的注入通道——`agent/pre-step` 返回的 `messages`，与
+ * `dsh-session-reference` 注入跨会话快照的方式一致。写日志事件会撞上 v4 的
+ * step 序号约束（自己开 step 会让 agent loop 的 step/start 被拒），而
+ * `messages` 只影响这一次请求，不改持久化生命周期。
+ *
+ * 返回追加的消息数组；调用方把它拼进 pre-step 的结果。
+ */
+function takePendingConstraintMessages(agentId: string): any[] {
+  if (constraintsApplied.has(agentId)) return []
+  const payload = pendingConstraints.get(agentId)
+  if (payload === undefined || payload.constraints.length === 0) return []
+  constraintsApplied.add(agentId)
+  pendingConstraints.delete(agentId)
+  persistPendingConstraints(ctx)
+  ctx.logger?.info?.(`[dsh-graft-slice] injecting ${payload.constraints.length} async constraint(s) into ${agentId}`)
+  return [
+    {
+      id: `graft-constraints-${agentId}` as any,
+      // Pre-step messages are projected as user/message, and DSH requires the
+      // developer role to travel with a developer/message event instead. A user
+      // message carrying an explicit system-note header is the shape a pre-step
+      // listener can legitimately deliver.
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: [
+            '[系统提示] 这个会话从旧会话继承了以下长期约束，请在整个会话中遵守：',
+            ...payload.constraints.map((item, index) => `${index + 1}. ${item}`),
+          ].join('\n'),
+        },
+      ],
+      source: { kind: 'user' },
+    },
+  ]
+}
+
+  const stableCtx = {
+    ...ctx,
+    get(name: string) {
+      const cached = captured.get(name)
+      if (cached !== undefined) return cached
+      // Late-bound services (for example workspaceRegistry, which activates
+      // after sessionPersistence) were absent when this closure was built.
+      // Fall back to the live context so the auto path sees the same services
+      // the manual tool path sees.
+      try {
+        return (ctx as any).get(name)
+      } catch {
+        return undefined
+      }
+    },
+    sessions: ctx.sessions,
+    sessionQuery: captured.get('sessionQuery') ?? (ctx as any).sessionQuery,
+    logger: ctx.logger,
+  } as PluginContextLike
+  if (settings.autoGraft && settings.autoGraftKeepAliveMs > 0) {
+    // Headless drivers may tear down immediately after turn/end; this keeps
+    // the event loop long enough for the asynchronous graft to finish.
+    setTimeout(() => {}, settings.autoGraftKeepAliveMs)
+  }
+
+  /**
+ * v6.0 zero-forgery transition card.
+ *
+ * Hard rules, learned from a real incident that corrupted a 7,531-event user
+ * log (see README: "v6.0 日志损坏事故"):
+ *
+ *   1. NEVER write `turn/start` or `step/start`. The agent loop is the only
+ *      writer of lifecycle events; a plugin that opens them desynchronizes the
+ *      step sequence and v4 rejects the whole log.
+ *   2. Only write when the agent loop already has an OPEN step. No open step
+ *      means no card — silence is strictly better than a corrupt log.
+ *   3. Only append `developer/message` and `session/title`. Both are log-only
+ *      records that no lifecycle rule constrains.
+ *   4. Pre-validate the projected sequence with the same rules v4 enforces,
+ *      and skip the write entirely if it would break turn/step monotonicity.
+ */
+function validateAppendIsLifecycleSafe(
+  events: readonly any[],
+  append: { type: string; data: Record<string, any> },
+): { ok: true } | { ok: false; reason: string } {
+  // Only lifecycle-relevant event types can break the sequence. The two types
+  // this card writes are excluded from the state machine by design.
+  if (append.type === 'turn/start' || append.type === 'step/start' || append.type === 'turn/end' || append.type === 'step/end') {
+    return { ok: false, reason: `${append.type} is agent-loop owned` }
+  }
+  let turn: number | null = null
+  let step: number | null = null
+  let nextTurn = 1
+  let nextStep = 1
+  for (const event of events) {
+    switch (event.type) {
+      case 'turn/start': {
+        if (turn !== null) return { ok: false, reason: `turn/start while turn ${turn} is open` }
+        if (event.data?.turn !== nextTurn) return { ok: false, reason: `turn/start ${event.data?.turn} != ${nextTurn}` }
+        turn = event.data.turn
+        step = null
+        nextStep = 1
+        break
+      }
+      case 'step/start': {
+        if (turn === null) return { ok: false, reason: 'step/start without an open turn' }
+        if (step !== null) return { ok: false, reason: `step/start while step ${step} is open` }
+        if (event.data?.step !== nextStep) return { ok: false, reason: `step/start ${event.data?.step} != ${nextStep}` }
+        step = event.data.step
+        break
+      }
+      case 'step/end': {
+        if (step === null || event.data?.step !== step) return { ok: false, reason: 'step/end mismatch' }
+        step = null
+        nextStep = (event.data.step ?? 0) + 1
+        break
+      }
+      case 'turn/end': {
+        if (turn === null || step !== null) return { ok: false, reason: 'turn/end with open step or closed turn' }
+        turn = null
+        nextTurn += 1
+        break
+      }
+      default:
+        break
+    }
+  }
+  return { ok: true }
+}
+
+/** The open turn/step the card may attach to, or undefined when none is open. */
+function openStepOf(events: readonly any[]): { turn: number; step: number } | undefined {
+  let turn: number | null = null
+  let step: number | null = null
+  for (const event of events) {
+    switch (event.type) {
+      case 'turn/start':
+        turn = typeof event.data?.turn === 'number' ? event.data.turn : null
+        step = null
+        break
+      case 'step/start':
+        step = typeof event.data?.step === 'number' ? event.data.step : null
+        break
+      case 'step/end':
+        step = null
+        break
+      case 'turn/end':
+        turn = null
+        step = null
+        break
+      default:
+        break
+    }
+  }
+  return turn !== null && step !== null ? { turn, step } : undefined
+}
+
+/**
+ * v7.0 B4: a sidebar title that reads as the SAME work continuing.
+ *
+ * The old form was `[已交接] → <id>`, which announces an administrative event.
+ * A user scanning the sidebar wants to find "the task I was doing", not "an
+ * event that happened to a session". Reusing the target's own title head keeps
+ * the two windows recognisably the same thread.
+ */
+function continuationTitle(targetTitle: string | undefined, targetId: string): string {
+  const head = (targetTitle ?? '').replace(/^\[接续\]\s*/u, '').trim()
+  if (head.length === 0) return `[接续] → ${targetId}`
+  return `[接续] ${head}`
+}
+
+async function appendTransitionCard(
+  agentId: string,
+  targetId: string,
+  targetTitle?: string,
+): Promise<void> {
+  if (transitionCards.has(agentId)) return
+  try {
+    const sessions = ctx.get('sessions')
+    const live = isRecord(sessions) && typeof sessions.get === 'function' ? sessions.get(agentId) : undefined
+    if (!isRecord(live) || typeof live.snapshotEvents !== 'function' || typeof live.append !== 'function') return
+
+    const events = Array.from(live.snapshotEvents(0) as readonly any[])
+
+    // Rule 2: no open step means no card. Never fabricate one.
+    const open = openStepOf(events)
+    if (open === undefined) return
+
+    // v7.0 B4: the card is a door sign, not a report.
+    //
+    // The old card listed the timestamp, what was preserved, and a "please go to
+    // the new session" line — three facts the reader did not need, wrapped around
+    // the one they did. It also read as a system notice, which is exactly the
+    // "handoff paper" feel this release is trying to remove.
+    //
+    // What a person returning to this window needs is: (1) this window is spent,
+    // (2) where the work continued. Everything else is noise inside a window that
+    // can no longer accept input anyway.
+    const card = {
+      type: 'developer/message',
+      data: {
+        turn: open.turn,
+        step: open.step,
+        message: {
+          id: `graft-transition-${agentId}` as any,
+          role: 'developer',
+          content: [
+            {
+              type: 'text',
+              text: ['任务已无缝流转至新窗口，请前往继续。', '', `→ ${targetId}`].join('\n'),
+            },
+          ],
+          source: { kind: 'system-prompt' },
+        },
+      },
+    }
+    // Rule 4: refuse the write if the projected sequence would be illegal.
+    const safety = validateAppendIsLifecycleSafe(events, card)
+    if (!safety.ok) {
+      ctx.logger?.warn?.(`[dsh-graft-slice] transition card skipped: ${safety.reason}`)
+      return
+    }
+
+    live.append('developer/message', card.data, { surfaceOp: 'append' })
+    // v7.0 B4: the sidebar title stays a continuation of the SAME task rather
+    // than announcing an administrative event. "已交接" told the user a system
+    // thing happened; the goal head tells them what they were doing.
+    live.append('session/title', {
+      title: continuationTitle(targetTitle, targetId),
+      messageSeqs: [],
+      source: { kind: 'user' },
+    })
+    await sessions.flush?.(live)
+    transitionCards.add(agentId)
+  } catch (error) {
+    ctx.logger?.warn?.(`[dsh-graft-slice] transition card failed: ${String((error as any)?.message ?? error)}`)
+  }
+}
+
+
+  ctx.on(PRE_STEP_EVENT, async (payload: any, next: any) => {
+    let agentId = payload?.agent?.id
+    if (typeof agentId !== 'string') {
+      const agents = ctx.get('agents')
+      const current = isRecord(agents) && typeof agents.currentInitiator === 'function' ? agents.currentInitiator() : undefined
+      agentId = isRecord(current) && typeof current.id === 'string' ? current.id : undefined
+    }
+    if (typeof agentId === 'string') {
+      // v5.2 补丁二：后台约束通过 pre-step 的 messages 注入，见下方 takePendingConstraintMessages。
+      /**
+       * v7.0 P0-5 (second half): re-assert the target's constraints in-band.
+       *
+       * The system-prompt section is the structural guarantee — it cannot be
+       * compacted. This is the belt-and-braces copy for the case the section is
+       * unavailable: an older host without `systemPrompt.section`, or a process
+       * that started before this plugin registered it.
+       *
+       * It is a `developer/message` delivered through pre-step `messages`, which
+       * is the one channel that reaches the model without touching the log (and
+       * therefore without consuming a step number — writing an event here would
+       * collide with the v4 step ordering, the bug that once corrupted a log).
+       *
+       * Delivered once per session per process, not every step: repeating a
+       * standing rule every turn trains the reader to skip it.
+       */
+      if (!constraintsReasserted.has(agentId)) {
+        const standing = targetConstraintSections.get(agentId)
+        if (standing !== undefined && standing.constraints.length > 0) {
+          constraintsReasserted.add(agentId)
+          const existing = Array.isArray(payload?.messages) ? payload.messages : []
+          return {
+            kind: 'enter',
+            messages: [
+              ...existing,
+              {
+                id: `graft-standing-${agentId}` as any,
+                role: 'user',
+                content: [
+                  {
+                    type: 'text',
+                    text: [
+                      '[系统提示] 本次任务的硬约束（来自用户原话，始终有效，不因上下文压缩而失效）：',
+                      ...standing.constraints.map((constraint, index) => `${index + 1}. ${constraint}`),
+                      '',
+                      'If asked about constraints or progress, enumerate every item above without skipping or summarizing.',
+                    ].join('\n'),
+                  },
+                ],
+                source: { kind: GRAFT_REPLAY_SOURCE_KIND },
+              },
+            ],
+          }
+        }
+      }
+      // v7.0 P6: an overflow recovery built a target but left this session
+      // alive so the host could retry the failed request. The retry has now
+      // happened, so this is the earliest moment the user can be redirected.
+      //
+      // Checked BEFORE the `done` branch: recovery sets state to 'done' (the
+      // session is migrated as far as it is concerned), but the redirect is
+      // deferred, so the deferred entry is the more specific fact.
+      const deferredTarget = deferredOverflowTargets.get(agentId)
+      if (deferredTarget !== undefined) {
+        deferredOverflowTargets.delete(agentId)
+        autoGraftStates.set(agentId, 'done')
+        captureDraft(ctx, agentId, deferredTarget, payload?.messages)
+        await appendTransitionCard(agentId, deferredTarget)
+        return {
+          kind: 'reject',
+          reason: `上下文溢出后已转移至新会话 ${deferredTarget}`,
+          newSessionId: deferredTarget,
+        }
+      }
+      const state = autoGraftStates.get(agentId) ?? 'idle'
+      if (state === 'grafting') {
+        return { kind: 'reject', reason: 'Grafting in progress' }
+      }
+      if (state === 'done') {
+        const doneTransfer = transferredSessions.get(agentId)
+        if (doneTransfer !== undefined) captureDraft(ctx, agentId, doneTransfer.newSessionId, payload?.messages)
+        await appendTransitionCard(agentId, doneTransfer?.newSessionId ?? '新会话')
+        return {
+          kind: 'reject',
+          reason: 'Transferred',
+          ...(doneTransfer === undefined ? {} : { newSessionId: doneTransfer.newSessionId }),
+        }
+      }
+      const transferred = transferredSessions.get(agentId)
+      if (transferred !== undefined) {
+        autoGraftStates.set(agentId, 'done')
+        captureDraft(ctx, agentId, transferred.newSessionId, payload?.messages)
+        await appendTransitionCard(agentId, transferred.newSessionId)
+        return { kind: 'reject', reason: transferred.reason, newSessionId: transferred.newSessionId }
+      }
+      if (retiredSessions.has(agentId)) {
+        await appendTransitionCard(agentId, '新会话')
+        return { kind: 'reject', reason: '该会话已退休；请在新会话继续。' }
+      }
+      // v6.3 module 4: finish a pending confirmation before anything else.
+      const confirm = pendingConfirms.get(agentId)
+      if (confirm !== undefined && Date.now() - confirm.askedAt > settings.confirmTtlMs) {
+        pendingConfirms.delete(agentId)
+      } else if (confirm !== undefined) {
+        const answer = lastUserText(payload?.messages)
+        if (answer !== undefined && isConfirmAffirmative(answer)) {
+          pendingConfirms.delete(agentId)
+          autoGraftStates.set(agentId, 'grafting')
+          retiredSessions.add(agentId)
+          transferredSessions.set(agentId, {
+            newSessionId: confirm.targetId,
+            at: Date.now(),
+            reason: `已转移至新会话 ${confirm.targetId}`,
+          })
+          persistRetiredStore(stableCtx)
+          persistTransferredStore(stableCtx)
+          try {
+            const report = await autoGraftIfNeeded(stableCtx, settings, agentId, {
+              targetId: confirm.targetId,
+              ignoreTransferGuard: true,
+              confirmed: true,
+              refineConstraints: (src, tgt, evs) => {
+                void refineConstraintsInBackground(stableCtx, settings, src, tgt, evs)
+              },
+            })
+            if (report === undefined) throw new Error('confirmed graft produced no target')
+            autoGraftStates.set(agentId, 'done')
+            await appendTransitionCard(agentId, report.newSessionId, sessionTitleForGoal(report.goal, report.newSessionId))
+            return {
+              kind: 'reject',
+              reason: `已按确认迁移至新会话 ${report.newSessionId}`,
+              newSessionId: report.newSessionId,
+            }
+          } catch (error) {
+            autoGraftStates.set(agentId, 'idle')
+            retiredSessions.delete(agentId)
+            transferredSessions.delete(agentId)
+            persistRetiredStore(stableCtx)
+            persistTransferredStore(stableCtx)
+            ctx.logger?.warn?.(`[dsh-graft-slice] confirmed graft failed: ${String((error as any)?.message ?? error)}`)
+          }
+        } else if (answer !== undefined && answer.trim().length > 0) {
+          // Any other answer cancels the prompt; the watermark can ask again later.
+          pendingConfirms.delete(agentId)
+        }
+      }
+
+      if (settings.autoGraft && (settings.autoGraftSessionIds.length === 0 || settings.autoGraftSessionIds.includes(agentId)) && state === 'idle') {
+        const watermark = await readTokenWatermark(stableCtx, agentId, settings)
+        if (watermark !== undefined && watermark.ratio >= settings.autoGraftAtRatio) {
+          // v6.3 module 4: confirm mode asks here; the answer arrives next step.
+          if (settings.graftMode === 'confirm' && !pendingConfirms.has(agentId)) {
+            pendingConfirms.set(agentId, {
+              targetId: autoTargetId(settings),
+              askedAt: Date.now(),
+              ratio: watermark.ratio,
+            })
+            return {
+              kind: 'reject',
+              reason:
+                '上下文即将满载，是否由系统进行无缝迁移？（回复"确认"立刻迁移，其它回复取消）',
+            }
+          }
+          if (settings.graftMode === 'confirm') {
+            // A prompt is already open; let the turn proceed so the user can answer.
+            return { kind: 'enter', messages: Array.isArray(payload?.messages) ? payload.messages : [] }
+          }
+          const targetId = autoTargetId(settings)
+          autoGraftStates.set(agentId, 'grafting')
+          // Force the old session closed BEFORE creating the target. During
+          // the async graft, every later pre-step sees 'grafting' or the
+          // persisted transfer and is rejected.
+          retiredSessions.add(agentId)
+          transferredSessions.set(agentId, {
+            newSessionId: targetId,
+            at: Date.now(),
+            reason: `已转移至新会话 ${targetId}`,
+          })
+          persistRetiredStore(stableCtx)
+          persistTransferredStore(stableCtx)
+          try {
+            const report = await autoGraftIfNeeded(stableCtx, settings, agentId, {
+              targetId,
+              ignoreTransferGuard: true,
+              refineConstraints: (src, tgt, evs) => {
+                void refineConstraintsInBackground(stableCtx, settings, src, tgt, evs)
+              },
+            })
+            if (report === undefined) throw new Error('auto graft produced no target')
+            autoGraftStates.set(agentId, 'done')
+            await appendTransitionCard(agentId, report.newSessionId, sessionTitleForGoal(report.goal, report.newSessionId))
+            return {
+              kind: 'reject',
+              reason: `已自动迁移至新会话 ${report.newSessionId}`,
+              newSessionId: report.newSessionId,
+            }
+          } catch (error) {
+            autoGraftStates.set(agentId, 'idle')
+            retiredSessions.delete(agentId)
+            transferredSessions.delete(agentId)
+            persistRetiredStore(stableCtx)
+            persistTransferredStore(stableCtx)
+            try {
+              ctx.logger?.warn?.(`[dsh-graft-slice] auto-graft failed and rolled back: ${String((error as any)?.message ?? error)}`)
+            } catch {
+              // logging must not change the decision
+            }
+          }
+        }
+      }
+    }
+    if (typeof next === 'function') {
+      const decision = await next()
+      if (typeof agentId !== 'string' || !isRecord(decision) || decision.kind === 'reject') return decision
+      const base = Array.isArray(decision.messages) ? decision.messages : []
+      // v6.0 补丁一：草稿优先合并，让"被截断的那句话"接上用户的新输入。
+      const merged = takeDraftMerge(agentId, base)
+      const messages = merged === undefined ? base : [...base, ...merged.messages]
+      const extra = takePendingConstraintMessages(agentId)
+      if (extra.length === 0) return merged === undefined ? decision : { ...decision, messages }
+      return { ...decision, messages: [...messages, ...extra] }
+    }
+    return { kind: 'enter', messages: Array.isArray(payload?.messages) ? payload.messages : [] }
+  })
+
+  /**
+   * v7.0 P0-3: the deferred-graft consumer.
+   *
+   * The deadlock this closes, stated precisely:
+   *
+   * `autoGraftIfNeeded` runs from `agent/pre-step`. If the watermark is over
+   * threshold but the session is NOT at a safe harbour (a tool call is still
+   * pending, or the model is streaming), it records the session in
+   * `pendingGraftSources` and returns — "retry at the next quiet boundary".
+   *
+   * But nothing consumed that set. `pre-step` only runs at the START of a step,
+   * and a session that is mid-tool-call at the last pre-step may never see
+   * another one: the turn ends, the user does not send anything, and the session
+   * sits over the ratio forever. The first anyone hears about it is the provider
+   * refusing the next request.
+   *
+   * `agent/turn-stopping` is the host's own "the model owes no further response"
+   * boundary — no live tool calls, no pending steering. That is exactly the
+   * quiet moment the deferral was waiting for. Running the retry here (rather
+   * than from a timer) means the graft still happens inside a legitimate turn
+   * lifecycle, and it happens once, because the set is consumed on use.
+   *
+   * The listener is `serial`, so it may await; errors are contained because a
+   * failing retry must not abort the turn that is closing.
+   */
+  ctx.on(TURN_STOPPING_EVENT, async (payload: any) => {
+    const agentId = typeof payload?.agent?.id === 'string' ? payload.agent.id : undefined
+    if (agentId === undefined) return
+    if (!pendingGraftSources.has(agentId)) return
+    if (autoGraftStates.get(agentId) === 'grafting' || autoGraftStates.get(agentId) === 'done') return
+    if (!settings.autoGraft) return
+    if (settings.autoGraftSessionIds.length > 0 && !settings.autoGraftSessionIds.includes(agentId)) return
+    // Consume BEFORE attempting: a retry that throws must not be re-entered on
+    // every subsequent turn-stopping for the rest of the session.
+    pendingGraftSources.delete(agentId)
+    try {
+      const report = await autoGraftIfNeeded(stableCtx, settings, agentId, {
+        refineConstraints: (src, tgt, evs) => {
+          void refineConstraintsInBackground(stableCtx, settings, src, tgt, evs)
+        },
+      })
+      if (report !== undefined) {
+        autoGraftStates.set(agentId, 'done')
+        ctx.logger?.info?.(
+          `[dsh-graft-slice] deferred graft completed at turn-stopping: ${agentId} -> ${report.newSessionId}`,
+        )
+      }
+    } catch (error) {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] deferred graft at turn-stopping failed: ${String((error as any)?.message ?? error)}`,
+      )
+    }
+  })
+
+  /**
+   * v7.0 P6: overflow recovery — the case pre-step cannot catch.
+   *
+   * Every other migration path in this file is opportunistic: pre-step looks at
+   * the watermark and decides whether to act *before* a request. That works
+   * while the estimate roughly tracks reality, and fails exactly when it matters
+   * most — the provider itself says "this request is too large". No amount of
+   * pre-step checking runs after the fact.
+   *
+   * `agent/request-error` is the host's own recovery seam. Verified against
+   * `dsh-agent-loop`:
+   *
+   *   const action = await this.dispatch.waterfall("agent/request-error", {
+   *     turn, step, provider, failure: finish.failure, retryPolicy, signal,
+   *   }, () => Promise.resolve(undefined))
+   *   if (action?.kind !== "retry") throw new LlmError(...)
+   *   continue                                    // <-- the request is re-sent
+   *
+   * So returning `{ kind: 'retry' }` after the surface has been rewritten makes
+   * the host re-issue the same step against the new, smaller history. That is
+   * precisely the "migrate, then retry" the requirement asks for, using the
+   * host's contract rather than fighting it.
+   *
+   * Ordering matters and is enforced here: graft FIRST, then retry. A retry
+   * returned before a successful graft would simply overflow again, and the
+   * host's own `maxOverflowRetries` would burn on a loop that never shrinks.
+   */
+  ctx.on('agent/request-error', async (payload: any, next: any) => {
+    const failure = payload?.failure
+    const code = typeof failure?.code === 'string' ? failure.code : ''
+    if (code !== CONTEXT_WINDOW_EXCEEDED) return next()
+    if (payload?.signal?.aborted === true) return next()
+
+    const agentId = typeof payload?.agent?.id === 'string' ? payload.agent.id : undefined
+    if (agentId === undefined) return next()
+
+    // Asked to retry once already and still overflowing: the tape itself is
+    // larger than the window, and another migration would produce the same
+    // result. Report and let the host surface the original failure.
+    if (overflowRetries.has(agentId)) {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] overflow recovery already attempted for ${agentId}; not migrating again`,
+      )
+      return next()
+    }
+
+    const live = stableCtx.get('sessions')?.get?.(agentId)
+    const events = isRecord(live) && typeof live.snapshotEvents === 'function'
+      ? (live.snapshotEvents(0) as SessionEventLike[])
+      : undefined
+    if (events === undefined) return next()
+
+    // Reuse the same safe-harbour rule as the pressure path: a half-finished
+    // step is not a boundary, even under overflow.
+    const harbor = checkSafeHarbor(events)
+    if (!harbor.safe) {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] overflow recovery deferred for ${agentId}: ${harbor.reason}`,
+      )
+      return next()
+    }
+
+    overflowRetries.add(agentId)
+    const targetId = autoTargetId(settings)
+    // NOTE: the source is NOT retired here.
+    //
+    // The pressure path retires before creating the target, because the whole
+    // point is to move the user to the new session immediately. Overflow
+    // recovery is different: it has to hand the CURRENT step back to the host
+    // with `{ kind: 'retry' }`, and a retired session's next pre-step returns
+    // `{ kind: 'reject' }` — which would abort the very request we are trying
+    // to rescue. So the retirement marker is deferred to the target's own
+    // pre-step, where it belongs anyway.
+
+    try {
+      // B1 applies here too: an overflow almost always happens inside an open
+      // turn that has already produced results, and those are the most recent
+      // work in the session.
+      //
+      // v7.4 P0-3b: and for that exact reason the snapshot must NOT be cut at
+      // the last turn/end. Cutting there is what emptied the carryover block
+      // and let the source's newest round disappear from the tape.
+      if (!hasClosedTurn(events)) throw new Error('no closed turn to slice for overflow recovery')
+      const sourceSnapshot = { session: (live as any).header, events }
+      const derived = deriveAutoTapeBudget(
+        (() => {
+          const contextWindow = events
+            .filter((event) => event.type === 'request/context')
+            .map((event) => Number(event.data?.contextWindow))
+            .filter((value) => Number.isFinite(value) && value > 0)
+            .at(-1)
+          return contextWindow ?? settings.contextWindowTokens
+        })(),
+      )
+      // retireSource stays false: the source must remain usable for the retry.
+      const report = await graftSliceAndInject(
+        stableCtx,
+        { ...settings, retireSource: false, maxTotalChars: derived > 0 ? derived : settings.maxTotalChars },
+        agentId,
+        targetId,
+        undefined,
+        { sourceSnapshot, runtimeIntent: extractRuntimeIntent(events) },
+      )
+      // Mark the transfer (not a retirement) so the next pre-step redirects the
+      // user to the target instead of failing with "session retired".
+      deferredOverflowTargets.set(agentId, report.newSessionId)
+      autoGraftStates.set(agentId, 'done')
+      await appendTransitionCard(agentId, report.newSessionId, sessionTitleForGoal(report.goal, report.newSessionId))
+      ctx.logger?.info?.(
+        `[dsh-graft-slice] overflow recovery: ${agentId} -> ${report.newSessionId}; retrying the request`,
+      )
+      // The host re-issues the same step. The retry reads the same log — which
+      // is why the graft must not have mutated it — and now fits, because the
+      // target exists and the pressure path will route there next turn.
+      return { kind: 'retry' }
+    } catch (error) {
+      overflowRetries.delete(agentId)
+      autoGraftStates.set(agentId, 'idle')
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] overflow recovery failed and rolled back: ${String((error as any)?.message ?? error)}`,
+      )
+      return next()
+    }
+  })
+
+
+  /**
+   * v7.0 P0-5: constraints live in a system-prompt SECTION, not in the surface.
+   *
+   * This is the only place compaction cannot reach.
+   *
+   * Verified against DSH source:
+   *
+   *   selectCompactableRange(session, measurement, retainTokens) {
+   *     const firstIdx = systemHead(session, surfaceNodes[0]) === void 0 ? 0 : 1
+   *     ...
+   *     return { start: surfaceNodes[firstIdx], end: surfaceNodes[keepFromIdx - 1] }
+   *   }
+   *
+   * The range always starts at index >= 1, and `systemPrompt.section()` is not a
+   * surface node at all — it is rendered into the prompt that `systemHead`
+   * occupies. So a section is structurally immune: no retention budget, no
+   * `retainTokens`, no `/compact`, and no overflow path can drop it.
+   *
+   * Why this matters even though `compaction-basic` runs with `auto: false`:
+   *   - `/compact` (command-compact) still calls the manual path on demand;
+   *   - another profile or a future bundle may mount a compaction backend;
+   *   - `compactionRegion` can be invoked by any plugin.
+   * A constraint that survives only because a config flag is off is not
+   * protected; it is merely un-attacked so far.
+   *
+   * Scope: only sessions this plugin CREATED. The section text is computed per
+   * request from that session's own stored constraints, so a normal session
+   * renders `''` and pays nothing.
+   */
+  const registerConstraintSection = (): void => {
+    const systemPrompt = (() => {
+      try {
+        return ctx.get('systemPrompt') as any
+      } catch {
+        return undefined
+      }
+    })()
+    if (systemPrompt === undefined || typeof systemPrompt.section !== 'function') {
+      ctx.logger?.warn?.(
+        '[dsh-graft-slice] ctx.systemPrompt.section() unavailable; constraints stay in the goal message only',
+      )
+      return
+    }
+    const order =
+      typeof systemPrompt.getSectionOrder === 'function'
+        ? Number(systemPrompt.getSectionOrder('PLAN_POLICY')) || 0
+        : 0
+    systemPrompt.section({
+      name: 'graft:constraints',
+      order,
+      text: (context: any) => {
+        const sessionId =
+          typeof context?.agent?.session?.id === 'string' ? context.agent.session.id : undefined
+        if (sessionId === undefined) return ''
+        const entry = targetConstraintSections.get(sessionId)
+        if (entry === undefined || entry.constraints.length === 0) return ''
+        // Read as a standing rule of this workspace, not as migration narration:
+        // the target must treat these as always-true, and must not be reminded
+        // every turn that it was once relocated.
+        return [
+          '## Standing constraints for this work',
+          'These were declared by the user and remain in force for the whole task:',
+          ...entry.constraints.map((constraint, index) => `${index + 1}. ${constraint}`),
+          'If asked about constraints or progress, enumerate every item above without skipping or summarizing.',
+        ].join('\n')
+      },
+    })
+  }
+  registerConstraintSection()
+
+  ctx.tools.register({
+    name: 'graft_slice_and_inject',
+    description:
+      'Create a durable, zero-inheritance handoff session from a finished source session. ' +
+      'Slices through the last turn/end, injects a goal seed, older-turn summaries, the last N turns verbatim, ' +
+      'and a first-person pending state into one closed turn/step skeleton. ' +
+      'Refuses an open turn, a missing source cwd, a duplicate target id, or a source without a closed turn. ' +
+      'Never forks and never writes standalone tool/result events.',
+    parameters: {
+      type: 'object',
+      properties: {
+        sourceSessionId: {
+          type: 'string',
+          description: 'Finished source session id. Its last turn must be closed by turn/end.',
+        },
+        newSessionId: {
+          type: 'string',
+          description: 'New session id to create. Must not be live or persisted already; must differ from the source.',
+        },
+        allowReslice: {
+          type: 'boolean',
+          description:
+            'Slice a source that was already migrated (retired or transferred). Default false — ' +
+            're-slicing a handed-off conversation is how two divergent targets appear.',
+        },
+      },
+      required: ['sourceSessionId', 'newSessionId'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          sourceSessionId: { type: 'string' },
+          newSessionId: { type: 'string' },
+          cwd: { type: 'string' },
+          boundarySeq: { type: 'number' },
+          sourceEventCount: { type: 'number' },
+          turns: { type: 'number' },
+          recentTurnCount: { type: 'number' },
+          olderTurnCount: { type: 'number' },
+          adaptiveDepth: {
+            type: 'object',
+            properties: {
+              depth: { type: 'number' },
+              mode: { type: 'string' },
+              reason: { type: 'string' },
+            },
+            required: ['depth', 'mode', 'reason'],
+            additionalProperties: false,
+          },
+          injected: { type: 'object' },
+          pointers: { type: 'object' },
+          constraints: { type: 'array' },
+          taskStatus: { type: 'array' },
+          subagentReports: { type: 'array' },
+          workspace: { type: 'object' },
+          eventSeqRange: { type: 'object' },
+          sourceTemplate: { type: 'object' },
+          skeleton: { type: 'object' },
+          durability: { type: 'object' },
+          retired: { type: 'object' },
+          warnings: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['ok', 'sourceSessionId', 'newSessionId', 'cwd', 'durability'],
+        additionalProperties: true,
+      },
+      render: (_args: unknown, value: any) => [
+        { type: 'text', text: JSON.stringify(value, null, 2) },
+      ],
+    },
+    execute: async (args: any, exec: any) => {
+      if (!isRecord(args)) throw graftError('INVALID_ARGUMENT', 'arguments must be an object')
+      const sourceSessionId = asNonEmptyString(args.sourceSessionId, 'sourceSessionId')
+      assertResliceAllowed(sourceSessionId, args.allowReslice === true)
+      return graftSliceAndInject(
+        ctx,
+        settings,
+        sourceSessionId,
+        asNonEmptyString(args.newSessionId, 'newSessionId'),
+        exec?.signal,
+        {
+          // v7.3.1: the calling agent is the tool-availability scope of last
+          // resort. Resolving tools with no scope reads the GLOBAL view, which
+          // omits preset-scoped tools and downgraded every pointer in the tape.
+          callingAgent: exec?.agent,
+          refineConstraints: (src, tgt, evs) => {
+            void refineConstraintsInBackground(ctx, settings, src, tgt, evs)
+          },
+        },
+      )
+    },
+  })
+
+  /**
+   * v7.3: the regret pill, exposed as a tool.
+   *
+   * Migrations are judgement calls. When one is wrong — the tape lost the detail
+   * that mattered, or the user simply wants the old window back — this undoes the
+   * retirement without hand-editing `.retired.json`. The target is NOT deleted:
+   * it may already hold work, and destroying it to "undo" would be a second
+   * surprise on top of the first.
+   */
+  ctx.tools.register({
+    name: 'graft_resume_session',
+    description:
+      'Undo a migration: remove a session from the retired/transferred sets so it can be used again. ' +
+      'Use this when a handoff turned out to be wrong and the earlier conversation should continue. ' +
+      'The handoff target is left untouched — it may already hold work.',
+    parameters: {
+      type: 'object',
+      properties: {
+        sessionId: {
+          type: 'string',
+          description: 'The retired source session id to bring back.',
+        },
+      },
+      required: ['sessionId'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          resumed: { type: 'boolean' },
+          wasRetired: { type: 'boolean' },
+          wasTransferred: { type: 'boolean' },
+          targetSessionId: { type: 'string' },
+        },
+        required: ['resumed', 'wasRetired', 'wasTransferred'],
+        additionalProperties: false,
+      },
+      render: (_args: unknown, value: any) => {
+        if (value?.resumed !== true) {
+          return [{ type: 'text', text: 'That session was not retired or transferred; nothing to undo.' }]
+        }
+        const parts = [
+          `Resumed ${String(_args && (typeof _args === 'object') ? (_args as any).sessionId : 'the session')}.`,
+        ]
+        if (typeof value?.targetSessionId === 'string') {
+          parts.push(`The handoff target ${value.targetSessionId} was left as it is.`)
+        }
+        return [{ type: 'text', text: parts.join(' ') }]
+      },
+    },
+    execute: async (args: any) => {
+      if (!isRecord(args)) throw graftError('INVALID_ARGUMENT', 'arguments must be an object')
+      return resumeSession(ctx, asNonEmptyString(args.sessionId, 'sessionId'))
+    },
+  })
+
+  /**
+   * v7.4 P1-2：两阶段切片。graft_prepare 只读；graft_commit 才写。
+   *
+   * 单步 confirm 只问"要不要迁移"，用户看不到磁带内容；目标对不对、进度到哪、
+   * 约束是否完整、还剩什么，全都不可见。选错的代价是一整轮工作送进一个不能用的窗口。
+   */
+  ctx.tools.register({
+    name: 'graft_prepare',
+    description:
+      'Stage a slice WITHOUT writing, publishing or retiring anything, and return a reviewable summary: ' +
+      'the goal, the progress, the constraints, what is still open, and a content hash. Show that summary ' +
+      'to the user. If they approve, call graft_commit with the returned preparedId and digest. Nothing ' +
+      'is migrated until commit, and a review older than 30 minutes expires.',
+    parameters: {
+      type: 'object',
+      properties: {
+        sourceSessionId: {
+          type: 'string',
+          description: 'The session whose log should be sliced.',
+        },
+        targetSessionId: {
+          type: 'string',
+          description: 'Optional id for the future target; one is generated when omitted.',
+        },
+        allowReslice: {
+          type: 'boolean',
+          description:
+            'Slice a source that was already migrated (retired or transferred). Default false — ' +
+            're-slicing a handed-off conversation is how two divergent targets appear.',
+        },
+      },
+      required: ['sourceSessionId'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          preparedId: { type: 'string' },
+          digest: { type: 'string' },
+          sourceSessionId: { type: 'string' },
+          targetSessionId: { type: 'string' },
+          boundarySeq: { type: 'integer' },
+          sourceLastSeq: { type: 'integer' },
+          turnCount: { type: 'integer' },
+          pointerCount: { type: 'integer' },
+          tapeChars: { type: 'integer' },
+          review: { type: 'string' },
+        },
+        required: ['preparedId', 'digest', 'review'],
+        additionalProperties: true,
+      },
+      render: (_args: unknown, value: any) => [
+        { type: 'text', text: String(value?.review ?? 'prepared') },
+      ],
+    },
+    execute: async (args: any) => {
+      if (!isRecord(args)) throw graftError('INVALID_ARGUMENT', 'arguments must be an object')
+      const sourceSessionId = asNonEmptyString(args.sourceSessionId, 'sourceSessionId')
+      assertResliceAllowed(sourceSessionId, args.allowReslice === true)
+      return prepareSlice(
+        ctx,
+        settings,
+        sourceSessionId,
+        typeof args.targetSessionId === 'string' && args.targetSessionId.length > 0 ? args.targetSessionId : undefined,
+      )
+    },
+  })
+
+  ctx.tools.register({
+    name: 'graft_commit',
+    description:
+      'Commit a slice staged by graft_prepare. Verifies that the prepared id is still fresh, that the digest ' +
+      'still matches what the user reviewed, and that the source session has not moved on. Only then does it ' +
+      'create the target, cold-verify it, and (when configured) retire the source.',
+    parameters: {
+      type: 'object',
+      properties: {
+        preparedId: { type: 'string', description: 'The id returned by graft_prepare.' },
+        digest: { type: 'string', description: 'The digest shown by graft_prepare, echoed back.' },
+      },
+      required: ['preparedId', 'digest'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          sourceSessionId: { type: 'string' },
+          newSessionId: { type: 'string' },
+          cwd: { type: 'string' },
+          boundarySeq: { type: 'integer' },
+          turns: { type: 'integer' },
+          constraints: { type: 'array', items: { type: 'string' } },
+          warnings: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['ok', 'newSessionId'],
+        additionalProperties: true,
+      },
+      render: (_args: unknown, value: any) => {
+        const parts = [`Committed the reviewed slice to ${String(value?.newSessionId ?? 'the target')}.`]
+        if (value?.tailRefreshed !== undefined) {
+          const kinds = Array.isArray(value.tailRefreshed.kinds) ? value.tailRefreshed.kinds.join(', ') : 'the open turn'
+          const before = Number(value.tailRefreshed.reviewedChars)
+          const after = Number(value.tailRefreshed.committedChars)
+          const delta =
+            Number.isFinite(before) && Number.isFinite(after) ? ` (${before} → ${after} chars)` : ''
+          parts.push(
+            `Note: ${kinds} changed while the review was open${delta}; the committed tape is newer than the one you approved.`,
+          )
+        }
+        if (Array.isArray(value?.warnings) && value.warnings.length > 0) {
+          parts.push(`Warnings: ${value.warnings.length}.`)
+        }
+        return [{ type: 'text', text: parts.join(' ') }]
+      },
+    },
+    execute: async (args: any) => {
+      if (!isRecord(args)) throw graftError('INVALID_ARGUMENT', 'arguments must be an object')
+      return commitPreparedSlice(
+        ctx,
+        settings,
+        asNonEmptyString(args.preparedId, 'preparedId'),
+        asNonEmptyString(args.digest, 'digest'),
+      )
+    },
+  })
+
+  ctx.tools.register({
+    name: 'graft_search_history',
+    description:
+      'Search a source session log for text, and get back the seq numbers that match. Use this when you ' +
+      'need something from the earlier conversation but do not know its seq: search for a keyword ' +
+      '(an error string, a file name, a function name), then call graft_read_result with the seq of a hit. ' +
+      'Searches assistant messages and tool results. Matching is case-insensitive; set `regex: true` to ' +
+      'treat the query as a regular expression. Each hit includes ~50 characters of context either side.',
+    parameters: {
+      type: 'object',
+      properties: {
+        sourceSessionId: {
+          type: 'string',
+          description: 'Source session id whose log should be searched.',
+        },
+        query: {
+          type: 'string',
+          description: 'Text to find (case-insensitive substring), or a pattern when `regex` is true.',
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 100,
+          description: 'Maximum number of hits to return. Defaults to 10.',
+        },
+        regex: {
+          type: 'boolean',
+          description: 'Treat `query` as a regular expression instead of a literal substring.',
+        },
+      },
+      required: ['sourceSessionId', 'query'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          found: { type: 'boolean' },
+          query: { type: 'string' },
+          regex: { type: 'boolean' },
+          totalMatches: { type: 'number' },
+          totalHits: { type: 'number' },
+          truncated: { type: 'boolean' },
+          error: { type: 'string' },
+          hits: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                seq: { type: 'number' },
+                type: { type: 'string' },
+                offset: { type: 'number' },
+                preview: { type: 'string' },
+                totalChars: { type: 'number' },
+                matchCount: { type: 'number' },
+                sourceKind: { type: 'string' },
+              },
+              required: ['seq', 'type', 'offset', 'preview', 'totalChars', 'matchCount'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['found', 'query', 'regex', 'totalMatches', 'totalHits', 'truncated', 'hits'],
+        additionalProperties: false,
+      },
+      render: (_args: unknown, value: any) => {
+        if (typeof value?.error === 'string' && value.error.length > 0) {
+          return [{ type: 'text', text: String(value.error) }]
+        }
+        if (value?.found !== true) {
+          return [{ type: 'text', text: `No match for ${JSON.stringify(value?.query)} in that source session.` }]
+        }
+        const lines = (value.hits ?? []).map((hit: any) => {
+          // Name the density: "×24" tells the reader this event is a bulk dump
+          // rather than the one place the phrase was explained.
+          const density = hit.matchCount > 1 ? ` ×${hit.matchCount}` : ''
+          // v7.4 P1-1: mark a user message as the human's own words. A hit with
+          // no source kind is a tool result or an assistant message; only this
+          // one can be mistaken for an instruction, so only this one is labelled.
+          const author = hit.sourceKind === 'user' ? ' [用户原话]' : ''
+          return `seq=${hit.seq}  [${hit.type}]${author}${density}  ${hit.preview}`
+        })
+        if (value.truncated === true) {
+          lines.push(
+            `(showing ${(value.hits ?? []).length} of ${value.totalHits} matching events, ` +
+              `${value.totalMatches} matches total; narrow the query or raise limit)`,
+          )
+        }
+        lines.push('')
+        lines.push('Read one with graft_read_result(sourceSessionId, seq).')
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    execute: async (args: any) => {
+      if (!isRecord(args)) throw graftError('INVALID_ARGUMENT', 'arguments must be an object')
+      const rawLimit = args.limit === undefined ? 10 : args.limit
+      return graftSearchHistory(
+        ctx,
+        asNonEmptyString(args.sourceSessionId, 'sourceSessionId'),
+        asNonEmptyString(args.query, 'query'),
+        asSafeInteger(rawLimit, 'limit'),
+        args.regex === true,
+      )
+    },
+  })
+
+  ctx.tools.register({
+    name: 'graft_read_result',
+    description:
+      'Read one payload from a source session log by seq. Two pointer kinds are supported: a tool pointer ' +
+      '(`[tool name=xx seq=YY ...]`) reads a tool/result, and a codeblock pointer (`[codeblock seq=YY lines=A-B]`) ' +
+      'reads an assistant message. Pass `lineRange` for 1-based inclusive line access to an oversized body. ' +
+      'This bypasses cross-session tool authorization and reads the source log directly.',
+    parameters: {
+      type: 'object',
+      properties: {
+        sourceSessionId: {
+          type: 'string',
+          description: 'Source session id that owns the tool result or assistant message.',
+        },
+        seq: {
+          type: 'integer',
+          minimum: 0,
+          description: 'The seq printed in the tool or codeblock pointer.',
+        },
+        lineRange: {
+          type: 'object',
+          description: 'Optional 1-based inclusive line window, for codeblock pointers.',
+          properties: {
+            start: { type: 'integer', minimum: 1 },
+            end: { type: 'integer', minimum: 1 },
+          },
+          required: ['start', 'end'],
+          additionalProperties: false,
+        },
+      },
+      required: ['sourceSessionId', 'seq'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          found: { type: 'boolean' },
+          seq: { type: 'number' },
+          text: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+          truncated: { type: 'boolean' },
+          totalChars: { type: 'number' },
+          sourceKind: { type: 'string' },
+          lineRange: {
+            type: 'object',
+            properties: {
+              start: { type: 'number' },
+              end: { type: 'number' },
+              totalLines: { type: 'number' },
+            },
+            required: ['start', 'end', 'totalLines'],
+            additionalProperties: false,
+          },
+        },
+        required: ['found', 'seq', 'text', 'truncated', 'totalChars'],
+        additionalProperties: false,
+      },
+      render: (_args: unknown, value: any) => {
+        if (value?.found !== true) {
+          return [{ type: 'text', text: `No payload at seq ${String(value?.seq)} in that source session.` }]
+        }
+        const body = String(value.text ?? '')
+        // v7.4 P1-1: state the author when it is not the model.
+        //
+        // A user/message authored by this plugin or by the host is still readable —
+        // the log is a fact — but a reader that treats it as an instruction from the
+        // user would be wrong, and it cannot tell without being told.
+        const kind = typeof value?.sourceKind === 'string' ? value.sourceKind : undefined
+        if (kind === undefined || kind === 'user') {
+          const label = kind === 'user' ? '（用户原话，seq=' + String(value.seq) + '）\n' : ''
+          return [{ type: 'text', text: label + body }]
+        }
+        return [
+          {
+            type: 'text',
+            text: `（来源：${kind} —— 这是系统写的，不是用户说的）\n` + body,
+          },
+        ]
+      },
+    },
+    execute: async (args: any) => {
+      if (!isRecord(args)) throw graftError('INVALID_ARGUMENT', 'arguments must be an object')
+      const range = isRecord(args.lineRange)
+        ? {
+            start: asSafeInteger(args.lineRange.start, 'lineRange.start'),
+            end: asSafeInteger(args.lineRange.end, 'lineRange.end'),
+          }
+        : undefined
+      return graftReadResult(
+        ctx,
+        asNonEmptyString(args.sourceSessionId, 'sourceSessionId'),
+        asSafeInteger(args.seq, 'seq'),
+        100000,
+        range,
+      )
+    },
+  })
+}
+
+/** Spec-requested alias for hosts that look for activate(ctx). */
+export const activate = apply
+
+// ===========================================================================
+// Structural runtime types (erased by the build; kept for TypeScript readers)
+// ===========================================================================
+
+interface SessionEventLike {
+  type: string
+  seq: number
+  time?: number
+  data?: any
+  surfaceOp?: any
+  sourceEventSeqs?: any
+}
+
+interface SessionHeaderLike {
+  id: string
+  cwd?: string
+  createdAt?: number
+  isSeeded?: boolean
+  [key: string]: any
+}
+
+interface SessionLogSnapshotLike {
+  session: SessionHeaderLike
+  inheritedEventCount?: number
+  events: SessionEventLike[]
+}
+
+interface PreparedSessionLike {
+  id: string
+  header: SessionHeaderLike
+  seq: number
+  append(type: string, data: any, opts?: any): SessionEventLike
+  snapshotEvents(from?: number): readonly SessionEventLike[]
+}
+
+interface SessionHandleLike {
+  append(events: readonly SessionEventLike[], options?: any): Promise<void>
+  flush(options?: any): Promise<void>
+  close(): Promise<void>
+}
+
+interface SessionPersistenceLike {
+  create(header: SessionHeaderLike, options?: any): Promise<SessionHandleLike>
+  stat?(id: string): Promise<unknown | undefined>
+}
+
+interface SessionStoreLike {
+  get(id: string): { id: string } | undefined
+  prepare(id: string, options?: any): PreparedSessionLike
+}
+
+interface SessionQueryLike {
+  readSession(id: string): Promise<SessionLogSnapshotLike>
+}
+
+interface ToolRegistryLike {
+  register(definition: any): () => void
+}
+
+interface PluginContextLike {
+  tools: ToolRegistryLike
+  sessions: SessionStoreLike
+  sessionQuery: SessionQueryLike
+  get(name: string): any
+  on(name: string, listener: (...args: any[]) => any, options?: any): () => void
+  logger?: {
+    info?: (message: string) => void
+    warn?: (message: string) => void
+    error?: (message: string) => void
+  }
+}
+
+/** Test-only: where the durable stores currently resolve. */
+/** Test-only: where the durable stores currently resolve. */
+let lastRecovery: { scanned: number; rolledBack: string[] } | undefined
+
+/** Test-only: the recovery result of the last activation in this process. */
+export function debugLastRecovery(): { scanned: number; rolledBack: string[] } | undefined {
+  return lastRecovery
+}
+
+export function debugStorePaths(): { txnDir: string; prepared: string; retired: string } {
+  return { txnDir: txnDirPath, prepared: preparedStorePath, retired: retiredStorePath }
+}
