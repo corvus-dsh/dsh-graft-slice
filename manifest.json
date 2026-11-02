@@ -1,6 +1,6 @@
 {
   "name": "dsh-graft-slice",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "description": "Slice a closed source-session log at its last turn/end and inject a minimal, durable handoff session without forking.",
   "entry": "index.js",
   "activate": "activate(ctx, config)",

@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 /**
- * One-command publish: git init → commit → tag → push → GitHub Release.
+ * One-command publish: git init → commit → tag → push → topics → Release.
  *
  *   GITHUB_TOKEN=ghp_xxx node scripts/publish.mjs            # 真发布
  *   GITHUB_TOKEN=ghp_xxx node scripts/publish.mjs --dry-run   # 只打印将执行的步骤
  *
- * 需要 token 具备 `repo` 权限（classic）或 Contents+Administration 写权限（fine-grained）。
+ * 需要 token 具备 `repo` 权限（classic）或 Contents + Administration 写权限（fine-grained）。
  *
  * WHY NOT `gh`  这个脚本不依赖 GitHub CLI：CI 机器上往往只有 node 和 git。
  * WHY extraheader  把 token 塞进 remote URL 会留在 `.git/config` 里；这里走一次性
  *                  `http.extraheader`，不落盘，且日志里不会出现 token。
+ * WHY ADOPT REMOTE  远端可能已经有上一个 release 的提交。重复发布会因为“无关历史”
+ *                  而需要强推；这里先把远端 main 接成父提交（`reset --mixed`，工作区
+ *                  不动），于是每次都是普通的 fast-forward。
  */
 
 import { spawnSync } from 'node:child_process'
@@ -42,6 +45,7 @@ function git(args, { capture = false, allowFail = false } = {}) {
     if (args[0] === 'status') return { status: 0, stdout: '(dry-run: pending changes)', stderr: '' }
     if (args[0] === 'rev-parse') return { status: 1, stdout: '', stderr: '' }
     if (args[0] === 'remote') return { status: 0, stdout: '', stderr: '' }
+    if (args[0] === 'fetch') return { status: 0, stdout: '', stderr: '' }
     return { status: 0, stdout: '', stderr: '' }
   }
   const result = spawnSync('git', args, {
@@ -63,7 +67,7 @@ if (!VERSION || VERSION.includes('REPLACE')) fail('package.json 缺少可用 ver
 if (!existsSync(join(ROOT, 'LICENSE'))) fail('LICENSE 不存在')
 
 const token = process.env.GITHUB_TOKEN ?? ''
-if (!token && !DRY) fail('缺少 GITHUB_TOKEN。设置后重试：$env:GITHUB_TOKEN="ghp_..."（PowerShell）')
+if (!token && !DRY) fail('缺少 GITHUB_TOKEN。设置后重试：$env:GITHUB_TOKEN="github_pat_..."（PowerShell）')
 
 const owner = process.env.GITHUB_OWNER ?? ''
 const repo = process.env.GITHUB_REPO ?? pkg.name
@@ -81,7 +85,7 @@ if (String(pkg.repository?.url ?? '').toUpperCase().includes('REPLACE')) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Local git: init, commit, tag
+// 2. Local git: init, adopt remote history, commit
 // ---------------------------------------------------------------------------
 if (!existsSync(join(ROOT, '.git'))) {
   if (DRY) {
@@ -90,6 +94,42 @@ if (!existsSync(join(ROOT, '.git'))) {
     log(`→ git init`)
     git(['init', '-q'])
     git(['branch', '-M', 'main'], { allowFail: true })
+  }
+}
+
+const remoteUrl = `https://github.com/${ownerGuess}/${repo}.git`
+const remotes = git(['remote'], { capture: true, allowFail: true }).stdout.split('\n').filter(Boolean)
+if (!remotes.includes('origin')) {
+  if (DRY) log(`[dry] git remote add origin ${remoteUrl}`)
+  else {
+    log(`→ git remote add origin ${remoteUrl}`)
+    git(['remote', 'add', 'origin', remoteUrl])
+  }
+} else {
+  const current = git(['remote', 'get-url', 'origin'], { capture: true, allowFail: true }).stdout
+  if (current !== remoteUrl) {
+    if (DRY) log(`[dry] git remote set-url origin ${remoteUrl}`)
+    else {
+      log(`→ git remote set-url origin ${remoteUrl}`)
+      git(['remote', 'set-url', 'origin', remoteUrl])
+    }
+  }
+}
+
+// Adopt the remote branch as the parent commit when this checkout has no history
+// of its own. Without this, a second release is "unrelated histories" and needs a
+// force push — which is how a release silently deletes someone else's commit.
+if (DRY) {
+  log(`[dry] git fetch origin main && adopt as parent (if any)`)
+} else {
+  const fetched = git(['fetch', '-q', 'origin', 'main'], { allowFail: true }).status === 0
+  const hasLocalCommit = git(['rev-parse', '--verify', '--quiet', 'HEAD'], { capture: true, allowFail: true }).status === 0
+  if (fetched && !hasLocalCommit) {
+    git(['update-ref', 'refs/heads/main', 'FETCH_HEAD'])
+    git(['symbolic-ref', 'HEAD', 'refs/heads/main'])
+    // Index := remote tree. The working tree is NOT touched, so local edits stay.
+    git(['reset', '--mixed', 'FETCH_HEAD'])
+    log(`→ 已接管远端历史（父提交 = origin/main），本次为普通 fast-forward`)
   }
 }
 
@@ -119,29 +159,7 @@ if (!hasTag) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Remote
-// ---------------------------------------------------------------------------
-const remoteUrl = `https://github.com/${ownerGuess}/${repo}.git`
-const remotes = git(['remote'], { capture: true, allowFail: true }).stdout.split('\n').filter(Boolean)
-if (!remotes.includes('origin')) {
-  if (DRY) log(`[dry] git remote add origin ${remoteUrl}`)
-  else {
-    log(`→ git remote add origin ${remoteUrl}`)
-    git(['remote', 'add', 'origin', remoteUrl])
-  }
-} else {
-  const current = git(['remote', 'get-url', 'origin'], { capture: true, allowFail: true }).stdout
-  if (current !== remoteUrl) {
-    if (DRY) log(`[dry] git remote set-url origin ${remoteUrl}`)
-    else {
-      log(`→ git remote set-url origin ${remoteUrl}`)
-      git(['remote', 'set-url', 'origin', remoteUrl])
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 4. GitHub API helpers
+// 3. GitHub API helpers
 // ---------------------------------------------------------------------------
 const api = async (method, path, body) => {
   if (DRY) {
@@ -162,7 +180,7 @@ const api = async (method, path, body) => {
   return { ok: response.ok, status: response.status, json: () => response.json().catch(() => ({})) }
 }
 
-// 5. Ensure the repository exists (create it privately by default).
+// 4. Ensure the repository exists (public by default).
 const existing = await api('GET', `/repos/${ownerGuess}/${repo}`)
 if (!existing.ok && existing.status === 404) {
   if (DRY) {
@@ -186,7 +204,7 @@ if (!existing.ok && existing.status === 404) {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Push (token via one-shot http header, never written to .git/config)
+// 5. Push (token via one-shot http header, never written to .git/config)
 // ---------------------------------------------------------------------------
 if (!SKIP_PUSH) {
   const header = `AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`
@@ -194,14 +212,13 @@ if (!SKIP_PUSH) {
     log(`[dry] git push（分支 main + tag ${TAG}）`)
   } else {
     log(`→ 推送 main 与 ${TAG}`)
-    git(['push', '-q', '--set-upstream', 'origin', 'main'], { allowFail: true })
     const pushed = git(['-c', `http.extraheader=${header}`, 'push', 'origin', 'main', `refs/tags/${TAG}`], { allowFail: true })
     if (pushed.status !== 0) fail('推送失败（检查 token 权限与仓库 owner）')
   }
 }
 
 // ---------------------------------------------------------------------------
-// 7. Topics — this project lives in the DSH open-source ecosystem
+// 6. Topics — this project lives in the DSH open-source ecosystem
 // ---------------------------------------------------------------------------
 const TOPICS = ['dsh-plugin', 'dsh', 'deepseek-harness', 'context-management', 'agent-memory', 'handoff', 'session-management']
 const topics = await api('PUT', `/repos/${ownerGuess}/${repo}/topics`, { names: TOPICS })
@@ -209,7 +226,7 @@ if (!topics.ok) log(`⚠ 设置 topics 失败（HTTP ${topics.status}）；可�
 else if (!DRY) log(`✓ topics: ${TOPICS.join(', ')}`)
 
 // ---------------------------------------------------------------------------
-// 8. Release (prerelease: 0.7.4 是测试版，先走预发布)
+// 7. Release (prerelease: 0.7.x 是测试版，先走预发布)
 // ---------------------------------------------------------------------------
 const notesPath = join(ROOT, 'RELEASE_NOTES.md')
 const body = existsSync(notesPath) ? readFileSync(notesPath, 'utf8') : `Release ${TAG}`

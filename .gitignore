@@ -1,0 +1,14 @@
+node_modules/
+.txn/
+data/
+*.log
+.DS_Store
+Thumbs.db
+.graft-prepared.json
+.graft-leftovers.json
+.graft-drafts.json
+.retired.json
+.transferred.json
+.graft-targets.json
+.graft-constraint-sections.json
+.auto-graft-suppressed.json
