@@ -4,7 +4,7 @@
 
 **DSH 日志切片与最小注入插件。** 在源会话最后一个 `turn/end` 处切取高保真磁带，创建一个零继承、可冷恢复的交接会话；不 fork，不引入 SQLite，不单独注入 `tool/result`。
 
-> 当前版本 **0.10.0（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
+> 当前版本 **0.11.0（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
 > 发布说明：[RELEASE_NOTES.md](./RELEASE_NOTES.md)（v0.8.1 归档见 [RELEASE_NOTES-v0.8.1.md](./RELEASE_NOTES-v0.8.1.md)）。
 > 目标运行时：DeepSeek Harness **0.2.1-rc.5**（当前桌面端）。
 > 规格书 v2.1 写的是 rc.4；本实现已按 rc.5 的真实源码校正了两处会导致冷恢复失败的问题。
@@ -67,6 +67,26 @@ node scripts/verify-bundle.mjs   # 27 项：bundle 声明 / files 白名单 / ES
 | 未设 `type: "module"` | CJS 引 ESM 核心包，启动即崩 | `type: "module"` 已校验 |
 
 `cordis.patch.yml` 用**包名**引用（`name: dsh-graft-slice`），不写相对路径——相对路径只在本机成立。
+
+## v0.11.0：计划前置、产物复用、退休原子、锁租约
+
+四项加固，都来自“真正多项目并发”暴露的问题：
+
+1. **计划前置**：pre-step 检测到 `未完成 Todo > 3` 且没有任何 `阶段 N:` 前缀时，注入
+   「请先分析当前任务，制定阶段节点（Phase），并明确每个节点的完成标准，使用 todo_write 保存。」
+   长任务先有图再走，交接单才有节点可带。
+2. **产物复用**：pending-state 里，若本轮有 `write/edit`，列出
+   `已完成节点产物：<path>；后续请直接 read 复用，避免重复生成。` 目标会话不再重造同一个模块。
+3. **退休原子**：`.retired.json` 与 `.transferred.json` 现在是一次两文件事务：任一写失败 →
+   两个文件回滚 + 内存集合回滚 + 抛 `RETIREMENT_WRITE_FAILED`；`.txn` 只在全部写成功后清理。
+   “写一半、告警、继续”会让同一源再切一次。
+4. **锁的持有人与租约**：锁目录内新增 `owner` 文件（随机 token + pid + 时间戳），
+   持锁期间每 `lease/2` 续写（默认 30s 租约）；释放时校验 token，非持有人拒绝删除；
+   等待方按租约时间判活，不再误抢活锁。
+
+**E2E**：`node scripts/e2e-multiproject.mjs` 起 3 个独立 Project（各自 dataDir），并发完成
+70% 自切片 + harvest + 租约续期 + 场景路由；断言“每个项目只退休自己的源、技能证据只引用自己的
+session id、UI 查询不激活数据库技能”。12 项检查全过。
 
 ## v0.10.0：并发安全 —— 状态文件加锁，两个会话同时转生也不互相覆盖
 
@@ -305,7 +325,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 288 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位 |
+| `test/*.test.mjs` | 292 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位 |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -971,7 +991,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 288 个测试
+# 2) 292 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）

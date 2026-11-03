@@ -3086,7 +3086,28 @@ export function buildTape(
     config.modelDrivenGraft === false
       ? undefined
       : '[系统提示] 你刚刚完成了一次自我切片。请直接接着“当前任务”继续执行，无需等待用户确认。'
-  const pendingStateText = [constraintAnchor, pendingBody, selfSliceBootstrap]
+  // v7.8 artifact reuse: a node that WROTE a file has already produced it. Naming
+  // the paths here is cheaper than any number of "do not duplicate" reminders: the
+  // target reads them instead of regenerating the same module from scratch.
+  const writtenArtifacts: string[] = []
+  for (const event of sliced) {
+    if (event?.type !== 'tool/call') continue
+    const name = String(event.data?.name ?? '')
+    if (name !== 'write' && name !== 'edit') continue
+    try {
+      const args = JSON.parse(String(event.data?.arguments ?? '{}')) as { file_path?: unknown }
+      if (typeof args.file_path === 'string' && args.file_path.length > 0 && !writtenArtifacts.includes(args.file_path)) {
+        writtenArtifacts.push(args.file_path)
+      }
+    } catch {
+      // A non-JSON argument is simply not a known artifact.
+    }
+  }
+  const artifactNote =
+    writtenArtifacts.length === 0
+      ? undefined
+      : `已完成节点产物：${writtenArtifacts.slice(-3).join('、')}；后续请直接 read 复用，避免重复生成。`
+  const pendingStateText = [constraintAnchor, pendingBody, artifactNote, selfSliceBootstrap]
     .filter((part): part is string => typeof part === 'string' && part.length > 0)
     .join('\n\n')
   return {
@@ -4969,7 +4990,7 @@ const LOCK_STALE_MS = 30_000
 
 export interface GraftAuditEntry {
   at: string
-  kind: 'lock-wait' | 'lock-stale' | 'model-nudge' | 'force-graft' | 'target-created'
+  kind: 'lock-wait' | 'lock-stale' | 'lock-owner-mismatch' | 'model-nudge' | 'force-graft' | 'target-created'
   file?: string
   sessionId?: string
   targetSessionId?: string
@@ -5028,7 +5049,7 @@ function lockDirFor(path: string): string {
  */
 export function acquireFileLock(
   path: string,
-  options: { timeoutMs?: number; staleMs?: number; label?: string; silent?: boolean } = {},
+  options: { timeoutMs?: number; staleMs?: number; label?: string; silent?: boolean; leaseMs?: number } = {},
 ): () => void {
   const lock = lockDirFor(path)
   const timeoutMs = options.timeoutMs ?? LOCK_TIMEOUT_MS
@@ -5037,11 +5058,40 @@ export function acquireFileLock(
   // The audit file must never audit its own acquisition: that recursion re-enters
   // this function while the audit lock is still held and deadlocks the thread.
   const silent = options.silent === true
+  // v7.8: a lock is OWNED, not merely claimed. The owner file carries a random
+  // token; release verifies it, so a late writer cannot delete a lock that was
+  // stolen and re-acquired by someone else. The same file is the lease: while the
+  // holder is alive it is rewritten every leaseMs/2, so waiters can tell "slow"
+  // from "dead".
+  const leaseMs = options.leaseMs ?? 30_000
+  const token = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${process.pid}`
+  const ownerFile = join(lock, 'owner')
+  const writeOwner = (): void => {
+    try {
+      writeFileSync(ownerFile, JSON.stringify({ token, pid: process.pid, at: Date.now() }), 'utf8')
+    } catch {
+      // The lock dir exists; a missing owner file only costs precise stealing.
+    }
+  }
+  const readOwner = (): { token?: string; at?: number } => {
+    try {
+      return JSON.parse(readFileSync(ownerFile, 'utf8')) as { token?: string; at?: number }
+    } catch {
+      return {}
+    }
+  }
   const started = Date.now()
   let reported = false
   for (;;) {
     try {
       mkdirSync(lock)
+      writeOwner()
+      let renewal: ReturnType<typeof setInterval> | undefined
+      if (leaseMs > 0) {
+        renewal = setInterval(writeOwner, Math.max(100, Math.floor(leaseMs / 2)))
+        // A renewal timer must never keep the host process alive.
+        ;(renewal as unknown as { unref?: () => void }).unref?.()
+      }
       const held = Date.now() - started
       if (!silent && held > LOCK_SETTLE_MS) {
         appendGraftAudit({ at: new Date().toISOString(), kind: 'lock-wait', file: label, waitedMs: held })
@@ -5050,6 +5100,18 @@ export function acquireFileLock(
       return () => {
         if (released) return
         released = true
+        if (renewal !== undefined) clearInterval(renewal)
+        // Owner check: only the holder may remove the lock.
+        const owner = readOwner()
+        if (owner.token !== undefined && owner.token !== token) {
+          appendGraftAudit({
+            at: new Date().toISOString(),
+            kind: 'lock-owner-mismatch',
+            file: label,
+            detail: 'release refused: the lock was re-acquired by another owner',
+          })
+          return
+        }
         try {
           rmSync(lock, { recursive: true, force: true })
         } catch {
@@ -5059,10 +5121,13 @@ export function acquireFileLock(
     } catch (error) {
       if ((error as any)?.code !== 'EEXIST') throw error
     }
-    // Stale detection: a killed process leaves the directory behind.
+    // Stale detection: a killed process leaves the directory behind, and its
+    // lease stops being renewed. Prefer the lease timestamp over the dir mtime,
+    // because the dir mtime cannot be renewed without unlinking the lock.
     try {
-      const state = statSync(lock)
-      if (Date.now() - state.mtimeMs > staleMs) {
+      const owner = readOwner()
+      const leaseAt = Number.isFinite(Number(owner.at)) ? Number(owner.at) : statSync(lock).mtimeMs
+      if (Date.now() - leaseAt > staleMs) {
         rmSync(lock, { recursive: true, force: true })
         appendGraftAudit({ at: new Date().toISOString(), kind: 'lock-stale', file: label, detail: 'stolen after staleMs' })
         continue
@@ -5089,7 +5154,7 @@ export function acquireFileLock(
 export function withFileLock<T>(
   path: string,
   fn: () => T,
-  options: { timeoutMs?: number; staleMs?: number; label?: string; silent?: boolean } = {},
+  options: { timeoutMs?: number; staleMs?: number; label?: string; silent?: boolean; leaseMs?: number } = {},
 ): T {
   const release = acquireFileLock(path, options)
   try {
@@ -5109,7 +5174,7 @@ export function withFileLock<T>(
  */
 export function acquireSourceLock(sessionId: string): () => void {
   const path = join(dirname(retiredStorePath), `.lock-source-${encodeURIComponent(sessionId)}`)
-  return acquireFileLock(path, { timeoutMs: 60_000, staleMs: 120_000, label: `source:${sessionId}` })
+  return acquireFileLock(path, { timeoutMs: 60_000, staleMs: 120_000, leaseMs: 30_000, label: `source:${sessionId}` })
 }
 
 function readJsonArray(path: string): unknown[] {
@@ -5387,6 +5452,15 @@ function lastUserText(messages: unknown): string | undefined {
  */
 const PLAN_NUDGE_TEXT =
   '[系统提示] 这是长任务：请先制定或更新你的节点计划（Node Plan）——阶段 → 当前节点 → 卡点。写进 todo_write 时用「阶段 1:」前缀，切片会原样带走。'
+/**
+ * v7.8: the PRE-PLANNING nudge.
+ *
+ * A long task that already has 4+ open todos but no phase structure is running
+ * before it has a plan. The cost is paid later, at the handoff: the target gets a
+ * flat todo list with no notion of which node it is in. This fires before that.
+ */
+const PLAN_PHASE_TEXT =
+  '[系统提示] 请先分析当前任务，制定阶段节点（Phase），并明确每个节点的完成标准，使用 todo_write 保存。'
 const PLAN_NUDGE_COOLDOWN_TURNS = 3
 
 interface PlanNudgeState {
@@ -5449,7 +5523,10 @@ function takePlanNudge(
   })
   const phaseIntent = /(阶段|Phase|里程碑|roadmap)/iu.test(userText) || countNumberedSteps(userText) >= 3
   const drift = taskState.openTodos.length >= 3 && (taskState.todoAgeEvents ?? 0) >= 500
-  if (!(phaseIntent && !hasPhasePrefixes) && !drift) return []
+  // v7.8: no plan, already deep. Four open items without a phase prefix is the
+  // shape of a task improvised step by step.
+  const unplannedLongTask = taskState.openTodos.length > 3 && !hasPhasePrefixes
+  if (!(phaseIntent && !hasPhasePrefixes) && !drift && !unplannedLongTask) return []
 
   state.nudged = true
   state.lastNudgeTurn = state.turns
@@ -5457,7 +5534,7 @@ function takePlanNudge(
     {
       id: `graft-plan-${agentId}-${state.turns}`,
       role: 'user',
-      content: [{ type: 'text', text: PLAN_NUDGE_TEXT }],
+      content: [{ type: 'text', text: unplannedLongTask ? PLAN_PHASE_TEXT : PLAN_NUDGE_TEXT }],
       source: { kind: GRAFT_REPLAY_SOURCE_KIND },
     },
   ]
@@ -5555,7 +5632,7 @@ function loadPendingConstraints(ctx: PluginContextLike): void {
 }
 
 /** Persist the retirement set; a failed write is reported but never blocks a migration. */
-function persistRetiredStore(ctx: PluginContextLike, remove: readonly string[] = []): void {
+function persistRetiredStore(ctx: PluginContextLike, remove: readonly string[] = [], strict = false): void {
   try {
     mkdirSync(dirname(retiredStorePath), { recursive: true })
     withFileLock(retiredStorePath, () => {
@@ -5574,6 +5651,10 @@ function persistRetiredStore(ctx: PluginContextLike, remove: readonly string[] =
       writeJsonAtomic(retiredStorePath, [...merged].sort())
     })
   } catch (error) {
+    // v7.8: commit-critical writes must FAIL, not warn. A retirement that is only
+    // half-written is worse than no retirement: the source stays usable while the
+    // in-memory state says it is gone.
+    if (strict) throw error
     try {
       ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${retiredStorePath}: ${String((error as any)?.message ?? error)}`)
     } catch {
@@ -5625,7 +5706,7 @@ const MIGRATION_SYSTEM_PROMPT = [
   "If you encounter a 'SetNamedSecurityInfoW failed' error, the workspace is in restricted mode. Ask the user to run with danger-full-access or use non-destructive read-only tools.",
 ].join('\n\n')
 
-function persistTransferredStore(ctx: PluginContextLike, remove: readonly string[] = []): void {
+function persistTransferredStore(ctx: PluginContextLike, remove: readonly string[] = [], strict = false): void {
   try {
     mkdirSync(dirname(transferredStorePath), { recursive: true })
     withFileLock(transferredStorePath, () => {
@@ -5645,11 +5726,60 @@ function persistTransferredStore(ctx: PluginContextLike, remove: readonly string
       writeJsonAtomic(transferredStorePath, merged)
     })
   } catch (error) {
+    if (strict) throw error
     try {
       ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${transferredStorePath}: ${String((error as any)?.message ?? error)}`)
     } catch {
       // Logging must not change the migration result.
     }
+  }
+}
+
+/**
+ * v7.8: retirement is a TWO-FILE transaction.
+ *
+ * The source is retired only when BOTH `.retired.json` and `.transferred.json`
+ * say so. Writing one and warning about the other leaves a state where the
+ * sidebar says "transferred", the ledger says "retirable", and the next pre-step
+ * graft the same source again. So: snapshot both files, write both strictly, and
+ * on ANY failure restore both and roll the in-memory sets back before throwing.
+ * The `.txn` journal is not cleared here — a caller that throws leaves it for
+ * recovery, which is exactly what it is for.
+ */
+function commitRetirementAtomic(ctx: PluginContextLike, sourceId: string, newId: string): void {
+  const lockPath = join(dirname(retiredStorePath), '.retirement')
+  const release = acquireFileLock(lockPath, { timeoutMs: 30_000, staleMs: 60_000, label: 'retirement' })
+  const snapshot = (path: string): string | undefined => {
+    try {
+      return readFileSync(path, 'utf8')
+    } catch {
+      return undefined
+    }
+  }
+  const restore = (path: string, text: string | undefined): void => {
+    try {
+      if (text === undefined) rmSync(path, { force: true })
+      else writeFileSync(path, text, 'utf8')
+    } catch {
+      // A restore that fails is reported by the thrown error below.
+    }
+  }
+  const beforeRetired = snapshot(retiredStorePath)
+  const beforeTransferred = snapshot(transferredStorePath)
+  try {
+    persistRetiredStore(ctx, [], true)
+    persistTransferredStore(ctx, [], true)
+  } catch (error) {
+    restore(retiredStorePath, beforeRetired)
+    restore(transferredStorePath, beforeTransferred)
+    retiredSessions.delete(sourceId)
+    transferredSessions.delete(sourceId)
+    throw graftError(
+      'RETIREMENT_WRITE_FAILED',
+      `retirement rolled back after a state write failed: ${String((error as any)?.message ?? error)}`,
+    )
+  } finally {
+    release()
   }
 }
 
@@ -6878,8 +7008,9 @@ async function graftSliceAndInjectUnlocked(
         at: Date.now(),
         reason: `已转移至新会话 ${newId}`,
       })
-      persistRetiredStore(ctx)
-      persistTransferredStore(ctx)
+      // v7.8: both ledgers or neither. A partial retirement is a second target
+      // waiting to happen.
+      commitRetirementAtomic(ctx, sourceId, newId)
       // v7.4 P0-2: the source is now retired AND durable, so the migration is
       // committed and the journal entry has served its purpose.
       writeGraftTxn(ctx, {

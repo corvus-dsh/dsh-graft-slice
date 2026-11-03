@@ -70,7 +70,7 @@ both the hint and that bootstrap line.
 ```powershell
 cd '<plugin-dir>'
 node scripts/build.mjs                 # requires Node >= 22.6 (type stripping); runtime needs >= 20
-node --test test/*.test.mjs            # 288 tests
+node --test test/*.test.mjs            # 292 tests
 node scripts/check-docs.mjs            # docs vs code: version, build freshness, tool list, test count, feature status
 node scripts/demo.mjs                  # real persisted log + fake host, never writes the real store
 node scripts/scan-real-logs.mjs        # read-only scan of every local persisted log
