@@ -1,3 +1,38 @@
+# dsh-graft-slice v0.10.0 — 并发安全：两个会话同时转生也不互相覆盖
+
+**发布日期**：2026-11-03　**状态**：预发布（v0.9.0 → v0.10.0）　**测试**：288/288
+
+---
+
+## v0.10.0：状态文件锁
+
+v0.9 的 Model-Driven 让"多个会话同时到达水位"从罕见变成了常态。旧写法"序列化自己内存里的
+map，再 rename 覆盖"在并发下会丢掉另一方的记录：被抹掉的会话重启后复活、再被嫁接一次，
+先写者则在 `SOURCE_DRIFT` 的假象里打转。
+
+修法三层：
+
+| 层 | 做法 |
+|---|---|
+| 互斥 | 每个状态文件 `<file>.lock`，用 `mkdirSync` 的 EEXIST 做原子占锁；锁龄 >30s 视为崩溃遗留直接夺取 |
+| 合并 | 锁内 read-modify-write：磁盘 ∪ 内存；删除显式传 `remove`（回滚/恢复/提交消费） |
+| 单写者 | 每个源会话一把 `source:<id>` 锁；切片前重读磁盘台账，第二个写者得到 `SOURCE_ALREADY_MIGRATED` |
+
+覆盖范围：`.retired.json`、`.transferred.json`、`.graft-prepared.json`、`.graft-targets.json`、
+`.auto-graft-suppressed.json`、约束分节。
+
+**审计**：`.graft-audit.jsonl` 记录 `model-nudge` / `force-graft` / `lock-wait` / `lock-stale`。
+pre-step 的提示不进会话日志，这行是"提示发过、在多少水位发的"的唯一持久证据。
+
+**演练**：`node scripts/duel-model-driven.mjs` 用四个真实进程共享一个 dataDir（A/B 73% 自助，
+C/D 76% 兜底），断言 4 源全退休、4 target 全带自启提示、审计 2 nudge + 2 force-graft、无锁超时。
+
+**测试**：288/288（新增 4 条并发用例：合并写、prepared 防覆盖、跨进程互斥 8 并发、陈旧锁夺取）。
+
+---
+
+# 以下为 v0.9.0 内容
+
 # dsh-graft-slice v0.9.0 — 模型主动觉知，自己决定何时转生
 
 > **主动交接 · 断点优先 · 崩溃可恢复**

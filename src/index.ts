@@ -24,9 +24,9 @@
  * Phase mapping follows the spec sections in the comments below.
  */
 
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** Cordis plugin name. */
@@ -4944,15 +4944,209 @@ function writeJsonAtomic(path: string, value: unknown): void {
   renameSync(temp, path)
 }
 
+/**
+ * v7.7: one lock per state file, and MERGE (never overwrite) on write.
+ *
+ * THE BUG THIS CLOSES
+ *
+ * Every state file used to be written as "serialise my in-memory map and rename
+ * it over the old file". `rename` is atomic, so no reader ever saw a torn file —
+ * but atomicity is not isolation. Two sessions (two processes, or two agents in
+ * one process) each hold a PARTIAL view of `.retired.json`, and the last writer
+ * silently replaces the other's entries. Measured consequence in the field:
+ * session B's retirement vanished, so B was resurrected after a restart and
+ * grafted a second time (two divergent targets), while A saw "already
+ * transferred" and reported a false SOURCE_DRIFT.
+ *
+ * The lock is a directory: `mkdirSync` fails with EEXIST on every platform we
+ * ship, which makes it the one primitive that is atomic without a native addon.
+ * A lock older than `staleMs` is stolen, because a crashed process must not pin
+ * the store forever.
+ */
+const LOCK_SETTLE_MS = 12
+const LOCK_TIMEOUT_MS = 8_000
+const LOCK_STALE_MS = 30_000
+
+export interface GraftAuditEntry {
+  at: string
+  kind: 'lock-wait' | 'lock-stale' | 'model-nudge' | 'force-graft' | 'target-created'
+  file?: string
+  sessionId?: string
+  targetSessionId?: string
+  ratio?: number
+  waitedMs?: number
+  detail?: string
+}
+
+/**
+ * v7.7: an append-only audit next to the state files.
+ *
+ * The model-driven nudge is delivered through pre-step `messages`, which the host
+ * never logs. Without this file there is no way to prove after the fact that a
+ * nudge fired, at what ratio, or that a lock actually contended. One JSON line
+ * per event; the write is locked because two processes may append at once.
+ */
+export function appendGraftAudit(entry: GraftAuditEntry): void {
+  const base = dirname(retiredStorePath)
+  try {
+    mkdirSync(base, { recursive: true })
+    const path = join(base, '.graft-audit.jsonl')
+    withFileLock(
+      path,
+      () => {
+        appendFileSync(path, JSON.stringify({ ...entry, pid: process.pid }) + '\n', 'utf8')
+      },
+      { timeoutMs: LOCK_TIMEOUT_MS, staleMs: LOCK_STALE_MS, label: 'audit', silent: true },
+    )
+  } catch {
+    // Audit is evidence, never a gate: a failed line must not change the outcome.
+  }
+}
+
+/** Block the current thread without burning a core (Atomics.wait is a real sleep). */
+function sleepSync(ms: number): void {
+  try {
+    const waitArray = new Int32Array(new SharedArrayBuffer(4))
+    Atomics.wait(waitArray, 0, 0, ms)
+  } catch {
+    const end = Date.now() + ms
+    while (Date.now() < end) {
+      // last-resort spin
+    }
+  }
+}
+
+function lockDirFor(path: string): string {
+  return `${path}.lock`
+}
+
+/**
+ * Acquire one file lock. Returns the release function (idempotent).
+ *
+ * `label` is only for the audit line ("which lock did we wait on?"), so an
+ * operator can tell a ledger wait from an audit wait.
+ */
+export function acquireFileLock(
+  path: string,
+  options: { timeoutMs?: number; staleMs?: number; label?: string; silent?: boolean } = {},
+): () => void {
+  const lock = lockDirFor(path)
+  const timeoutMs = options.timeoutMs ?? LOCK_TIMEOUT_MS
+  const staleMs = options.staleMs ?? LOCK_STALE_MS
+  const label = options.label ?? basename(path)
+  // The audit file must never audit its own acquisition: that recursion re-enters
+  // this function while the audit lock is still held and deadlocks the thread.
+  const silent = options.silent === true
+  const started = Date.now()
+  let reported = false
+  for (;;) {
+    try {
+      mkdirSync(lock)
+      const held = Date.now() - started
+      if (!silent && held > LOCK_SETTLE_MS) {
+        appendGraftAudit({ at: new Date().toISOString(), kind: 'lock-wait', file: label, waitedMs: held })
+      }
+      let released = false
+      return () => {
+        if (released) return
+        released = true
+        try {
+          rmSync(lock, { recursive: true, force: true })
+        } catch {
+          // A lock we cannot remove is reported by the next waiter as stale.
+        }
+      }
+    } catch (error) {
+      if ((error as any)?.code !== 'EEXIST') throw error
+    }
+    // Stale detection: a killed process leaves the directory behind.
+    try {
+      const state = statSync(lock)
+      if (Date.now() - state.mtimeMs > staleMs) {
+        rmSync(lock, { recursive: true, force: true })
+        appendGraftAudit({ at: new Date().toISOString(), kind: 'lock-stale', file: label, detail: 'stolen after staleMs' })
+        continue
+      }
+    } catch {
+      continue // the holder released between EEXIST and stat: retry immediately
+    }
+    const waited = Date.now() - started
+    if (waited > timeoutMs) {
+      throw graftError(
+        'STATE_LOCK_TIMEOUT',
+        `could not acquire the ${label} lock within ${timeoutMs}ms; another graft is still writing state`,
+      )
+    }
+    if (!silent && !reported && waited > LOCK_SETTLE_MS) {
+      reported = true
+      appendGraftAudit({ at: new Date().toISOString(), kind: 'lock-wait', file: label, waitedMs: waited, detail: 'waiting' })
+    }
+    sleepSync(LOCK_SETTLE_MS)
+  }
+}
+
+/** Run `fn` while holding the lock for `path`. */
+export function withFileLock<T>(
+  path: string,
+  fn: () => T,
+  options: { timeoutMs?: number; staleMs?: number; label?: string; silent?: boolean } = {},
+): T {
+  const release = acquireFileLock(path, options)
+  try {
+    return fn()
+  } finally {
+    release()
+  }
+}
+
+/**
+ * The per-source lock: two processes must never build two targets for one source.
+ *
+ * The state-file locks protect the LEDGERS; this protects the MIGRATION. Without
+ * it, concurrent prepare/commit for the same session can both pass the boundary
+ * check (the source has not moved), both write a target, and both retire — which
+ * is how one source ends up with two divergent continuations.
+ */
+export function acquireSourceLock(sessionId: string): () => void {
+  const path = join(dirname(retiredStorePath), `.lock-source-${encodeURIComponent(sessionId)}`)
+  return acquireFileLock(path, { timeoutMs: 60_000, staleMs: 120_000, label: `source:${sessionId}` })
+}
+
+function readJsonArray(path: string): unknown[] {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function readJsonRecord(path: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    return isRecord(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
 function persistConstraintSections(ctx: PluginContextLike | undefined): void {
   if (ctx === undefined) return
   try {
     mkdirSync(dirname(constraintSectionsPath), { recursive: true })
-    const payload: Record<string, { constraints: string[]; at: number }> = {}
-    for (const [id, entry] of [...targetConstraintSections.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-      payload[id] = entry
-    }
-    writeJsonAtomic(constraintSectionsPath, payload)
+    withFileLock(constraintSectionsPath, () => {
+      const payload = readJsonRecord(constraintSectionsPath) as Record<string, { constraints: string[]; at: number }>
+      for (const [id, entry] of targetConstraintSections) {
+        const existing = payload[id]
+        if (existing === undefined || Number(entry.at ?? 0) >= Number(existing.at ?? 0)) payload[id] = entry
+      }
+      for (const [id, entry] of Object.entries(payload)) {
+        if (isRecord(entry) && Array.isArray(entry.constraints) && !targetConstraintSections.has(id)) {
+          targetConstraintSections.set(id, entry as never)
+        }
+      }
+      writeJsonAtomic(constraintSectionsPath, payload)
+    })
   } catch (error) {
     try {
       ctx.logger?.warn?.(
@@ -5313,6 +5507,15 @@ function takeModelDrivenNudge(
   if (modelDrivenNudgeTurns.get(agentId) === turnKey) return []
   modelDrivenNudgeTurns.set(agentId, turnKey)
   const pct = Math.min(99, Math.max(1, Math.round(watermark.ratio * 100)))
+  // Evidence: pre-step messages are never written to the session log, so the
+  // audit line is the only durable proof that the nudge fired and at what ratio.
+  appendGraftAudit({
+    at: new Date().toISOString(),
+    kind: 'model-nudge',
+    sessionId: agentId,
+    ratio: Number(watermark.ratio.toFixed(4)),
+    detail: `turn ${turnKey}`,
+  })
   return [
     {
       id: `graft-model-nudge-${agentId}-${turnKey}`,
@@ -5352,10 +5555,24 @@ function loadPendingConstraints(ctx: PluginContextLike): void {
 }
 
 /** Persist the retirement set; a failed write is reported but never blocks a migration. */
-function persistRetiredStore(ctx: PluginContextLike): void {
+function persistRetiredStore(ctx: PluginContextLike, remove: readonly string[] = []): void {
   try {
     mkdirSync(dirname(retiredStorePath), { recursive: true })
-    writeJsonAtomic(retiredStorePath, [...retiredSessions].sort())
+    withFileLock(retiredStorePath, () => {
+      // v7.7: read-modify-write under the lock. Serialising the in-memory set and
+      // renaming it over the file is what let two sessions erase each other.
+      const merged = new Set<string>(
+        readJsonArray(retiredStorePath).filter((value): value is string => typeof value === 'string'),
+      )
+      for (const id of remove) merged.delete(id)
+      for (const id of retiredSessions) {
+        if (!remove.includes(id)) merged.add(id)
+      }
+      // Adopt the other writer's retirements; otherwise this process keeps
+      // accepting a session the other one already closed.
+      for (const id of merged) retiredSessions.add(id)
+      writeJsonAtomic(retiredStorePath, [...merged].sort())
+    })
   } catch (error) {
     try {
       ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${retiredStorePath}: ${String((error as any)?.message ?? error)}`)
@@ -5408,15 +5625,25 @@ const MIGRATION_SYSTEM_PROMPT = [
   "If you encounter a 'SetNamedSecurityInfoW failed' error, the workspace is in restricted mode. Ask the user to run with danger-full-access or use non-destructive read-only tools.",
 ].join('\n\n')
 
-function persistTransferredStore(ctx: PluginContextLike): void {
+function persistTransferredStore(ctx: PluginContextLike, remove: readonly string[] = []): void {
   try {
     mkdirSync(dirname(transferredStorePath), { recursive: true })
-    const payload: Record<string, { newSessionId: string; at: number; reason: string }> = {}
-    for (const id of [...transferredSessions.keys()].sort()) {
-      const value = transferredSessions.get(id)
-      if (value !== undefined) payload[id] = value
-    }
-    writeJsonAtomic(transferredStorePath, payload)
+    withFileLock(transferredStorePath, () => {
+      const merged = readJsonRecord(transferredStorePath) as Record<string, { newSessionId: string; at: number; reason: string }>
+      for (const id of remove) delete merged[id]
+      for (const [id, value] of transferredSessions) {
+        if (remove.includes(id)) continue
+        const existing = merged[id]
+        // Newest wins: a later transfer of the same source is the real one.
+        if (existing === undefined || Number(value.at ?? 0) >= Number(existing.at ?? 0)) merged[id] = value
+      }
+      for (const [id, value] of Object.entries(merged)) {
+        if (value === null || typeof value !== 'object' || typeof value.newSessionId !== 'string') continue
+        const current = transferredSessions.get(id)
+        if (current === undefined || Number(value.at ?? 0) > Number(current.at ?? 0)) transferredSessions.set(id, value)
+      }
+      writeJsonAtomic(transferredStorePath, merged)
+    })
   } catch (error) {
     try {
       ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${transferredStorePath}: ${String((error as any)?.message ?? error)}`)
@@ -5553,9 +5780,12 @@ export function resumeSession(
 
   const target = ctx ?? ctxForStores()
   if (target !== undefined) {
-    persistRetiredStore(target)
-    persistTransferredStore(target)
-    persistGraftTargetStore(target)
+    // v7.7: removals must be EXPLICIT. The merge-on-write path unions the disk
+    // file with memory, so a plain write here would resurrect the session the
+    // caller just resumed.
+    persistRetiredStore(target, [sessionId])
+    persistTransferredStore(target, [sessionId])
+    persistGraftTargetStore(target, [sessionId])
     persistAutoGraftSuppression(target)
     // v7.3.1: take the `[已转移]` signpost down.
     //
@@ -5857,7 +6087,7 @@ export async function commitPreparedSlice(
   }
   if (Date.now() - entry.createdAt > PREPARED_TTL_MS) {
     preparedSlices.delete(preparedId)
-    persistPrepared()
+    persistPrepared([preparedId])
     throw graftError('PREPARED_EXPIRED', `prepared slice "${preparedId}" is older than 30 minutes; prepare again`)
   }
   if (typeof expectedDigest !== 'string' || expectedDigest.length === 0) {
@@ -5969,9 +6199,20 @@ export async function commitPreparedSlice(
       }
     : undefined
 
-  const report = await graftSliceAndInject(ctx, config, entry.sourceSessionId, entry.targetSessionId)
-  preparedSlices.delete(preparedId)
-  persistPrepared()
+  // v7.7: serialise only the WRITE phase. The verification above is read-only;
+  // a second process that raced us to this point loses here, visibly, instead of
+  // creating a second target.
+  const releaseSource = acquireSourceLock(entry.sourceSessionId)
+  let report: GraftReport
+  try {
+    refreshMigrationLedgers()
+    assertResliceAllowed(entry.sourceSessionId, false)
+    report = await graftSliceAndInjectUnlocked(ctx, config, entry.sourceSessionId, entry.targetSessionId)
+    preparedSlices.delete(preparedId)
+    persistPrepared([preparedId])
+  } finally {
+    releaseSource()
+  }
   // v7.4: surface that the live tail moved during the review, so the caller knows
   // the committed tape is fresher than what it approved — not silently different.
   if (tailRefreshed) {
@@ -6025,27 +6266,56 @@ function loadPrepared(): void {
   }
 }
 
-function persistPrepared(): void {
+function persistPrepared(remove: readonly string[] = []): void {
   if (preparedStorePath.length === 0) return
   try {
     const payload: Record<string, PreparedSlice> = {}
-    for (const [id, entry] of preparedSlices) payload[id] = entry
     mkdirSync(dirname(preparedStorePath), { recursive: true })
-    writeJsonAtomic(preparedStorePath, payload)
+    withFileLock(preparedStorePath, () => {
+      // v7.7: union with what the other process prepared. Overwriting here made a
+      // concurrent prepare vanish, and the matching commit then reported
+      // PREPARED_UNKNOWN / a digest mismatch that looked like source drift.
+      const onDisk = readJsonRecord(preparedStorePath) as Record<string, PreparedSlice>
+      for (const [id, entry] of Object.entries(onDisk)) {
+        if (remove.includes(id)) continue
+        if (entry === null || typeof entry !== 'object' || typeof entry.digest !== 'string') continue
+        payload[id] = entry
+      }
+      for (const [id, entry] of preparedSlices) {
+        if (remove.includes(id)) continue
+        const existing = payload[id]
+        if (existing === undefined || Number(entry.createdAt ?? 0) >= Number(existing.createdAt ?? 0)) {
+          payload[id] = entry
+        }
+      }
+      for (const id of remove) preparedSlices.delete(id)
+      writeJsonAtomic(preparedStorePath, payload)
+    })
   } catch {
     // Best effort: a lost prepared slice is recoverable by preparing again.
   }
 }
 
 /** v7.4: keep the resume grace across restarts, or a restart re-enables the trap. */
-function persistAutoGraftSuppression(ctx: PluginContextLike): void {
+function persistAutoGraftSuppression(ctx: PluginContextLike, remove: readonly string[] = []): void {
   try {
-    const payload: Record<string, number> = {}
-    for (const [id, until] of autoGraftSuppressedUntil) {
-      if (Number.isFinite(until)) payload[id] = until
-    }
     mkdirSync(dirname(autoGraftSuppressedPath), { recursive: true })
-    writeJsonAtomic(autoGraftSuppressedPath, payload)
+    withFileLock(autoGraftSuppressedPath, () => {
+      const merged = readJsonRecord(autoGraftSuppressedPath) as Record<string, number>
+      for (const id of remove) {
+        delete merged[id]
+        autoGraftSuppressedUntil.delete(id)
+      }
+      for (const [id, until] of autoGraftSuppressedUntil) {
+        if (!Number.isFinite(until)) continue
+        // The later deadline wins: a resume grant is never shortened by a stale writer.
+        if (!Number.isFinite(Number(merged[id])) || Number(until) > Number(merged[id])) merged[id] = until
+      }
+      for (const [id, until] of Object.entries(merged)) {
+        if (Number.isFinite(Number(until))) autoGraftSuppressedUntil.set(id, Number(until))
+      }
+      writeJsonAtomic(autoGraftSuppressedPath, merged)
+    })
   } catch (error) {
     try {
       ctx.logger?.warn?.(
@@ -6072,26 +6342,82 @@ function loadAutoGraftSuppression(): void {
   }
 }
 
+/**
+ * v7.7: re-read the migration ledgers from disk.
+ *
+ * In-memory `retiredSessions` / `transferredSessions` describe THIS process.
+ * When a second process retires a source, the first only learns it from the file.
+ * Every entry into the migration path therefore refreshes first — under the
+ * per-source lock — so "was this already handed off?" is answered by the disk,
+ * not by a stale local view.
+ */
+export function refreshMigrationLedgers(): void {
+  for (const id of readJsonArray(retiredStorePath)) {
+    if (typeof id === 'string' && id.length > 0) retiredSessions.add(id)
+  }
+  for (const [id, value] of Object.entries(readJsonRecord(transferredStorePath))) {
+    if (isRecord(value) && typeof value.newSessionId === 'string' && !transferredSessions.has(id)) {
+      transferredSessions.set(id, value as never)
+    }
+  }
+}
+
+export interface SliceOptions {
+  sourceSnapshot?: { session: any; events: any[] }
+  /** Runtime knobs read from the full log; a truncated snapshot cannot carry them. */
+  runtimeIntent?: RuntimeIntent
+  /** Background constraint refinement supplied by apply(); keeps the migration non-blocking. */
+  refineConstraints?: (sourceSessionId: string, targetSessionId: string, events: readonly SessionEventLike[]) => void
+  /**
+   * v7.3.1: the agent that invoked the graft, used as the tool-availability
+   * scope when the source has no live agent. Without any scope the lookup falls
+   * back to the GLOBAL view, which omits preset-scoped tools and therefore
+   * downgrades every pointer in the tape.
+   */
+  callingAgent?: unknown
+  /** v7.7: the caller passed the reslice gate; the wrapper re-checks it under the lock. */
+  allowReslice?: boolean
+  /**
+   * v7.7: run the already-migrated gate inside the lock. Tool callers set this;
+   * internal callers (auto-graft, overflow recovery) retire the source themselves
+   * just before slicing, so the gate would refuse their own reservation.
+   */
+  gateReslice?: boolean
+}
+
+/**
+ * v7.7: the public entry, serialised per source.
+ *
+ * Two processes that both decide to graft one source must not both succeed: that
+ * is exactly how one conversation grows two divergent continuations. The lock
+ * plus the disk refresh below make the second caller lose cleanly
+ * (`SOURCE_ALREADY_MIGRATED`) instead of writing an orphan target.
+ */
 export async function graftSliceAndInject(
   ctx: PluginContextLike,
   config: GraftConfig,
   sourceSessionId: string,
   newSessionId: string,
   signal?: AbortSignal,
-  options?: {
-    sourceSnapshot?: { session: any; events: any[] }
-    /** Runtime knobs read from the full log; a truncated snapshot cannot carry them. */
-    runtimeIntent?: RuntimeIntent
-    /** Background constraint refinement supplied by apply(); keeps the migration non-blocking. */
-    refineConstraints?: (sourceSessionId: string, targetSessionId: string, events: readonly SessionEventLike[]) => void
-    /**
-     * v7.3.1: the agent that invoked the graft, used as the tool-availability
-     * scope when the source has no live agent. Without any scope the lookup falls
-     * back to the GLOBAL view, which omits preset-scoped tools and therefore
-     * downgrades every pointer in the tape.
-     */
-    callingAgent?: unknown
-  },
+  options?: SliceOptions,
+): Promise<GraftReport> {
+  const release = acquireSourceLock(sourceSessionId)
+  try {
+    refreshMigrationLedgers()
+    if (options?.gateReslice === true && options?.allowReslice !== true) assertResliceAllowed(sourceSessionId, false)
+    return await graftSliceAndInjectUnlocked(ctx, config, sourceSessionId, newSessionId, signal, options)
+  } finally {
+    release()
+  }
+}
+
+async function graftSliceAndInjectUnlocked(
+  ctx: PluginContextLike,
+  config: GraftConfig,
+  sourceSessionId: string,
+  newSessionId: string,
+  signal?: AbortSignal,
+  options?: SliceOptions,
 ): Promise<GraftReport> {
   const settings = normalizeConfig(config)
   const sourceId = asNonEmptyString(sourceSessionId, 'sourceSessionId')
@@ -7726,15 +8052,21 @@ function markGraftTarget(sessionId: string, sourceSessionId: string): void {
  * Written on every new target (small, bounded by the number of migrations this
  * profile has performed) and read once at activation.
  */
-function persistGraftTargetStore(ctx: PluginContextLike | undefined): void {
+function persistGraftTargetStore(ctx: PluginContextLike | undefined, remove: readonly string[] = []): void {
   if (ctx === undefined) return
   try {
     mkdirSync(dirname(graftTargetsPath), { recursive: true })
-    const payload: Record<string, GraftTargetMark> = {}
-    for (const [id, mark] of [...graftTargets.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
-      payload[id] = mark
-    }
-    writeJsonAtomic(graftTargetsPath, payload)
+    withFileLock(graftTargetsPath, () => {
+      const merged = readJsonRecord(graftTargetsPath) as Record<string, GraftTargetMark>
+      for (const id of remove) delete merged[id]
+      for (const [id, mark] of graftTargets) merged[id] = mark
+      for (const [id, mark] of Object.entries(merged)) {
+        if (mark !== null && typeof mark === 'object' && typeof mark.sourceSessionId === 'string' && !graftTargets.has(id)) {
+          graftTargets.set(id, mark)
+        }
+      }
+      writeJsonAtomic(graftTargetsPath, merged)
+    })
   } catch (error) {
     try {
       ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${graftTargetsPath}: ${String((error as any)?.message ?? error)}`)
@@ -7849,7 +8181,7 @@ async function autoGraftIfNeeded(
     }
     autoGraftSuppressedUntil.delete(sourceSessionId)
     try {
-      persistAutoGraftSuppression(ctx)
+      persistAutoGraftSuppression(ctx, [sourceSessionId])
     } catch {
       // A stale record only suppresses once more; it is not worth failing here.
     }
@@ -8679,8 +9011,11 @@ async function appendTransitionCard(
             autoGraftStates.set(agentId, 'idle')
             retiredSessions.delete(agentId)
             transferredSessions.delete(agentId)
-            persistRetiredStore(stableCtx)
-            persistTransferredStore(stableCtx)
+            // v7.7: pass the ids explicitly. The merge-on-write path unions the
+            // disk file with memory, so a plain write here would resurrect the
+            // reservation this rollback is undoing.
+            persistRetiredStore(stableCtx, [agentId])
+            persistTransferredStore(stableCtx, [agentId])
             ctx.logger?.warn?.(`[dsh-graft-slice] confirmed graft failed: ${String((error as any)?.message ?? error)}`)
           }
         } else if (answer !== undefined && answer.trim().length > 0) {
@@ -8736,6 +9071,14 @@ async function appendTransitionCard(
             })
             if (report === undefined) throw new Error('auto graft produced no target')
             autoGraftStates.set(agentId, 'done')
+            appendGraftAudit({
+              at: new Date().toISOString(),
+              kind: 'force-graft',
+              sessionId: agentId,
+              targetSessionId: report.newSessionId,
+              ratio: Number(watermark.ratio.toFixed(4)),
+              detail: 'autoGraft fallback',
+            })
             await appendTransitionCard(agentId, report.newSessionId, sessionTitleForGoal(report.goal, report.newSessionId))
             return {
               kind: 'reject',
@@ -8746,8 +9089,8 @@ async function appendTransitionCard(
             autoGraftStates.set(agentId, 'idle')
             retiredSessions.delete(agentId)
             transferredSessions.delete(agentId)
-            persistRetiredStore(stableCtx)
-            persistTransferredStore(stableCtx)
+            persistRetiredStore(stableCtx, [agentId])
+            persistTransferredStore(stableCtx, [agentId])
             try {
               ctx.logger?.warn?.(`[dsh-graft-slice] auto-graft failed and rolled back: ${String((error as any)?.message ?? error)}`)
             } catch {
@@ -9125,6 +9468,10 @@ async function appendTransitionCard(
           // resort. Resolving tools with no scope reads the GLOBAL view, which
           // omits preset-scoped tools and downgraded every pointer in the tape.
           callingAgent: exec?.agent,
+          // v7.7: the wrapper re-checks this under the per-source lock, so the
+          // allowReslice decision is not made only against stale local state.
+          gateReslice: true,
+          allowReslice: args.allowReslice === true,
           refineConstraints: (src, tgt, evs) => {
             void refineConstraintsInBackground(ctx, settings, src, tgt, evs)
           },

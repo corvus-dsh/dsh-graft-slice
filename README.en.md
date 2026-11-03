@@ -18,6 +18,22 @@ Target runtime: DSH **0.2.1-rc.5** (the installed desktop build).
   - Phase 4: persist through `sessionPersistence`, cold-read and validate the artifact, retire the source in memory, and expose `{ kind: 'reject' }` through `agent/pre-step`.
 - `graft_read_result({ sourceSessionId, seq })`: reads a v4 `tool/result` payload from the source log (also accepts the v3 nested `tool-result` shape).
 
+## v0.10.0 concurrent handoff safety
+
+Two sessions can now hit the watermark at the same time without erasing each other.
+Every state file (`retired`, `transferred`, `prepared`, target marks, resume grace,
+constraint sections) is written under a `mkdir`-based lock, and the write **merges**
+with the file on disk instead of overwriting it; removals must be explicit. Each
+source also takes a per-session lock, so the second commit sees
+`SOURCE_ALREADY_MIGRATED` instead of creating a second target.
+
+`.graft-audit.jsonl` records `model-nudge` / `force-graft` / `lock-wait` / `lock-stale`
+— the durable proof that a nudge fired (pre-step messages never reach the log).
+
+`node scripts/duel-model-driven.mjs` runs four real processes against one dataDir
+(A/B self-slice at 73%, C/D force-graft at 76%) and fails unless all four sources are
+retired, all four targets carry the bootstrap, and no lock times out.
+
 ## v0.9.0 Model-Driven handoff
 
 The 75% cutoff is a physical interruption when the model is mid-implementation. Default is now a
@@ -54,7 +70,7 @@ both the hint and that bootstrap line.
 ```powershell
 cd '<plugin-dir>'
 node scripts/build.mjs                 # requires Node >= 22.6 (type stripping); runtime needs >= 20
-node --test test/*.test.mjs            # 284 tests
+node --test test/*.test.mjs            # 288 tests
 node scripts/check-docs.mjs            # docs vs code: version, build freshness, tool list, test count, feature status
 node scripts/demo.mjs                  # real persisted log + fake host, never writes the real store
 node scripts/scan-real-logs.mjs        # read-only scan of every local persisted log
