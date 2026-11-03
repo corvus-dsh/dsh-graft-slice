@@ -170,6 +170,11 @@ const coverage = [
   ['graft_read_result lineRange', 'lineRange', 'lineRange'],
   ['workspace file index', 'extractWorkspaceIndex(', '产物索引'],
   ['tool availability downgrade', 'describeUnavailableTool(', '工具可用性降级'],
+  ['workspace red line', 'workspaceRedline(', '红线'],
+  ['one-off action filter', 'isOneOffAction(', '一次性动作'],
+  ['command guard', 'scanAgentCommand(', '命令'],
+  ['lock reclamation', 'scanAndReclaimLocks(', '锁'],
+  ['debug panel', 'collectDebugStatus(', '调试面板'],
 ]
 for (const [name, marker, keyword] of coverage) {
   if (!source.includes(marker)) continue

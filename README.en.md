@@ -54,6 +54,80 @@ per turn. Every target's pending state now ends with
 so a grafted session continues instead of waiting for the user; turning `modelDrivenGraft` off removes
 both the hint and that bootstrap line.
 
+## v0.14.0: seven defences and a debug panel
+
+v0.13 added two guard rails as *requests*; v0.14 enforces them at the **tool layer** and
+closes three failure modes that only appear on a real machine.
+
+| # | Defence | Where | Behaviour |
+|---|---|---|---|
+| D1 | global-search ban | `tools.guard` + a system-prompt section + a one-shot pre-step message | `rg /`, `Get-ChildItem C:\ -Recurse`, anything aimed at a drive root / `AppData` / the profile is **refused before dispatch**; searches inside the workspace still work |
+| D2 | no slice loops | unconditional `isProtectedGraftTarget` + nudge suppression + injected `graft_generation` | a fresh target cannot be re-grafted for `graftTargetGraceTurns` (2) turns by ANY automatic path, including the 75% fallback, and the nudge no longer invites it to slice itself |
+| D3 | memory workspace isolation | `workspace:` recorded at write time, pool-level gate at read time | foreign workspaces and unscoped records are never injected (`scope: global` excepted) |
+| D4 | memory anti-pollution | `threat.ts` re-scans **before injection** | `ignore previous instructions` / `忽略以上指令` / `forget everything…` are dropped, including in body text the hint never renders |
+| D5 | process-level lock reclamation | `scanAndReclaimLocks()` at activation | liveness is decided by the **owner PID**; a dead writer's `.lock` directory is reclaimed and audited, a live holder is never touched |
+| D6 | destructive-command ban | the same scanner as D1 | `rm -rf /`, `Remove-Item -Recurse C:\`, recursive deletes that escape the workspace are denied; `Remove-Item -Recurse .\build` is not |
+| D7 | one-off constraint filter | `extractConstraints` + the LLM constraint prompt | "立刻删除 <ws>\repair-log.cjs" never becomes a HARD CONSTRAINT |
+
+Why D1/D6 *deny* rather than *warn*: the measured failure was a session that could not find
+a file and widened the search to the drive roots, turn after turn. A prompt line is advice —
+the model may read it, agree, and still run `rg` over the whole disk. `ctx.tools.guard()` is
+a monotonic deny: a matching call returns a reason before dispatch, and no other guard can
+turn it back into an allow. The criteria stay deliberately narrow — a search-level verb plus
+an escaping target is denied, while reading one specific `C:\...` path is not, because a
+guard that blocks ordinary work gets switched off.
+
+Why the chain guard did not already work: `graftTargetGraceTurns` existed, but it was nested
+inside `ignoreTransferGuard !== true`, and BOTH automatic callers pass
+`ignoreTransferGuard: true`. Bypassing the retired/transferred refusal is not permission to
+bypass the fresh-target refusal; only an explicit `forceSlice` is, and no automatic path
+sets it.
+
+### `graft_debug_status`
+
+`watermark` (tokens, window, percent, source, distance to the 70% and 75% lines), `locks`
+(held `.lock` entries with owner pid/liveness/age, unfinished `.txn` migrations, retired and
+transferred counts, graft targets with their generation) and `memory` (skills / negatives /
+facts / experiences / queue, plus same-workspace vs foreign vs unscoped counts when a
+`workspace` is supplied). The same panels are available without a host:
+
+```powershell
+node scripts/debug-status.mjs --data <state-dir> --session <sessionId> --workspace <path>
+```
+
+The CLI sweeps locks in `dryRun` and only reads: a diagnostic must never mutate state. Its
+watermark comes from real provider usage in the log, and reports `unavailable` rather than
+inventing a number that would disagree with the host's own meter.
+
+## v0.13.0: two guard rails
+
+Both are on by default. They exist because automatic migration fails in two ways that
+have nothing to do with slicing: the migrated model does not know where "here" ends, and
+a rule that was only ever true once gets carried forward as if it were permanent.
+
+**1. Workspace red line (`workspaceRedline`, default true).** A migrated session asked
+about a file it could not find widened the search instead — profile directory, `AppData`,
+then the drive roots — and summarised a filesystem it had only listed. The tape names
+exactly one working directory, so the guard states it and says what to do instead:
+
+> 【红线警告】your working directory is strictly `<cwd>`. Root-wide searches
+> (`rg /`, `C:\`, `AppData`) are forbidden; when a file is missing, look with `ls`/`dir`
+> inside the current directory, or ask the user. Do not retry a rejected path with a
+> different spelling and do not widen the search.
+
+`<cwd>` is interpolated from the session log header, never from model output, and the
+block is injected in BOTH the migration system prompt and the durable goal
+`user/message` — the host overwrites surface node 0 on the target's first live step, so a
+guard that lives only in the system head is dead before the model reads it.
+
+**2. One-off action filter (`extractConstraints` + the LLM constraint prompt).** A user
+message that said "立刻删除 D:\...\repair-log.cjs" was kept as a standing rule, and the
+migrated target still carried it as a HARD CONSTRAINT long after the file was gone. A
+sentence that names one concrete artifact and one mutating verb, with no cue that governs
+the act itself (禁止/绝不/每次/never/always/only…), is a task step: dropped. The exemption
+window is deliberately narrow (12 chars) because the polluted sentence contains "绝不" too,
+about a different act. The regex path and the model prompt carry the same exclusion.
+
 ## Red lines
 
 - no `ctx.sessions.fork()`
@@ -70,7 +144,7 @@ both the hint and that bootstrap line.
 ```powershell
 cd '<plugin-dir>'
 node scripts/build.mjs                 # requires Node >= 22.6 (type stripping); runtime needs >= 20
-node --test test/*.test.mjs            # 292 tests
+node --test test/*.test.mjs            # 321 tests
 node scripts/check-docs.mjs            # docs vs code: version, build freshness, tool list, test count, feature status
 node scripts/demo.mjs                  # real persisted log + fake host, never writes the real store
 node scripts/scan-real-logs.mjs        # read-only scan of every local persisted log

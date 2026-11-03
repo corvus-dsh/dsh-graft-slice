@@ -1,6 +1,6 @@
 {
   "name": "dsh-graft-slice",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Slice a closed source-session log at its last turn/end and inject a minimal, durable handoff session without forking.",
   "entry": "index.js",
   "activate": "activate(ctx, config)",
@@ -24,7 +24,8 @@
     "graft_slice_and_inject",
     "graft_search_history",
     "graft_read_result",
-    "graft_resume_session"
+    "graft_resume_session",
+    "graft_debug_status"
   ],
   "engines": {
     "dsh": ">=0.2.1-rc.5",

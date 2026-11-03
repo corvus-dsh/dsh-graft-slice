@@ -275,6 +275,37 @@ export function makeCtx({ sourceLog, persistence = new FakePersistence(), paths,
   }
   const ctx = {
     paths: { data: dataDir },
+    /**
+     * v0.14: `SystemPromptRegistry`, enough for the guard/constraint SECTIONS.
+     *
+     * Sections are the compaction-immune channel; the fixture records them so a
+     * test can read the exact text the host would render, per agent.
+     */
+    systemPrompt: {
+      sections: [],
+      getSectionOrder() {
+        return 10
+      },
+      section(definition) {
+        this.sections.push(definition)
+        return () => {
+          const index = this.sections.indexOf(definition)
+          if (index >= 0) this.sections.splice(index, 1)
+        }
+      },
+      /** Render one registered section for an agent, or '' when it is absent. */
+      _render(name, agent) {
+        const found = this.sections.find((item) => item.name === name)
+        return found === undefined ? '' : String(found.text({ agent }) ?? '')
+      },
+    },
+    /** v0.14: `workingDirectory.get(session)` — the host owns the effective cwd. */
+    workingDirectory: {
+      defaultDirectory: sourceLog.session.cwd,
+      get(session) {
+        return session?.header?.cwd ?? sourceLog.session.cwd
+      },
+    },
     tools: {
       register(definition) {
         if (tools.has(definition.name)) throw new Error(`duplicate tool ${definition.name}`)
@@ -326,6 +357,32 @@ export function makeCtx({ sourceLog, persistence = new FakePersistence(), paths,
       _scopedOnlyNames() {
         return [...scopedOnly]
       },
+      /**
+       * v0.14: `ToolService.guard()`.
+       *
+       * The real contract is a monotonic deny hook: the guard returns a reason
+       * string to deny, and no guard can force-allow what another denied. The
+       * fixture used to expose only `register`, so the command guard fell into
+       * its `typeof !== 'function'` branch and disarmed itself in every test —
+       * the same "fixture too poor to fail" shape the tool get/schemas note
+       * above describes.
+       */
+      guards: [],
+      guard(guardFn) {
+        this.guards.push(guardFn)
+        return () => {
+          const index = this.guards.indexOf(guardFn)
+          if (index >= 0) this.guards.splice(index, 1)
+        }
+      },
+      /** Run every guard in order; the first denial wins (monotonic). */
+      _runGuards(execution) {
+        for (const guardFn of this.guards) {
+          const reason = guardFn(execution)
+          if (typeof reason === 'string' && reason.length > 0) return reason
+        }
+        return undefined
+      },
     },
     sessions,
     sessionQuery: {
@@ -348,6 +405,9 @@ export function makeCtx({ sourceLog, persistence = new FakePersistence(), paths,
       // rather than a captured copy.
       if (name === 'tokenMeter') return ctx.tokenMeter
       if (name === 'tools') return ctx.tools
+      // v0.14: the two services the guard rails resolve at activation.
+      if (name === 'systemPrompt') return ctx.systemPrompt
+      if (name === 'workingDirectory') return ctx.workingDirectory
       return undefined
     },
     on(name, listener) {

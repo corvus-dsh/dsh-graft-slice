@@ -17,3 +17,24 @@
         # 兜底防线：模型忽略 70% 提示时，75% 仍然由系统强制迁移。
         autoGraft: true
         autoGraftAtRatio: 0.75
+        # v0.13 安全护栏（默认开，不要关）：
+        #   ① 工作目录红线：迁移注入的「系统节点」和「goal 用户消息」都会写明
+        #      “【红线警告】你的工作目录严格限定为 <cwd>”，并禁止 rg /、C 盘 /
+        #      AppData / 全局根目录搜索；找不到文件时只允许在当前目录 ls / dir，
+        #      同一路径被拒绝后不得换写法重试、不得向外层扩散。
+        #   ② 一次性动作过滤：extractConstraints（正则）与 LLM 约束提示同时丢弃
+        #      “立刻删除 <工作区>\repair-log.cjs”这类只安全一次的任务步骤，只保留
+        #      可泛化的长期规则（禁止/绝不/每次/任何…）。
+        workspaceRedline: true
+        # v0.14 护栏③：命令层强制拦截（工具层 guard，不是提醒）。
+        #   pre-step / system-prompt section 是“请求”，tools.guard 是“拒绝”：
+        #   命中 <盘符根> / AppData / 用户目录 的搜索（rg /、Get-ChildItem -Recurse …）
+        #   与逃出工作区的递归删除（rm -rf /、Remove-Item -Recurse <盘符根> …）会在
+        #   dispatch 之前被拒绝执行，并写一条 .graft-audit.jsonl 的 command-blocked 记录。
+        #   工作区内部的搜索与删除不受影响——会拦正常工作的护栏活不过一天。
+        commandGuard: true
+        # v0.14 调试面板（graft_debug_status）读取记忆库的位置，只读、永不写入。
+        # 留空 = <state dir>/.dsh-memory 与 ~/.agents/skills；真机 profile 里显式给出，
+        # 因为 dsh-memory 的 memoryDir 被 override 到了别的目录。
+        memoryDir: ''
+        skillsDir: ''

@@ -22,6 +22,7 @@ test('package and manifest declare the plugin identity and permissions', () => {
   // v7.3 adds the search tool, which is what makes the read-back design usable:
   // before it, a target could only read a seq it already knew.
   // v7.4 adds the two-phase pair: prepare (read-only review) + commit (verified write).
+  // v0.14 adds the debug panel (watermark / locks / transactions / memory store).
   assert.deepEqual(manifest.tools, [
     'graft_prepare',
     'graft_commit',
@@ -29,6 +30,7 @@ test('package and manifest declare the plugin identity and permissions', () => {
     'graft_search_history',
     'graft_read_result',
     'graft_resume_session',
+    'graft_debug_status',
   ])
   assert.deepEqual(manifest.hooks, ['agent/pre-step', 'agent/turn-stopping'])
 })

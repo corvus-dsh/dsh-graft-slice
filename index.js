@@ -28,6 +28,7 @@
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 /** Cordis plugin name. */
@@ -101,6 +102,44 @@ export const inject = ['tools', 'sessions', 'sessionQuery', 'sessionPersistence'
                             
                                                            
                                 
+     
+                                                                         
+    
+                                                                                
+                                                                               
+                                                                               
+                                                                                   
+                                                               
+    
+                                                                           
+                                                                            
+     
+                            
+     
+                                                                
+    
+                                                                           
+                                                                             
+                                                                              
+                                                                          
+                                                                 
+    
+                                                                               
+                                                                               
+                                                                               
+                                                                                
+                                                                    
+     
+                        
+     
+                                                                               
+    
+                                                                             
+                                                                       
+     
+                    
+                                                                      
+                    
      
                                                                     
                                                                       
@@ -317,6 +356,13 @@ export function isHumanAuthored(source         )          {
                           
                        
                                             
+     
+                                                                            
+                                                                                 
+                                                                              
+                                                                       
+     
+                    
                       
                            
                                                                          
@@ -367,6 +413,8 @@ export function isHumanAuthored(source         )          {
    
                        
                                             
+                                                                                  
+                    
               
                      
                      
@@ -478,6 +526,14 @@ export function normalizeConfig(config                         )                
     // writing; the 75% hard cutoff remains the fallback for an ignored nudge.
     modelDrivenGraft: input.modelDrivenGraft === undefined ? true : input.modelDrivenGraft === true,
     modelDrivenGraftAtRatio: asRatio(input.modelDrivenGraftAtRatio, 0.7, 'modelDrivenGraftAtRatio'),
+    // v0.13 GUARD: on unless explicitly disabled. The boundary is not a tuning
+    // knob; "off" exists so a differential test can prove what changed.
+    workspaceRedline: input.workspaceRedline === undefined ? true : input.workspaceRedline === true,
+    // v0.14 GUARD: on unless explicitly disabled. Like the red line, "off" exists
+    // for a differential test, not for tuning.
+    commandGuard: input.commandGuard === undefined ? true : input.commandGuard === true,
+    memoryDir: typeof input.memoryDir === 'string' && input.memoryDir.trim().length > 0 ? input.memoryDir.trim() : '',
+    skillsDir: typeof input.skillsDir === 'string' && input.skillsDir.trim().length > 0 ? input.skillsDir.trim() : '',
     contextWindowTokens: asFiniteInteger(input.contextWindowTokens, 0, 'contextWindowTokens'),
     autoGraftIdPrefix:
       typeof input.autoGraftIdPrefix === 'string' && input.autoGraftIdPrefix.trim().length > 0
@@ -732,6 +788,50 @@ function normalizedEqual(a        , b        )          {
 const DELEGATION_NOISE_PATTERN =
   /(your parent agent id|parent agent id is|send your result to that agent|send_message\(\s*\{\s*agent_id|self-contained result|the parent shares your workspace|does not automatically receive your transcript)/iu
 
+/**
+ * v0.13: a ONE-OFF ACTION instruction is not a constraint.
+ *
+ * Measured live: a source session's user message opened with
+ *
+ *   1. 删除危险脚本：立刻删除 D:\持久层能力架构\repair-log.cjs，绝不能让这个无备份、
+ *      强制覆盖的脚本再跑一次。
+ *
+ * The extractor kept it — it is imperative, action-shaped, specific and long, so it
+ * scored well — and the migrated target in the same workspace still carried
+ * "删除 repair-log.cjs" inside its HARD CONSTRAINTS block long after that file was
+ * gone. A rule that names ONE artifact and ONE act is a TASK STEP: it is safe to
+ * follow exactly once, and after that it is a loaded gun pointed at whatever the
+ * path points to next.
+ *
+ * The distinction the filter draws is not "destructive or not" (a standing rule may
+ * well forbid something destructive) but "does it GENERALIZE". A sentence that names
+ * a concrete file/path and a mutating verb, and carries no standing cue
+ * (必须/禁止/绝不/每次/任何/never/always/only …), did not generalize.
+ */
+const ONE_OFF_ACTION_VERB =
+  /(删除|删掉|移除|清空|清理|重命名|改名|覆盖|回滚|恢复|撤销|\brm\b|\bdel\b|\bdelete\b|\bremove\b|\bdrop\b|\brevert\b|\brollback\b|\broll back\b|\brename\b|\boverwrite\b|\bunlink\b)/iu
+const CONCRETE_ARTIFACT =
+  /([\w\u4e00-\u9fff.@-]+\.(?:cjs|mjs|js|jsx|ts|tsx|py|rb|go|rs|java|json|jsonl|md|txt|log|yml|yaml|toml|ini|exe|dll|ps1|bat|cmd|sh|zip|tar|gz|lock)\b)|([A-Za-z]:[\\/][^\s，。；、"'）)]+)|([\w.-]+\/[\w./-]+)/u
+
+/**
+ * The exemption: a prohibition that *governs the act itself*.
+ *
+ * "绝对禁止在没有备份的情况下删除任何脚本" is durable and must survive. The window is
+ * deliberately short (12 chars) and the act list deliberately narrow, because the
+ * polluted sentence above contains 绝不 too — "绝不能让这个无备份、强制覆盖的脚本再跑
+ * 一次" — and a cue-anywhere-in-the-sentence test would keep the very instruction
+ * this filter exists to drop. The cue must sit ON the act, not merely near it.
+ */
+const DESTRUCTIVE_ACT = /(删除|删掉|移除|清空|清理|\brm\b|\bdel\b|\bdelete\b|\bremove\b|\bdrop\b|\bunlink\b)/iu
+const STANDING_PROHIBITION =
+  /(禁止|严禁|绝不|不要|不得|不能|务必|必须|每次|任何|一律|永远|始终|never|always|must|do not|don't|only)[^。；\n]{0,12}?(删除|删掉|移除|清空|清理|\brm\b|\bdel\b|\bdelete\b|\bremove\b|\bdrop\b|\bunlink\b)/iu
+
+function isOneOffAction(text        )          {
+  if (STANDING_PROHIBITION.test(text)) return false
+  if (!ONE_OFF_ACTION_VERB.test(text)) return false
+  return CONCRETE_ARTIFACT.test(text)
+}
+
 export function extractConstraints(events                             )           {
   const candidates                                                        = []
   let index = 0
@@ -766,6 +866,8 @@ export function extractConstraints(events                             )         
       if (normalized.length < 10 || normalized.length > 800) continue
       if (normalized.includes('[redacted')) continue
       if (DELEGATION_NOISE_PATTERN.test(normalized)) continue
+      // v0.13: "delete D:\X\repair-log.cjs" is a step, not a rule. See isOneOffAction.
+      if (isOneOffAction(normalized)) continue
       const hasKeyword = isConstraintSentence(normalized)
       const hasImperative = IMPERATIVE_START.test(normalized)
       if (!hasKeyword && !hasImperative) continue
@@ -799,6 +901,8 @@ const LLM_CONSTRAINT_PROMPT = [
   'From the user inputs below, extract only long-lived, globally effective hard rules and constraints',
   '(for example: do not use a feature, global naming rules, required output formats).',
   'Do NOT extract one-off requests to generate long content (for example: write an article, write a long script).',
+  'Do NOT extract one-off ACTION instructions, even when they are imperative and specific: "delete D:\\project\\repair-log.cjs", "remove the file X", "run Z once", "revert that change" are TASK STEPS. They are safe to follow exactly once and become wrong the moment the target no longer exists.',
+  'Extract a destructive action ONLY when the user states it as a standing rule that generalizes (for example "never delete X without a backup", "绝对禁止在没有备份的情况下删除任何脚本"). If in doubt, DROP it.',
   'Do NOT extract discussion, questions, feature requests, goals, observations, or "please help me" requests.',
   'Do NOT extract harness delegation boilerplate (for example "your parent agent id is ...", "send your result to that agent", send_message instructions).',
   'Only extract rules the user explicitly makes global or standing (for example: always/never/only/must/do not).',
@@ -3108,7 +3212,10 @@ export function buildTape(
     writtenArtifacts.length === 0
       ? undefined
       : `已完成节点产物：${writtenArtifacts.slice(-3).join('、')}；后续请直接 read 复用，避免重复生成。`
-  const pendingStateText = [constraintAnchor, pendingBody, artifactNote, selfSliceBootstrap]
+  // v7.9: if the model ignored the 70% nudge and was cut at the hard watermark,
+  // the target must know the interruption was forced, not planned.
+  const forcedCutNote = noteForcedCut(sourceSessionId)
+  const pendingStateText = [constraintAnchor, pendingBody, forcedCutNote, artifactNote, selfSliceBootstrap]
     .filter((part)                 => typeof part === 'string' && part.length > 0)
     .join('\n\n')
   return {
@@ -3911,6 +4018,10 @@ export function buildInjectionPlan(
   }
 
   const filtered = chunks.filter((chunk) => chunk.text.length > 0)
+  // v0.14: the chain depth of the target this plan will create. Read from the
+  // source's own mark, so generation 3 stays generation 3 across a restart.
+  const sourceId = typeof (log       )?.session?.id === 'string' ? String((log       ).session.id) : ''
+  const generation = sourceId.length === 0 ? 1 : graftGenerationOf(sourceId) + 1
   return {
     cwd,
     boundary,
@@ -3939,6 +4050,8 @@ export function buildInjectionPlan(
     olderToolNames: [...olderToolNames],
     constraints,
     constraintSource,
+    // v0.14: injected (see goalMessage) and used by the chain guard.
+    generation,
     taskStatus: taskState.todos,
     ...(openTurnCarryover === undefined ? {} : { openTurnCarryover }),
     subagentReports: taskState.subagentReports,
@@ -3965,6 +4078,15 @@ function goalMessage(
   sourceSessionId        ,
   hasWorkspaceFiles = false,
   constraints                    = [],
+  /** v0.13: the workspace boundary block, already rendered ('' = guard disabled). */
+  redlineBlock = '',
+  /**
+   * v0.14: the chain depth of this target. Injected so the model can SEE that it
+   * is itself a migration product — the chain failure mode ("a target grafts
+   * again because it was created") is invisible to a session that does not know
+   * it is generation 2.
+   */
+  generation = 1,
 )                      {
   // v7.0 B4: read as a continuation, not as a handoff notice.
   //
@@ -4006,7 +4128,17 @@ function goalMessage(
     `工作目录 ${cwd}。`,
     '',
     `这个会话的任务：${goal}`,
+    '',
+    `graft_generation: ${generation}（第 ${generation} 代迁移产物${generation === 1 ? '：由原始会话直接切片' : ''}）`,
   ]
+  // v0.14 CHAIN GUARD: state the re-graft prohibition in the durable channel too.
+  // The tool layer refuses it (see autoGraftIfNeeded); saying it here is what stops
+  // the model from *asking* for a slice on its very first turn.
+  if (generation >= 1) {
+    lines.push(
+      `迁移纪律：本会话完成前 ${GRAFT_CHAIN_GRACE_TURNS} 轮之前不得再触发切片；先把手上的任务推进到明确的停泊点，再考虑交接。`,
+    )
+  }
   // v7.0 C1: constraints live HERE, not in the system head.
   //
   // The host replaces surface node 0 with its own rendered prompt on the
@@ -4036,6 +4168,12 @@ function goalMessage(
   if (hasWorkspaceFiles) {
     lines.push('', '写过/改过的文件见下方 [Workspace Files]，不需要重新列目录。')
   }
+  // v0.13 GUARD: the durable copy of the workspace boundary.
+  //
+  // The system head is a throwaway node — the host overwrites it on the target's
+  // first live step — so a red line parked there never reaches the model. This
+  // user/message does, and it is the same channel the HARD CONSTRAINTS use.
+  if (redlineBlock.length > 0) lines.push('', redlineBlock)
   return {
     id: messageId,
     role: 'user',
@@ -4330,6 +4468,8 @@ function buildInjectionEvents(
   if (plan.chunks.length === 0) throw graftError('EMPTY_PLAN', 'injection plan contains no assistant chunks')
 
   const events                                                                       = []
+  // v0.13 GUARD: rendered once, used in both channels (see workspaceRedline).
+  const redlineBlock = settings.workspaceRedline ? workspaceRedline(plan.cwd) : ''
   events.push({ type: 'turn/start', data: { turn }, surface: false })
   events.push({ type: 'step/start', data: { turn, step }, surface: false })
   // v4 restore requires the first surface node to be a protected system head.
@@ -4340,7 +4480,7 @@ function buildInjectionEvents(
   // first live step, so no constraint or instruction is placed here.
   events.push({
     type: 'system/message',
-    data: systemMessage(MIGRATION_SYSTEM_PROMPT, turn, step, `graft-${newSessionId}-system`),
+    data: systemMessage(redlineBlock.length > 0 ? migrationSystemPrompt(plan.cwd) : MIGRATION_SYSTEM_PROMPT, turn, step, `graft-${newSessionId}-system`),
     surface: true,
   })
   events.push({
@@ -4353,6 +4493,8 @@ function buildInjectionEvents(
       sourceSessionId,
       plan.workspaceFiles.length > 0,
       plan.constraints,
+      redlineBlock,
+      plan.generation,
     ),
     surface: true,
   })
@@ -4989,9 +5131,30 @@ const LOCK_SETTLE_MS = 12
 const LOCK_TIMEOUT_MS = 8_000
 const LOCK_STALE_MS = 30_000
 
+/**
+ * v0.14 CHAIN GUARD: completed turns a fresh target is immune to re-grafting.
+ *
+ * Two turns is the smallest window that covers the real failure: a target is
+ * seeded with a large tape, its provider-usage figure is inherited from the
+ * source, and the very first request already sits above the 75% hard cutoff.
+ * Without this, generation 2 creates generation 3 before the user has typed
+ * anything, and each hop buries the original intent one level deeper.
+ */
+const GRAFT_CHAIN_GRACE_TURNS = 2
+
                                   
             
-                                                                                                             
+       
+                 
+                  
+                           
+                      
+                       
+                   
+                   
+                        
+                   
+                      
                
                     
                           
@@ -5259,6 +5422,14 @@ function loadConstraintSections(ctx                   )       {
  * a nag and cost the recency position on every request.
  */
 const constraintsReasserted = new Set        ()
+
+/**
+ * v0.14 D1: sessions that already received the workspace red line through the
+ * pre-step `messages` channel. Same discipline as `constraintsReasserted`: the
+ * system-prompt section is the durable channel, this is the one-shot in-band
+ * fallback for a host where the section could not be registered.
+ */
+const guardReasserted = new Set        ()
 
 const pendingConstraints = new Map                                  ()
 const constraintsApplied = new Set        ()
@@ -5565,7 +5736,72 @@ const MODEL_DRIVEN_NUDGE_BODY =
 /** agentId -> the `turn` whose nudge was already sent. */
 const modelDrivenNudgeTurns = new Map                ()
 
+/**
+ * v7.9: sessions that were nudged at 70% and kept working anyway.
+ *
+ * The nudge is advisory, but "advisory" must not mean "ignorable until the
+ * process is cut mid-write". After the nudge, the first pre-step proves the model
+ * started another step; that step gets ONE hard instruction ("水位告急…切走") and
+ * the session is marked. If the model still ignores it, the 75% cutoff runs with
+ * the mark, and the target's pending state records that the cut was forced.
+ */
+const watermarkEscalations = new Map                                                         ()
+const watermarkEscalated = new Set        ()
+const forcedCutMarks = new Map                                       ()
+
+const GRAFT_HANDOVER_TOOLS = new Set(['graft_prepare', 'graft_slice_and_inject', 'graft_commit'])
+
+const WATERMARK_URGENT_TEXT =
+  '水位告急：70% 预警后你又开始了新的工具调用。请立刻调用 graft_prepare 和 graft_slice_and_inject 切走，不要开始新的工具调用。'
+
+function takeWatermarkEscalation(ctx                   , agentId        , payload     )        {
+  const pending = watermarkEscalations.get(agentId)
+  if (pending === undefined || watermarkEscalated.has(agentId)) return []
+  watermarkEscalated.add(agentId)
+  // The nudge is advisory only if the model is still free to obey. A handover
+  // call AFTER the nudge is obedience: do not accuse a session that is already
+  // preparing its own slice.
+  let obeyed = false
+  try {
+    const live = ctx.sessions.get(agentId)       
+    if (live !== undefined && typeof live.snapshotEvents === 'function') {
+      const events = live.snapshotEvents(pending.sinceSeq)                                                      
+      obeyed = events.some(
+        (event) => event?.type === 'tool/call' && GRAFT_HANDOVER_TOOLS.has(String(event.data?.name ?? '')),
+      )
+    }
+  } catch {
+    // Reading the log is best-effort; failing it must not suppress the warning.
+  }
+  if (obeyed) return []
+  const turn = Number(payload?.turn)
+  appendGraftAudit({
+    at: new Date().toISOString(),
+    kind: 'nudge-escalation',
+    sessionId: agentId,
+    detail: `urgent handover instruction after the 70% nudge${Number.isFinite(turn) ? ` (turn ${turn})` : ''}`,
+  })
+  return [
+    {
+      id: `graft-watermark-urgent-${agentId}-${Date.now()}`,
+      role: 'user',
+      content: [{ type: 'text', text: `[系统提示] ${WATERMARK_URGENT_TEXT}` }],
+      source: { kind: GRAFT_REPLAY_SOURCE_KIND },
+    },
+  ]
+}
+
+/** Consume (once) the forced-cut mark for a source being sliced. */
+function noteForcedCut(sourceSessionId         )                     {
+  if (sourceSessionId === undefined) return undefined
+  const mark = forcedCutMarks.get(sourceSessionId)
+  if (mark === undefined) return undefined
+  forcedCutMarks.delete(sourceSessionId)
+  return `[系统提示] 模型拒绝提前切走（70% 预警后仍继续调用工具），导致在 ${Math.round(mark.ratio * 100)}% 水位被强制中断。`
+}
+
 function takeModelDrivenNudge(
+  ctx                   ,
   settings                       ,
   agentId        ,
   payload     ,
@@ -5594,6 +5830,21 @@ function takeModelDrivenNudge(
     ratio: Number(watermark.ratio.toFixed(4)),
     detail: `turn ${turnKey}`,
   })
+  // v7.9: arm the escalation. The next pre-step means the model started another
+  // step instead of handing over; that step gets the hard instruction. The seq
+  // recorded here lets that check tell obedience (a graft_* call after the nudge)
+  // from refusal.
+  let sinceSeq = 0
+  try {
+    const live = ctx.sessions.get(agentId)       
+    if (live !== undefined && typeof live.snapshotEvents === 'function') {
+      const events = live.snapshotEvents(0)                           
+      sinceSeq = Number(events.at(-1)?.seq ?? 0)
+    }
+  } catch {
+    // A missing log is not a reason to withhold the nudge.
+  }
+  watermarkEscalations.set(agentId, { at: Date.now(), ratio: watermark.ratio, sinceSeq })
   return [
     {
       id: `graft-model-nudge-${agentId}-${turnKey}`,
@@ -5707,6 +5958,40 @@ const MIGRATION_SYSTEM_PROMPT = [
   "If you encounter a 'SetNamedSecurityInfoW failed' error, the workspace is in restricted mode. Ask the user to run with danger-full-access or use non-destructive read-only tools.",
 ].join('\n\n')
 
+/**
+ * v0.13 GUARD: the workspace boundary, stated as a red line.
+ *
+ * WHY IT EXISTS (measured live, from the post-mortem of a handoff storm)
+ *
+ * A migrated session was asked about a file it could not find in its own tree. With
+ * no explicit boundary it did what a general-purpose agent does: it widened the
+ * search — the profile directory, `AppData`, then the drive roots — turn after turn,
+ * and produced confident summaries of a filesystem it had merely listed. Nothing in
+ * the injected tape said where "here" ended, so "look harder" was unbounded.
+ *
+ * The tape already names exactly one working directory, so the cheapest correct
+ * answer is to state it, together with what to do INSTEAD of widening: look in the
+ * current directory, or ask. The path is interpolated from the session log header
+ * (`plan.cwd`), never from model output, so it cannot be talked out of the boundary.
+ *
+ * It is injected twice on purpose: in the migration system prompt, and in the goal
+ * `user/message`. The host replaces surface node 0 with its own rendered prompt on
+ * the target's first live step (see `systemMessage`), so a guard that only lives in
+ * the system head is dead before the model reads it.
+ */
+export function workspaceRedline(cwd        )         {
+  const root = typeof cwd === 'string' && cwd.trim().length > 0 ? cwd.trim() : '(工作目录未记录)'
+  return [
+    `【红线警告】你的工作目录严格限定为 ${root}。严禁执行任何针对 C 盘、AppData 或全局根目录的搜索（如 rg /）。如果遇到找不到文件的情况，请只在当前目录下用 ls 或 dir 查找。`,
+    '同一路径被拒绝或找不到之后，不要换写法重试、不要向外层目录扩散搜索、不要凭目录列表猜测文件内容；请把结论和缺口报告给用户。',
+  ].join('\n')
+}
+
+/** The migration system node: the base instruction plus the workspace boundary. */
+export function migrationSystemPrompt(cwd        )         {
+  return [MIGRATION_SYSTEM_PROMPT, workspaceRedline(cwd)].join('\n\n')
+}
+
 function persistTransferredStore(ctx                   , remove                    = [], strict = false)       {
   try {
     mkdirSync(dirname(transferredStorePath), { recursive: true })
@@ -5814,11 +6099,17 @@ export function resetRetiredSessions()       {
   constraintsInFlight.clear()
   targetConstraintSections.clear()
   constraintsReasserted.clear()
+  guardReasserted.clear()
   watermarkCache.clear()
   taskBoundaryDeferrals.clear()
   // v7.6: the per-turn nudge mark is session state too; a reset that kept it
   // would silence the 70% warning for the first turn of the next test.
   modelDrivenNudgeTurns.clear()
+  // v7.9: the escalation/forced-cut marks are session state; a stale mark would
+  // inject "水位告急" into an unrelated session and mislabel a planned handover.
+  watermarkEscalations.clear()
+  watermarkEscalated.clear()
+  forcedCutMarks.clear()
   // v7.4: a reset must also drop the resume grace, or a test that resumes a
   // session poisons every later test that expects the watermark to fire.
   autoGraftSuppressedUntil.clear()
@@ -7096,6 +7387,9 @@ async function graftSliceAndInjectUnlocked(
       },
       constraints: plan.constraints,
       constraintSource: plan.constraintSource,
+      // v0.14 D2: the chain depth of the created target, so a caller can see it
+      // without reading the target's log first.
+      generation: plan.generation,
       taskStatus: plan.taskStatus,
       subagentReports: plan.subagentReports,
       workspace: {
@@ -8268,6 +8562,14 @@ async function autoGraftIfNeeded(
                                  
                                                                
                        
+       
+                                                                        
+      
+                                                                                   
+                                                                                
+                                            
+       
+                        
                                                                                 
                          
                               
@@ -8280,15 +8582,31 @@ async function autoGraftIfNeeded(
   if (options?.ignoreTransferGuard !== true) {
     if (retiredSessions.has(sourceSessionId) || transferredSessions.has(sourceSessionId)) return undefined
   }
-  // v7.0 C2: a target must never be grafted as a consequence of being created.
-  // Checked before the watermark so a large seeded tape cannot bootstrap a chain.
-  if (options?.ignoreTransferGuard !== true) {
+  // v7.0 C2 / v0.14 D2: a target must never be grafted as a consequence of being
+  // created. Checked before the watermark so a large seeded tape cannot bootstrap
+  // a chain.
+  //
+  // v0.14 FIX: this check used to be nested inside `ignoreTransferGuard !== true`
+  // — and BOTH automatic callers (the forced 75% fallback and the confirmed
+  // prompt) pass `ignoreTransferGuard: true` to bypass the retired/transferred
+  // refusal. So the chain guard was skipped precisely on the path that fires
+  // without a human: a freshly created target whose seeded tape already sits
+  // above 0.75 was force-grafted again on its first request, forever. Bypassing
+  // the TRANSFER guard is not permission to bypass the CHAIN guard; only an
+  // explicit `forceSlice` (tests, and a deliberate operator action) does that.
+  if (options?.forceSlice !== true) {
     const targetEvents = (() => {
       const live = ctx.sessions.get(sourceSessionId)       
       if (live !== undefined && typeof live.snapshotEvents === 'function') return live.snapshotEvents(0)                      
       return undefined
     })()
     if (isProtectedGraftTarget(sourceSessionId, targetEvents, settings.graftTargetGraceTurns)) {
+      appendGraftAudit({
+        at: new Date().toISOString(),
+        kind: 'chain-guard',
+        sessionId: sourceSessionId,
+        detail: `refused re-graft of generation ${graftGenerationOf(sourceSessionId)} inside the ${settings.graftTargetGraceTurns}-turn grace window`,
+      })
       ctx.logger?.info?.(
         `[dsh-graft-slice] refusing to re-graft a graft target (${sourceSessionId}); generation ${graftGenerationOf(sourceSessionId)}`,
       )
@@ -8543,9 +8861,521 @@ export async function registerArchivedForks(
   return announced
 }
 
+// ===========================================================================
+// v0.14 GUARD RAILS — the tool-layer defences and the debug panel
+// ===========================================================================
+
+/**
+ * The tools whose arguments are a COMMAND. Only these are scanned: a guard that
+ * inspects every tool's arguments would deny a `write` whose file *content*
+ * happens to contain "rm -rf", which is a false positive with real cost.
+ */
+const COMMAND_TOOL_NAMES = new Set([
+  'pwsh',
+  'powershell',
+  'shell',
+  'bash',
+  'sh',
+  'cmd',
+  'terminal',
+  'exec',
+  'run_command',
+  'run',
+])
+
+/** Search/enumeration verbs: these are what turn a path into a filesystem sweep. */
+const SEARCH_VERB =
+  /\b(?:rg|ripgrep|grep|findstr|select-string|sls|get-childitem|gci|dir|ls|find|where\.exe|get-item|resolve-path|tree)\b/iu
+/** Destructive verbs. Grouped so the workspace-confinement rule can exempt them. */
+const DESTRUCTIVE_VERB =
+  /\b(?:rm|del|erase|rd|rmdir|remove-item|ri|del|format|diskpart|mkfs|shutdown|stop-computer|clear-disk)\b/iu
+/** Recursion/force flags that turn a delete into an unbounded one. */
+const RECURSIVE_FLAG = /(?:-recurse\b|\/s\b|-r\b|-rf\b|-fr\b|--recursive\b|\/q\b|-force\b)/iu
+/**
+ * A path that escapes any workspace: a drive root, `/`, a home shortcut, or an
+ * environment root. Deliberately narrow — `C:\Users\<user>\project\src` is NOT
+ * here, because reading a specific path is legitimate; sweeping a root is not.
+ *
+ * Split in two on purpose: one regex with six alternatives and lookaheads is how
+ * a guard acquires a typo that silently matches nothing.
+ */
+const ESCAPING_ROOT =
+  /\b[A-Za-z]:[\\/](?=$|[\s"'),;])|(?:^|[\s"'=(,])\/(?=$|[\s"'),;])|~[\\/]?(?=$|[\s"'),;])|%(?:USERPROFILE|APPDATA|LOCALAPPDATA|SystemRoot|windir)%|\$env:(?:USERPROFILE|APPDATA|LOCALAPPDATA|SystemRoot|windir)\b/iu
+/** The system directories every Windows profile has, and `AppData` anywhere. */
+const SYSTEM_DIR =
+  /[A-Za-z]:[\\/](?:Users|Windows|Program Files(?: \(x86\))?|ProgramData)(?=$|[\\/\s"'),;])|(?:^|[\s"'=(,\\\/])AppData(?=$|[\\/\s"'),;])/iu
+
+function escapesWorkspace(text        )          {
+  return ESCAPING_ROOT.test(text) || SYSTEM_DIR.test(text)
+}
+
+function commandTextOf(args         )         {
+  if (typeof args === 'string') return args
+  if (args === null || typeof args !== 'object') return ''
+  const record = args                           
+  const parts           = []
+  for (const key of ['command', 'cmd', 'script', 'code', 'input', 'args', 'arguments']) {
+    const value = record[key]
+    if (typeof value === 'string') parts.push(value)
+    else if (Array.isArray(value)) parts.push(value.filter((item) => typeof item === 'string').join(' '))
+  }
+  return parts.join('\n')
+}
+
+/**
+ * Expand the environment shortcuts a destructive command may hide behind, so the
+ * confinement check sees a real path. Only the roots the guard cares about;
+ * anything unknown is left as-is and treated as "not provably inside".
+ */
+function expandKnownRoots(text        )         {
+  return text
+    .replace(/%USERPROFILE%/giu, () => homedir())
+    .replace(/\$env:USERPROFILE\b/giu, () => homedir())
+    .replace(/%APPDATA%/giu, () => join(homedir(), 'AppData', 'Roaming'))
+    .replace(/\$env:APPDATA\b/giu, () => join(homedir(), 'AppData', 'Roaming'))
+    .replace(/%LOCALAPPDATA%/giu, () => join(homedir(), 'AppData', 'Local'))
+    .replace(/\$env:LOCALAPPDATA\b/giu, () => join(homedir(), 'AppData', 'Local'))
+}
+
+/** Path-ish tokens of a command, for the confinement check. */
+function pathTokensOf(text        )           {
+  const out           = []
+  for (const match of text.matchAll(/(?:[A-Za-z]:[\\/]|\/|~[\\/]?|\.{1,2}[\\/])[^\s"'`,;)|&]+/gu)) out.push(match[0])
+  return out
+}
+
+function isInsideWorkspace(target        , workspace        )          {
+  if (workspace.length === 0) return false
+  // A relative target is, by definition, relative to the session's directory.
+  // `..` is not: it leaves the workspace, and "not provably inside" must not read
+  // as "inside" for a recursive delete.
+  if (!/^(?:[A-Za-z]:[\\/]|\/|~)/u.test(target)) return !/^\.\.[\\/]|^\.\.$/u.test(target)
+  const normalize = (value        )         => value.replace(/\\/gu, '/').replace(/\/+$/u, '').toLowerCase()
+  const normalizedTarget = normalize(target)
+  const normalizedWorkspace = normalize(workspace)
+  if (normalizedTarget.length === 0 || normalizedWorkspace.length === 0) return false
+  return normalizedTarget === normalizedWorkspace || normalizedTarget.startsWith(`${normalizedWorkspace}/`)
+}
+
+                                 
+                                                                              
+                           
+                                               
+                
+ 
+
+/**
+ * v0.14 D1/D6: the command scanner, the enforcement point of both the workspace
+ * red line and the destructive-command rule.
+ *
+ * Deliberately NOT "no C:\ paths": reading `C:\Users\<user>\.dsh\...` is ordinary
+ * work, and a guard that denies it will be switched off within a day. What is
+ * denied is the SWEEP (a search verb aimed at a root / system directory) and the
+ * UNBOUNDED DELETE (a destructive verb combined with recursion, aimed at a root
+ * or at something that is not provably inside the session's workspace).
+ */
+export function scanAgentCommand(command        , workspace = '')                             {
+  const raw = typeof command === 'string' ? command : ''
+  if (raw.trim().length === 0) return undefined
+  const text = expandKnownRoots(raw)
+
+  // --- D6: destructive, unbounded, or escaping -------------------------------
+  if (DESTRUCTIVE_VERB.test(text)) {
+    const escaping = escapesWorkspace(text)
+    const recursive = RECURSIVE_FLAG.test(text)
+    const workspaceKnown = workspace.trim().length > 0
+    const targets = pathTokensOf(text)
+    const outsideWorkspace = workspaceKnown && targets.length > 0 && targets.every((target) => !isInsideWorkspace(target, workspace))
+    // No target at all is NOT automatically an escape: `rm -rf node_modules` is a
+    // relative delete. An unbounded one always names a root, and that is the
+    // `escaping` branch.
+    if (escaping || (recursive && outsideWorkspace)) {
+      return {
+        decision: 'deny',
+        code: 'DESTRUCTIVE_COMMAND',
+        reason:
+          'DESTRUCTIVE_COMMAND：该命令是递归/强制的破坏性删除，且目标落在工作区之外或指向系统根目录，已被本地护栏拒绝执行。' +
+          `当前工作区：${workspaceKnown ? workspace : '(未知)'}。` +
+          '如果确实需要清理，请把目标限制在工作区内并给出确切路径（例如 Remove-Item -Recurse .\\build），或让用户确认后手动执行。',
+      }
+    }
+  }
+
+  // --- D1: global search -----------------------------------------------------
+  if (SEARCH_VERB.test(text) && escapesWorkspace(text)) {
+    return {
+      decision: 'deny',
+      code: 'GLOBAL_SEARCH',
+      reason:
+        'GLOBAL_SEARCH：禁止针对盘符根目录 / AppData / 用户目录 / 全局根（如 rg / 、Get-ChildItem C:\\ -Recurse）的搜索，已被本地护栏拒绝执行。' +
+        `当前工作区：${workspace.trim().length > 0 ? workspace : '(未知)'}。` +
+        '找不到文件时请只在当前目录用 ls / dir 查找，或直接询问用户；不要换写法重试、不要向外层目录扩散。',
+    }
+  }
+  return undefined
+}
+
+/**
+ * v0.14 D5: process-level lock reclamation.
+ *
+ * The lock is a directory with an `owner` file (token + pid + lease). The normal
+ * paths already steal a lock after `staleMs`, but a crashed writer leaves the
+ * directory behind until SOMEONE contends for it — and a state file nobody is
+ * writing right now is exactly when no one contends. So activation sweeps them.
+ *
+ * Safety rule: a lock whose owner pid is ALIVE is never touched, no matter how
+ * old. Removing a live holder's lock is how two writers end up on one ledger.
+ */
+                            
+              
+               
+              
+                 
+               
+                                               
+ 
+
+export function scanAndReclaimLocks(dirs                   , dryRun = false)              {
+  const out              = []
+  const seen = new Set        ()
+  for (const dir of dirs) {
+    if (typeof dir !== 'string' || dir.length === 0) continue
+    let names           = []
+    try {
+      names = readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      if (!name.endsWith('.lock')) continue
+      const path = join(dir, name)
+      if (seen.has(path)) continue
+      seen.add(path)
+      let ageMs = 0
+      try {
+        ageMs = Date.now() - statSync(path).mtimeMs
+      } catch {
+        continue
+      }
+      const owner = (() => {
+        try {
+          const parsed = JSON.parse(readFileSync(join(path, 'owner'), 'utf8'))                    
+          return Number.isFinite(Number(parsed?.pid)) ? Number(parsed.pid) : undefined
+        } catch {
+          return undefined
+        }
+      })()
+      const alive = owner === undefined ? undefined : isProcessAlive(owner)
+      const label = name.replace(/\.lock$/u, '')
+      if (alive === true) {
+        out.push({ path, label, pid: owner, alive, ageMs, action: 'kept' })
+        continue
+      }
+      // A live holder is sacred; a dead one is debris. With no pid at all, only an
+      // obviously abandoned directory (older than the stale window) is removed.
+      const reclaim = alive === false || (owner === undefined && ageMs > LOCK_STALE_MS)
+      if (!reclaim) {
+        out.push({ path, label, ...(owner === undefined ? {} : { pid: owner }), alive, ageMs, action: 'kept-unknown' })
+        continue
+      }
+      if (!dryRun) {
+        try {
+          rmSync(path, { recursive: true, force: true })
+        } catch (error) {
+          out.push({ path, label, ...(owner === undefined ? {} : { pid: owner }), alive, ageMs, action: 'kept-unknown' })
+          continue
+        }
+        appendGraftAudit({
+          at: new Date().toISOString(),
+          kind: 'lock-reclaimed',
+          file: label,
+          ...(owner === undefined ? {} : { detail: `owner pid ${owner} is gone; reclaimed at activation` }),
+          ...(owner === undefined ? { detail: `no owner pid; abandoned for ${Math.round(ageMs / 1000)}s` } : {}),
+        })
+      }
+      out.push({ path, label, ...(owner === undefined ? {} : { pid: owner }), alive, ageMs, action: 'reclaimed' })
+    }
+  }
+  return out
+}
+
+/** Is this pid a live process we are not allowed to signal? EPERM means "alive". */
+export function isProcessAlive(pid        )          {
+  if (!Number.isFinite(pid) || pid <= 0) return false
+  if (pid === process.pid) return true
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error       )?.code === 'EPERM'
+  }
+}
+
+/**
+ * The working directory of an agent, for the confinement half of the guard.
+ *
+ * `workingDirectory.get(session)` is the host's own answer (it owns the effective
+ * directory, including a user's later `cd`); the session header is the durable
+ * fallback. An empty result is honest — the caller then skips the
+ * "outside the workspace" rule instead of guessing a boundary.
+ */
+function workspaceOfAgent(ctx                   , agentId        )         {
+  if (typeof agentId !== 'string' || agentId.length === 0) return ''
+  try {
+    const session = ctx.get?.('sessions')?.get?.(agentId)
+    if (session === undefined || session === null) return ''
+    const wd = ctx.get?.('workingDirectory')
+    if (isRecord(wd) && typeof wd.get === 'function') {
+      const value = wd.get(session)
+      if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+    }
+    const header = (session       )?.header
+    if (isRecord(header) && typeof header.cwd === 'string' && header.cwd.trim().length > 0) return header.cwd.trim()
+    const direct = (session       )?.cwd
+    return typeof direct === 'string' ? direct.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
+/** Where the debug panel reads the memory store from (never written by us). */
+function resolveMemoryPaths(settings                       )                                           {
+  const memoryDir = settings.memoryDir.length > 0 ? settings.memoryDir : join(dirname(retiredStorePath), '.dsh-memory')
+  const skillsDir = settings.skillsDir.length > 0 ? settings.skillsDir : join(homedir(), '.agents', 'skills')
+  return { memoryDir, skillsDir }
+}
+
+                                   
+                    
+                    
+                                                    
+                            
+                                 
+                     
+                              
+                              
+                                                           
+                                    
+                             
+                                                                               
+                                                                                                         
+                                                                                                                                
+                                                   
+ 
+
+/**
+ * v0.14: the debug panel payload. Pure: every fact is passed in, so the same
+ * function serves the tool (live data) and `scripts/debug-status.mjs` (disk only).
+ */
+export function collectDebugStatus(input                  )                          {
+  const section = input.section ?? 'all'
+  const settings = input.settings
+  const out                          = { ok: true, section }
+
+  if (section === 'all' || section === 'watermark') {
+    const watermark = input.watermark
+    const warnAt = settings.modelDrivenGraftAtRatio
+    const hardAt = settings.autoGraftAtRatio
+    out.watermark = watermark === undefined
+      ? { available: false, reason: 'no live session or no usage/context record for it', warnAt, hardAt }
+      : {
+          available: true,
+          tokens: watermark.tokens,
+          contextWindow: watermark.contextWindow,
+          ratio: Number(watermark.ratio.toFixed(4)),
+          percent: Number((watermark.ratio * 100).toFixed(2)),
+          source: watermark.source,
+          warnAt,
+          hardAt,
+          toWarnRatio: Number((warnAt - watermark.ratio).toFixed(4)),
+          toWarnTokens: Math.max(0, Math.round(watermark.contextWindow * (warnAt - watermark.ratio))),
+          toHardRatio: Number((hardAt - watermark.ratio).toFixed(4)),
+          toHardTokens: Math.max(0, Math.round(watermark.contextWindow * (hardAt - watermark.ratio))),
+          state:
+            watermark.ratio >= hardAt
+              ? 'over-hard-cutoff'
+              : watermark.ratio >= warnAt
+                ? 'over-warn-line'
+                : 'below-warn-line',
+        }
+    out.chain = {
+      generation: input.generation ?? 0,
+      graceTurns: GRAFT_CHAIN_GRACE_TURNS,
+      graceTurnsRemaining: input.graceTurnsRemaining ?? 0,
+      reGraftBlocked: (input.graceTurnsRemaining ?? 0) > 0,
+    }
+  }
+
+  if (section === 'all' || section === 'locks') {
+    const entries = input.locks ?? []
+    out.locks = {
+      held: entries.map((entry) => ({
+        label: entry.label,
+        path: entry.path,
+        pid: entry.pid ?? null,
+        alive: entry.alive ?? null,
+        ageMs: entry.ageMs,
+        action: entry.action,
+      })),
+      reclaimedAtActivation: (input.lockCleanup ?? []).filter((entry) => entry.action === 'reclaimed').map((entry) => entry.label),
+    }
+    out.transactions = {
+      pending: (input.txns ?? []).map((txn) => ({ ...txn })),
+      retiredCount: (input.retired ?? []).length,
+      retiredRecent: (input.retired ?? []).slice(-10),
+      transferredCount: (input.transferred ?? []).length,
+      graftTargetsCount: (input.targets ?? []).length,
+      graftTargetsRecent: (input.targets ?? []).slice(-10).map((target) => ({
+        id: target.id,
+        generation: target.generation,
+        sourceSessionId: target.sourceSessionId,
+        createdAt: new Date(target.createdAt).toISOString(),
+      })),
+    }
+  }
+
+  if (section === 'all' || section === 'memory') {
+    out.memory = input.memory === undefined
+      ? { available: false, reason: 'memoryDir/skillsDir not resolvable' }
+      : collectMemoryStoreStatus(input.memory.memoryDir, input.memory.skillsDir, input.workspace)
+  }
+  return out
+}
+
+/**
+ * v0.14: read the memory store read-only, and — with `workspace` — say which
+ * records are "dirty" from that workspace's point of view: written elsewhere, or
+ * written with no provenance at all (the records the isolation gate refuses).
+ */
+export function collectMemoryStoreStatus(
+  memoryDir        ,
+  skillsDir        ,
+  workspace         ,
+)                          {
+  const wanted = typeof workspace === 'string' ? workspace.replace(/\\/gu, '/').replace(/\/+$/u, '').toLowerCase() : ''
+  const readJsonl = (file        )                                 => {
+    try {
+      return readFileSync(join(memoryDir, file), 'utf8')
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .map((line) => {
+          try {
+            return JSON.parse(line)                           
+          } catch {
+            return undefined
+          }
+        })
+        .filter((record)                                    => record !== undefined)
+    } catch {
+      return []
+    }
+  }
+  const classify = (records                                )                                                                                                => {
+    if (wanted.length === 0) return { matched: 0, foreign: 0, unscoped: 0, dirty: [] }
+    let matched = 0
+    let foreign = 0
+    let unscoped = 0
+    const dirty                                 = []
+    for (const record of records) {
+      const scope = String(record.scope ?? '').toLowerCase()
+      const recorded = String(record.workspace ?? '').replace(/\\/gu, '/').replace(/\/+$/u, '').toLowerCase()
+      if (scope === 'global') continue
+      if (recorded.length === 0) {
+        unscoped += 1
+        if (dirty.length < 10) dirty.push({ kind: record.kind ?? 'record', reason: 'no workspace recorded (legacy)', text: String(record.text ?? record.symptom ?? '').slice(0, 80) })
+        continue
+      }
+      if (recorded === wanted) matched += 1
+      else {
+        foreign += 1
+        if (dirty.length < 10) dirty.push({ kind: record.kind ?? 'record', reason: `recorded in ${record.workspace}`, text: String(record.text ?? record.symptom ?? '').slice(0, 80) })
+      }
+    }
+    return { matched, foreign, unscoped, dirty }
+  }
+
+  const skills                                                            = []
+  try {
+    for (const entry of readdirSync(skillsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const path = join(skillsDir, entry.name, 'SKILL.md')
+      try {
+        const text = readFileSync(path, 'utf8')
+        skills.push({
+          name: entry.name,
+          scope: (text.match(/^scope:\s*(.+)$/mu)?.[1] ?? 'project').trim().toLowerCase(),
+          workspace: (text.match(/^workspace:\s*(.+)$/mu)?.[1] ?? '').trim(),
+        })
+      } catch {
+        // A skill directory without a readable SKILL.md is not a skill.
+      }
+    }
+  } catch {
+    // An absent skills directory means "no skills yet", not a failure.
+  }
+
+  const negatives = readJsonl('negatives.jsonl').map((record) => ({ ...record, kind: 'negative' }))
+  const facts = readJsonl('facts.jsonl').map((record) => ({ ...record, kind: 'fact' }))
+  const experiences = readJsonl('experiences.jsonl').map((record) => ({ ...record, kind: 'experience' }))
+  const suggestions = readJsonl('suggestions.jsonl')
+
+  const skillScope = (scope        )          => scope === 'global'
+  const skillDirty = (skill                                                    )          => {
+    if (wanted.length === 0) return false
+    if (skillScope(skill.scope)) return false
+    const recorded = skill.workspace.replace(/\\/gu, '/').replace(/\/+$/u, '').toLowerCase()
+    return recorded !== wanted
+  }
+  const dirtySkills = wanted.length === 0 ? [] : skills.filter(skillDirty)
+
+  return {
+    available: true,
+    memoryDir,
+    skillsDir,
+    counts: {
+      skills: skills.length,
+      negatives: negatives.length,
+      facts: facts.length,
+      experiences: experiences.length,
+      suggestions: suggestions.length,
+    },
+    // Without a workspace this is a plain inventory; with one, "dirty" means
+    // "this record would be REFUSED by the isolation gate for this workspace".
+    ...(wanted.length === 0
+      ? {}
+      : {
+          workspace: wanted,
+          skillsInWorkspace: {
+            matched: skills.length - dirtySkills.length,
+            dirty: dirtySkills.length,
+            unscoped: skills.filter((skill) => skill.scope !== 'global' && skill.workspace.trim().length === 0).length,
+            dirtyList: dirtySkills.slice(0, 10).map((skill) => ({ name: skill.name, reason: skill.workspace.trim().length === 0 ? 'no workspace recorded (legacy)' : `recorded in ${skill.workspace}` })),
+          },
+          negativeRecords: classify(negatives),
+          factRecords: classify(facts),
+          experienceRecords: classify(experiences),
+        }),
+  }
+}
+
 export function apply(ctx                   , config              = {})       {
   const settings = normalizeConfig(config)
   configureRetiredStore(ctx, settings)
+  // v0.14 D5: reclaim locks left by dead processes BEFORE anything reads state.
+  // A crashed writer's `.lock` directory is invisible until someone contends for
+  // that file, and a clean start contends for nothing.
+  try {
+    lastLockCleanup = scanAndReclaimLocks([dirname(retiredStorePath), PLUGIN_DIR])
+    const reclaimed = lastLockCleanup.filter((entry) => entry.action === 'reclaimed')
+    if (reclaimed.length > 0) {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] reclaimed ${reclaimed.length} dead lock(s): ${reclaimed.map((entry) => entry.label).join(', ')}`,
+      )
+    }
+  } catch (error) {
+    ctx.logger?.warn?.(`[dsh-graft-slice] lock sweep failed: ${String((error       )?.message ?? error)}`)
+  }
   // v7.0: the chain guard must survive a restart, so its marks are durable.
   loadGraftTargetStore(ctx)
   // v7.2: so must the compaction shield. A section that only exists in memory
@@ -9009,6 +9839,16 @@ async function appendTransitionCard(
     // incrementally, so the second read costs the appended tail, not the log.
     let watermarkForNudge                            
     /**
+     * v0.14 D2: true while this session is a fresh graft target inside its grace
+     * window. Computed once and used by BOTH automatic paths (the 70% nudge and
+     * the 75% fallback), because "do not graft yourself again yet" has to hold
+     * for the nudge too — otherwise the model is invited to do exactly what the
+     * chain guard is about to refuse.
+     */
+    let chainProtected = false
+    /** v0.14 D1: the one-shot red-line message for this session (see below). */
+    const guardMessages        = []
+    /**
      * v7.6: whether the hard cutoff applies to THIS session (autoGraft on, and
      * not excluded by the allowlist). The nudge ceiling depends on it: a session
      * with no cutoff has no rescue line behind the nudge.
@@ -9032,6 +9872,50 @@ async function appendTransitionCard(
        * Delivered once per session per process, not every step: repeating a
        * standing rule every turn trains the reader to skip it.
        */
+      /**
+       * v0.14 D1: the highest-priority warning, injected through pre-step.
+       *
+       * The instruction that motivated this: with no explicit boundary, "find the
+       * file" becomes "widen the search" — profile directory, AppData, then the
+       * drive roots — turn after turn, with confident summaries of a filesystem
+       * that was only listed. The tool guard refuses those commands; this makes
+       * the refusal predictable instead of surprising, and covers the paths the
+       * guard deliberately allows (a specific read under C:\).
+       *
+       * Once per session per process: a rule repeated every step is a rule the
+       * reader learns to skip. Delivered as a `user/message` through pre-step
+       * `messages`, the one channel that reaches the model without writing a log
+       * event (and therefore without colliding with the v4 step ordering).
+       */
+      if (settings.workspaceRedline && !guardReasserted.has(agentId)) {
+        guardReasserted.add(agentId)
+        const cwd = workspaceOfAgent(stableCtx, agentId) || process.cwd()
+        const generation = graftGenerationOf(agentId)
+        // COLLECTED, never returned early: the branches above and below this point
+        // decide whether this session still exists (retired / transferred /
+        // grafting). A guard that returns here would answer "enter" for a session
+        // that is about to be rejected, which is a behaviour change, not a guard.
+        guardMessages.push({
+          id: `graft-guard-${agentId}`       ,
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: [
+                '[系统提示·最高优先级] 工作目录红线：',
+                workspaceRedline(cwd),
+                '',
+                '破坏性命令红线：禁止 rm -rf /、Remove-Item -Recurse 指向盘符根目录 / 用户目录 / 工作区之外的路径；',
+                '本地护栏会在工具层直接拒绝这类命令（不是提醒，是拒绝），不要换写法重试。',
+                ...(generation > 0
+                  ? ['', `迁移纪律：本会话是第 ${generation} 代迁移产物，完成前 ${GRAFT_CHAIN_GRACE_TURNS} 轮之前不得再触发切片。`]
+                  : []),
+              ].join('\n'),
+            },
+          ],
+          source: { kind: GRAFT_REPLAY_SOURCE_KIND },
+        })
+      }
       if (!constraintsReasserted.has(agentId)) {
         const standing = targetConstraintSections.get(agentId)
         if (standing !== undefined && standing.constraints.length > 0) {
@@ -9156,8 +10040,39 @@ async function appendTransitionCard(
         }
       }
 
+      // v0.14 D2: is this session a fresh graft target inside its grace window?
+      // Read before the watermark so the answer also governs the 70% nudge: a
+      // target in grace must not be invited to slice itself, and must not be
+      // force-cut at 75% by the very pressure its seeded tape inherited.
+      chainProtected = (() => {
+        const live = stableCtx.sessions.get(agentId)       
+        const events =
+          live !== undefined && typeof live.snapshotEvents === 'function'
+            ? (live.snapshotEvents(0)                      )
+            : undefined
+        return isProtectedGraftTarget(agentId, events, settings.graftTargetGraceTurns)
+      })()
+
+      // Evidence, not enforcement: the two branches below withhold the nudge and
+      // the forced cut for a protected target. Record WHY, so "it sat at 80% and
+      // nothing happened" is answerable from the audit file instead of empty.
+      if (chainProtected && (autoGraftStates.get(agentId) ?? 'idle') === 'idle') {
+        const watermark = await readTokenWatermark(stableCtx, agentId, settings)
+        watermarkForNudge = watermark
+        if (watermark !== undefined && watermark.ratio >= settings.modelDrivenGraftAtRatio) {
+          appendGraftAudit({
+            at: new Date().toISOString(),
+            kind: 'chain-guard',
+            sessionId: agentId,
+            ratio: Number(watermark.ratio.toFixed(4)),
+            detail: `fresh target (generation ${graftGenerationOf(agentId)}): nudge and autoGraft withheld inside the ${settings.graftTargetGraceTurns}-turn grace window`,
+          })
+        }
+      }
+
       autoGraftApplies =
         settings.autoGraft &&
+        !chainProtected &&
         (settings.autoGraftSessionIds.length === 0 || settings.autoGraftSessionIds.includes(agentId))
       if (autoGraftApplies && state === 'idle') {
         const watermark = await readTokenWatermark(stableCtx, agentId, settings)
@@ -9181,6 +10096,12 @@ async function appendTransitionCard(
             return { kind: 'enter', messages: Array.isArray(payload?.messages) ? payload.messages : [] }
           }
           const targetId = autoTargetId(settings)
+          // v7.9: was this cut forced by an ignored nudge? The target's pending
+          // state must say so, or the next generation reads a mid-write stop as
+          // a planned handover.
+          if (watermarkEscalations.has(agentId) || watermarkEscalated.has(agentId)) {
+            forcedCutMarks.set(agentId, { ratio: watermark.ratio, at: Date.now() })
+          }
           autoGraftStates.set(agentId, 'grafting')
           // Force the old session closed BEFORE creating the target. During
           // the async graft, every later pre-step sees 'grafting' or the
@@ -9249,14 +10170,23 @@ async function appendTransitionCard(
       if (settings.modelDrivenGraft && watermarkForNudge === undefined) {
         watermarkForNudge = await readTokenWatermark(stableCtx, agentId, settings)
       }
-      const modelExtra = takeModelDrivenNudge(
-        settings,
-        agentId,
-        payload,
-        watermarkForNudge,
-        autoGraftApplies ? settings.autoGraftAtRatio : undefined,
-      )
-      const appended = [...extra, ...planExtra, ...modelExtra]
+      const modelExtra =
+        !chainProtected && settings.modelDrivenGraft
+          ? takeModelDrivenNudge(
+              stableCtx,
+              settings,
+              agentId,
+              payload,
+              watermarkForNudge,
+              autoGraftApplies ? settings.autoGraftAtRatio : undefined,
+            )
+          : []
+      // v7.9: the nudge was ignored (the model started another step). One hard
+      // instruction, once, before the hard cutoff has to do it for the model.
+      // Never in the same step as the nudge: the model just received its one
+      // chance and has not had the time to act on it.
+      const urgentExtra = modelExtra.length > 0 ? [] : takeWatermarkEscalation(stableCtx, agentId, payload)
+      const appended = [...guardMessages, ...extra, ...planExtra, ...modelExtra, ...urgentExtra]
       if (appended.length === 0) return merged === undefined ? decision : { ...decision, messages }
       return { ...decision, messages: [...messages, ...appended] }
     }
@@ -9512,6 +10442,101 @@ async function appendTransitionCard(
     })
   }
   registerConstraintSection()
+
+  /**
+   * v0.14 D1: the workspace red line as a SYSTEM-PROMPT SECTION.
+   *
+   * Why a section and not just the goal message: a section is rendered from live
+   * state on every request and is structurally immune to compaction (see the note
+   * on `graft:constraints`), so the boundary is present in EVERY session of this
+   * profile — including one that was never grafted — and cannot be summarised
+   * away. The goal message keeps its copy for the target's very first read.
+   *
+   * Unlike the constraint section this one is not scoped to our targets: a red
+   * line that only applies after a migration would not have prevented the sweep
+   * that motivated it.
+   */
+  const registerGuardSection = ()       => {
+    if (!settings.workspaceRedline) return
+    const systemPrompt = (() => {
+      try {
+        return ctx.get('systemPrompt')       
+      } catch {
+        return undefined
+      }
+    })()
+    if (systemPrompt === undefined || typeof systemPrompt.section !== 'function') return
+    const base =
+      typeof systemPrompt.getSectionOrder === 'function'
+        ? Number(systemPrompt.getSectionOrder('PLAN_POLICY')) || 0
+        : 0
+    // Order matters only for reading position; the wording carries the priority.
+    systemPrompt.section({
+      name: 'graft:guard',
+      order: Math.max(0, base - 1),
+      text: (context     ) => {
+        const sessionId = typeof context?.agent?.session?.id === 'string' ? context.agent.session.id : ''
+        const cwd = workspaceOfAgent(ctx, sessionId) || process.cwd()
+        const generation = sessionId.length > 0 ? graftGenerationOf(sessionId) : 0
+        return [
+          '## 红线（最高优先级，任何情况下不得绕过）',
+          workspaceRedline(cwd),
+          '破坏性命令红线：禁止 rm -rf /、Remove-Item -Recurse 指向盘符根目录 / 用户目录 / 工作区之外的路径；',
+          '需要清理时把目标限制在当前工作区内，或把风险与缺口报告给用户。',
+          ...(generation > 0
+            ? [`迁移纪律：本会话是第 ${generation} 代迁移产物，完成前 ${GRAFT_CHAIN_GRACE_TURNS} 轮之前不得再触发切片。`]
+            : []),
+        ].join('\n')
+      },
+    })
+  }
+  registerGuardSection()
+
+  /**
+   * v0.14 D1/D6: the tool-layer enforcement.
+   *
+   * `ctx.tools.guard()` is monotonic and runs after the `tools/pre-execute`
+   * waterfall: a returned string DENIES the call before dispatch, and no other
+   * guard can force-allow it. That is what makes this a refusal rather than a
+   * request, and it is why the same scanner backs both the search ban (D1) and
+   * the destructive-command ban (D6).
+   */
+  const registerCommandGuard = ()       => {
+    if (!settings.commandGuard) return
+    const tools = (() => {
+      try {
+        return ctx.get('tools')       
+      } catch {
+        return undefined
+      }
+    })()
+    if (tools === undefined || typeof tools.guard !== 'function') {
+      ctx.logger?.warn?.('[dsh-graft-slice] ctx.tools.guard() unavailable; command guard not armed')
+      return
+    }
+    tools.guard((execution     ) => {
+      const name = typeof execution?.name === 'string' ? execution.name : ''
+      if (!COMMAND_TOOL_NAMES.has(name)) return undefined
+      const command = commandTextOf(execution?.arguments)
+      if (command.length === 0) return undefined
+      const agentId = typeof execution?.agent?.id === 'string' ? execution.agent.id : ''
+      const workspace = workspaceOfAgent(ctx, agentId)
+      const verdict = scanAgentCommand(command, workspace)
+      if (verdict === undefined) return undefined
+      try {
+        appendGraftAudit({
+          at: new Date().toISOString(),
+          kind: 'command-blocked',
+          ...(agentId.length === 0 ? {} : { sessionId: agentId }),
+          detail: `${verdict.code}: ${command.replace(/\s+/gu, ' ').slice(0, 200)}`,
+        })
+      } catch {
+        // The audit line is evidence; the denial must not depend on it.
+      }
+      return verdict.reason
+    })
+  }
+  registerCommandGuard()
 
   ctx.tools.register({
     name: 'graft_slice_and_inject',
@@ -10001,6 +11026,136 @@ async function appendTransitionCard(
       )
     },
   })
+
+  /**
+   * v0.14 DEBUG PANEL: `graft_debug_status`.
+   *
+   * Three questions that used to require reading four files by hand:
+   *   1. how full is this session, and how far from the 70% nudge / 75% cutoff;
+   *   2. is any state lock held, is any migration transaction unfinished, and how
+   *      many sessions are retired;
+   *   3. what does the memory store hold, and — with `workspace` — which records
+   *      the isolation gate would REFUSE for that path ("dirty data").
+   *
+   * Read-only by construction: the lock sweep runs in `dryRun`, and the memory
+   * panel only reads files (`dsh-memory` is never imported, and never written).
+   */
+  ctx.tools.register({
+    name: 'graft_debug_status',
+    description:
+      'Diagnose this profile from inside a session: token watermark versus the 70% nudge and 75% cutoff, ' +
+      'held state locks / unfinished .txn migrations / retired-session count, and the dsh-memory store ' +
+      '(skills, negatives, observations). Pass `workspace` to list the memory records that the workspace ' +
+      'isolation gate would refuse for that path. Read-only.',
+    parameters: {
+      type: 'object',
+      properties: {
+        section: {
+          type: 'string',
+          enum: ['all', 'watermark', 'locks', 'memory'],
+          description: 'Which panel to return. Default all.',
+        },
+        sessionId: {
+          type: 'string',
+          description: 'Session to measure the watermark for. Default: the session calling this tool.',
+        },
+        workspace: {
+          type: 'string',
+          description:
+            'Absolute path used by the memory panel to classify records as same-workspace / foreign / unscoped.',
+        },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args         , value     ) => [
+        { type: 'text'         , text: JSON.stringify(value, null, 2).slice(0, 12000) },
+      ],
+    },
+    execute: async (args     , exec     ) => {
+      const requested = isRecord(args) && typeof args.section === 'string' ? args.section : 'all'
+      const section = requested === 'watermark' || requested === 'locks' || requested === 'memory' ? requested : 'all'
+      const explicitSession = isRecord(args) && typeof args.sessionId === 'string' ? args.sessionId.trim() : ''
+      const sessionId = explicitSession.length > 0
+        ? explicitSession
+        : typeof exec?.agent?.id === 'string'
+          ? exec.agent.id
+          : ''
+      const explicitWorkspace = isRecord(args) && typeof args.workspace === 'string' ? args.workspace.trim() : ''
+
+      const watermark = sessionId.length > 0 ? await readTokenWatermark(stableCtx, sessionId, settings) : undefined
+      const generation = sessionId.length > 0 ? graftGenerationOf(sessionId) : 0
+      const graceRemaining = (() => {
+        if (sessionId.length === 0) return 0
+        const live = stableCtx.sessions.get(sessionId)       
+        const events =
+          live !== undefined && typeof live.snapshotEvents === 'function'
+            ? (live.snapshotEvents(0)                      )
+            : undefined
+        if (!isProtectedGraftTarget(sessionId, events, settings.graftTargetGraceTurns)) return 0
+        const completed = events === undefined ? 0 : events.filter((event) => event.type === 'turn/end').length
+        return Math.max(0, settings.graftTargetGraceTurns - completed)
+      })()
+
+      // dryRun: a diagnostic must not mutate state. What activation DID reclaim is
+      // reported separately from lastLockCleanup.
+      const locks = scanAndReclaimLocks([dirname(retiredStorePath), PLUGIN_DIR], true)
+      const txns = (() => {
+        try {
+          return readdirSync(txnDirPath)
+            .filter((name) => name.endsWith('.json'))
+            .map((name) => {
+              try {
+                const record = JSON.parse(readFileSync(join(txnDirPath, name), 'utf8'))                           
+                return {
+                  name,
+                  ...(typeof record.state === 'string' ? { state: record.state } : {}),
+                  ...(typeof record.stage === 'string' ? { stage: record.stage } : {}),
+                  ...(typeof record.sourceSessionId === 'string' ? { sourceSessionId: record.sourceSessionId } : {}),
+                  ...(typeof record.targetSessionId === 'string' ? { targetSessionId: record.targetSessionId } : {}),
+                  ...(typeof record.updatedAt === 'string' ? { updatedAt: record.updatedAt } : {}),
+                }
+              } catch {
+                return { name, state: 'unreadable' }
+              }
+            })
+        } catch {
+          return []
+        }
+      })()
+
+      return collectDebugStatus({
+        section,
+        ...(sessionId.length === 0 ? {} : { sessionId }),
+        ...(explicitWorkspace.length === 0
+          ? sessionId.length > 0 && workspaceOfAgent(stableCtx, sessionId).length > 0
+            ? { workspace: workspaceOfAgent(stableCtx, sessionId) }
+            : {}
+          : { workspace: explicitWorkspace }),
+        ...(watermark === undefined ? {} : { watermark }),
+        settings,
+        generation,
+        graceTurnsRemaining: graceRemaining,
+        locks,
+        lockCleanup: lastLockCleanup,
+        retired: [...retiredSessions],
+        transferred: [...transferredSessions.entries()].map(([id, value]) => ({
+          id,
+          newSessionId: value.newSessionId,
+          at: value.at,
+        })),
+        targets: [...graftTargets.entries()].map(([id, mark]) => ({
+          id,
+          generation: mark.generation,
+          sourceSessionId: mark.sourceSessionId,
+          createdAt: mark.createdAt,
+        })),
+        txns,
+        memory: resolveMemoryPaths(settings),
+      })
+    },
+  })
 }
 
 /** Spec-requested alias for hosts that look for activate(ctx). */
@@ -10079,8 +11234,18 @@ export const activate = apply
  
 
 /** Test-only: where the durable stores currently resolve. */
-/** Test-only: where the durable stores currently resolve. */
 let lastRecovery                                                       
+
+/**
+ * v0.14 D5: what the activation lock sweep found and did, so the debug panel can
+ * show the reclamation without re-running it.
+ */
+let lastLockCleanup              = []
+
+/** Test-only: the lock sweep of the last activation in this process. */
+export function debugLastLockCleanup()              {
+  return lastLockCleanup
+}
 
 /** Test-only: the recovery result of the last activation in this process. */
 export function debugLastRecovery()                                                        {

@@ -68,6 +68,111 @@ node scripts/verify-bundle.mjs   # 27 项：bundle 声明 / files 白名单 / ES
 
 `cordis.patch.yml` 用**包名**引用（`name: dsh-graft-slice`），不写相对路径——相对路径只在本机成立。
 
+## v0.14.0：七道防线 + 调试面板
+
+v0.13 的两道护栏是**提醒**；v0.14 把它们落到**工具层**，并补上“连环切片”“死锁”“注入污染”三类
+只有在真机上才暴露的问题。一句话原则：**提示是请求，守卫是拒绝。**
+
+| # | 防线 | 落点 | 行为 |
+|---|---|---|---|
+| D1 | 封杀全局搜索 | `tools.guard` + system-prompt section + pre-step 一次性注入 | `rg /`、`Get-ChildItem C:\ -Recurse`、任何指向盘符根 / `AppData` / 用户目录的搜索**在 dispatch 前被拒绝**；工作区内部的搜索照常 |
+| D2 | 防死循环切片 | `isProtectedGraftTarget` 无条件生效 + nudge 抑制 + `graft_generation` 注入 | 目标前 2 轮（`graftTargetGraceTurns`）**任何**自动路径都切不动它，包括 75% 兜底；nudge 也不再邀请它自杀；目标知道自己第几代 |
+| D3 | 记忆 Workspace 硬隔离 | `dsh-memory` 写入记 `workspace:`，读取端池级门禁 | 跨工作区、无 provenance 的记录一律不注入（`scope: global` 例外） |
+| D4 | 记忆防污染 | `dsh-memory/src/threat.ts` 在**注入前**再扫一遍 | `ignore previous instructions` / `忽略以上指令` / `forget everything…` 直接丢弃；连未被渲染的正文也扫 |
+| D5 | 进程级锁清理 | `apply()` 启动时 `scanAndReclaimLocks()` | 按 `owner` 里的 **PID 判活**：死进程的 `.lock` 目录直接回收并记审计；活持有者绝不碰 |
+| D6 | 危险命令拦截 | 与 D1 同一个 scanner | `rm -rf /`、`Remove-Item -Recurse C:\`、逃出工作区的递归删除被拒；`Remove-Item -Recurse .\build` 照常 |
+| D7 | 一次性约束过滤 | `extractConstraints` + LLM 约束提示 | 「立刻删除 <工作区>\repair-log.cjs」这类只安全一次的步骤不进 HARD CONSTRAINTS |
+
+### D1/D6 为什么是「拒绝」而不是「提醒」
+
+实测的失效形状：一个会话被要求找某个文件，在自己的目录树里找不到，于是**一路外扩**——先 profile、
+再 `AppData`、再到盘符根——一轮一轮地搜，并对一个“只是列过目录”的文件系统给出自信的总结。
+v0.13 的提示写在 system-prompt 里，而 system-prompt 是**建议**：模型可以读、可以同意、然后照样
+`rg` 整个盘。`ctx.tools.guard()` 是**单调拒绝**：命中即在 dispatch 之前返回理由，任何其他 guard
+都无法把它改回允许。这正是“提醒”和“拒绝”的差别。
+
+判据刻意**窄**：
+- 拒绝「搜索类动词 + 逃逸目标（盘符根 / `/` / `~` / `%APPDATA%` / `C:\Users`…）」；
+  读取某个**具体** `C:\...` 文件不拦——那是正常工作，拦了这护栏活不过一天。
+- 拒绝「破坏性动词 + 逃逸目标或工作区之外的递归目标」；
+  `Remove-Item -Recurse .\build`、`rm -rf node_modules` 不拦（相对路径按定义就在工作区内）。
+
+### D2 的洞：为什么“已经有的守卫”没挡住连环切片
+
+`graftTargetGraceTurns`（默认 2）早就存在，但它被嵌在 `ignoreTransferGuard !== true` 里，
+而两条自动路径（75% 兜底、确认模式）**都传了 `ignoreTransferGuard: true`**。也就是说：
+**恰恰在无人值守的那条路上，连环守卫被跳过了。** 绕开“已退休/已转移”的拒绝不等于绕开“这是刚出生的
+目标”的拒绝，两者现在分开了（`forceSlice` 才能显式绕开，且自动路径都不传）。
+
+### 调试面板 `graft_debug_status`
+
+| 面板 | 内容 |
+|---|---|
+| watermark | 当前 token / 窗口 / 百分比 / 数据来源（`tokenMeter` \| `usage` \| `incremental` \| `estimate`），距 70% 提示线还差多少 token，距 75% 兜底线还差多少，以及所处区间 |
+| locks | 现存 `.lock`（owner pid、存活、年龄）、`.txn` 未完成事务、`.retired.json` 退休数、`.transferred.json`、graft target 及其代数 |
+| memory | 技能 / 负知识 / 事实 / 经验 / 待审队列计数；带 `workspace` 时给出「同工作区 ok / 跨工作区 foreign / 无 provenance unscoped」以及脏数据样例 |
+
+同一个面板也有 CLI（无宿主时用）：
+
+```powershell
+node scripts/debug-status.mjs --data <state-dir> --session <sessionId> --workspace <path>
+```
+
+CLI 的锁扫描是 `dryRun`，只读：诊断永远不改状态。水位来自日志里真实的 provider usage；
+没有 usage 就**如实返回 unavailable**，不编一个和宿主 meter 不一致的数字。
+
+## v0.13.0：两道安全护栏（工作目录红线 + 一次性动作过滤）
+
+自动迁移开久了，事故不出在“切片本身”，而出在**切过去的那个模型不知道边界在哪**，以及
+**被带过去的那条规则只对一次有效**。两道护栏各堵一个方向，都默认开启。
+
+### ① 工作目录红线（`workspaceRedline`，默认 true）
+
+**现场**：一个迁移后的会话被问到某个文件，在自己的目录树里找不到，于是按通用 agent 的直觉
+一路外扩搜索——先 profile 目录、再 `AppData`、再到盘符根——一轮一轮地搜，并对一个“只是列过目录”
+的文件系统给出自信的总结。注入的 tape 里没有任何一句说明“这里”的边界在哪，所以“再找找”是无上界的。
+
+**修法**：tape 本来就只记了一个工作目录，那就把它说出来，连同“找不到时该做什么”：
+
+> 【红线警告】你的工作目录严格限定为 `<cwd>`。严禁执行任何针对 C 盘、AppData 或全局根目录的搜索
+> （如 `rg /`）。如果遇到找不到文件的情况，请只在当前目录下用 `ls` 或 `dir` 查找。
+> 同一路径被拒绝或找不到之后，不要换写法重试、不要向外层目录扩散搜索、不要凭目录列表猜测文件内容；
+> 请把结论和缺口报告给用户。
+
+路径来自会话日志头（`plan.cwd`），**不是模型输出**，所以模型无法把它谈走。
+
+**注入两次是刻意的**：`system/message`（节点 0）在目标第一次真实 step 时会被宿主自己的
+SystemPromptProjection 覆写，只放那里等于没放；所以同时写进 goal `user/message`——那是宿主
+永不重写的通道，和 HARD CONSTRAINTS 走同一条路。
+
+### ② 一次性动作过滤（`extractConstraints` + LLM 约束提示）
+
+**现场**：某源会话的用户消息开头是
+
+> 1. 删除危险脚本：立刻删除 `D:\...\repair-log.cjs`，绝不能让这个无备份、强制覆盖的脚本再跑一次。
+
+抽取器把它留下了——它是祈使句、有动作、够具体、够长，打分很高——于是迁移后的目标在同一条
+HARD CONSTRAINTS 里一直背着“删除 repair-log.cjs”，而那个文件早就没了。**点名一个具体产物 + 一个
+变更动作的句子是任务步骤**：它只安全一次，之后就是把枪口对准该路径下一个东西。
+
+**判据不是“是否破坏性”**（长期规则当然可以禁止破坏性动作），而是**是否可泛化**：
+句子里同时出现「具体文件/路径」与「变更动词」、且**没有**约束住动作本体的长期标记
+（禁止/绝不/每次/任何/never/always/only…），就丢弃。
+
+豁免窗口刻意很短（12 字符）且动作表刻意很窄，因为上面那句里也有“绝不”——
+“绝不能让这个…脚本再跑一次”说的是**另一个动作**。标记必须压在动作上，不能只是离得近。
+正则路径与 LLM 提示两条抽取路径都写了同一条排除项，否则模型那条会悄悄把正则删掉的东西加回来。
+
+### 配套：记忆侧的工作区物理隔离（dsh-memory v0.8）
+
+切片护栏管“模型去哪找文件”，记忆护栏管“哪条规则能进这个会话”。dsh-memory 现在写入时记录
+产出会话的 cwd，检索时只放行 workspace 一致或显式 `scope: global` 的记忆，跨工作区与无 provenance
+的旧记录一律拒绝（fail closed）。两边合起来才是完整的“转生后不越界”。
+
+**测试**：`test/v80-guard.test.mjs`（6 项）断言红线出现在**真实注入产物**的两个通道里、
+`workspaceRedline: false` 确实能关掉护栏（不是装饰性开关）、一次性删除指令被丢弃、
+而“禁止在没有备份的情况下删除任何脚本”“每次提交前必须更新 RELEASE_NOTES.md”这类可泛化规则被保留。
+
 ## v0.11.0：计划前置、产物复用、退休原子、锁租约
 
 四项加固，都来自“真正多项目并发”暴露的问题：
@@ -325,13 +430,14 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 292 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位 |
+| `test/*.test.mjs` | 321 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板 |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
 | `scripts/demo.mjs` | 端到端演示：真实日志 + 假宿主，不写真实存储 |
 | `scripts/scan-real-logs.mjs` | 对本机全部持久化日志做只读切片扫描 |
 | `scripts/read-session-log.mjs` | 读取多 zstd frame 的 v4 日志（开发工具） |
+| `scripts/debug-status.mjs` | 无宿主时的 `graft_debug_status`：水位 / 锁与事务 / 记忆库，只读 |
 
 ## 对 v2.1 的两处必要校正
 
@@ -991,7 +1097,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 292 个测试
+# 2) 321 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）
