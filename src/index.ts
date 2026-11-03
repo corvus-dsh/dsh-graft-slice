@@ -131,6 +131,31 @@ export interface GraftConfig {
    */
   commandGuard?: boolean
   /**
+   * v0.18: which DECISION TABLE the command policy uses. Default `balanced`.
+   *
+   *   strict      unknown and destructive are refused outright
+   *   balanced    destructive refused; unknown (a mutating verb we cannot place) refused
+   *   autonomous  unknown allowed; destructive still ASKS rather than running silently
+   *
+   * The mode changes no classifier — only what the operator wants done about a
+   * given risk, which is the whole point of separating the two.
+   */
+  safetyMode?: SafetyMode
+  /**
+   * v0.18: where the migration thresholds come from. Default `dynamic`.
+   *
+   * `fixed` uses `modelDrivenGraftAtRatio` / `autoGraftAtRatio` verbatim (the old
+   * behaviour, kept for a differential test). `dynamic` derives them from the
+   * window and the estimated cost of the handoff itself — see
+   * `calculateSafeWatermark`. Migrating at 90% of a window that a graft needs 12%
+   * of is not "late", it is impossible.
+   */
+  watermarkMode?: 'fixed' | 'dynamic'
+  /** v0.18: measured turns used to predict growth. Default 6. */
+  growthSampleTurns?: number
+  /** v0.18: how many turns of growth headroom `dynamic` reserves. Default 2. */
+  growthReserveTurns?: number
+  /**
    * v0.14: where `dsh-memory` keeps its store, read-only, for the debug panel.
    *
    * The two plugins never import each other; the panel simply reads the same
@@ -531,6 +556,11 @@ export function normalizeConfig(config: GraftConfig | undefined): Required<Graft
     // v0.14 GUARD: on unless explicitly disabled. Like the red line, "off" exists
     // for a differential test, not for tuning.
     commandGuard: input.commandGuard === undefined ? true : input.commandGuard === true,
+    safetyMode:
+      input.safetyMode === 'strict' || input.safetyMode === 'autonomous' ? input.safetyMode : 'balanced',
+    watermarkMode: input.watermarkMode === 'fixed' ? 'fixed' : 'dynamic',
+    growthSampleTurns: asFiniteInteger(input.growthSampleTurns, 6, 'growthSampleTurns'),
+    growthReserveTurns: asFiniteInteger(input.growthReserveTurns, 2, 'growthReserveTurns'),
     memoryDir: typeof input.memoryDir === 'string' && input.memoryDir.trim().length > 0 ? input.memoryDir.trim() : '',
     skillsDir: typeof input.skillsDir === 'string' && input.skillsDir.trim().length > 0 ? input.skillsDir.trim() : '',
     contextWindowTokens: asFiniteInteger(input.contextWindowTokens, 0, 'contextWindowTokens'),
@@ -9042,6 +9072,110 @@ export interface CommandVerdict {
 }
 
 /**
+ * v0.18: the RISK CLASS the scanner reports, separated from the DECISION the
+ * policy makes about it.
+ *
+ * The audit's point was that a string matcher was doing two jobs at once: deciding
+ * what a command IS, and deciding whether to block it. The first is evidence (and
+ * regexes are fine for it); the second is policy, and policy belongs in one table
+ * an operator can read and change. Splitting them is also what makes the modes
+ * testable: `strict` and `autonomous` differ in the decision table only.
+ */
+export type CommandRisk = 'safe' | 'unknown' | 'destructive'
+
+export interface CommandAssessment {
+  risk: CommandRisk
+  code?: 'GLOBAL_SEARCH' | 'DESTRUCTIVE_COMMAND'
+  reason?: string
+}
+
+export type SafetyMode = 'strict' | 'balanced' | 'autonomous'
+export type PolicyDecision = 'allow' | 'ask' | 'deny'
+
+/**
+ * The decision table, in one place.
+ *
+ * - `destructive` is denied in strict and balanced. In `autonomous` it becomes an
+ *   ASK rather than an allow: a mode may lower the ceremony, but no mode silently
+ *   executes an unbounded delete.
+ * - `unknown` (a mutating verb we cannot prove is confined) is denied unless the
+ *   operator chose `autonomous`. "Cannot prove it is fine" is not "fine".
+ * - `safe` is allowed everywhere: a policy that blocks ordinary work is a policy
+ *   that gets switched to `autonomous` and then protects nothing.
+ */
+export function policyDecision(risk: CommandRisk, mode: SafetyMode): PolicyDecision {
+  if (risk === 'safe') return 'allow'
+  if (risk === 'destructive') return mode === 'autonomous' ? 'ask' : 'deny'
+  return mode === 'autonomous' ? 'allow' : 'deny'
+}
+
+/**
+ * v0.18: classify a command by risk, without deciding what to do about it.
+ *
+ * Deliberately NOT a richer taxonomy: every extra class is a class someone must
+ * keep calibrated, and the two that matter operationally are "provably confined"
+ * and "provably unbounded". Everything else is `unknown`, and `unknown` fails
+ * closed outside `autonomous`.
+ */
+export function classifyAgentCommand(command: string, workspace = ''): CommandAssessment {
+  const raw = typeof command === 'string' ? command : ''
+  if (raw.trim().length === 0) return { risk: 'safe' }
+  const text = expandKnownRoots(raw)
+
+  if (DESTRUCTIVE_VERB.test(text)) {
+    const escaping = escapesWorkspace(text)
+    const recursive = RECURSIVE_FLAG.test(text)
+    const workspaceKnown = workspace.trim().length > 0
+    const targets = pathTokensOf(text)
+    const outsideWorkspace =
+      workspaceKnown && targets.length > 0 && targets.every((target) => !isInsideWorkspace(target, workspace))
+    if (escaping || (recursive && outsideWorkspace)) {
+      return {
+        risk: 'destructive',
+        code: 'DESTRUCTIVE_COMMAND',
+        reason:
+          'DESTRUCTIVE_COMMAND：该命令是递归/强制的破坏性删除，且目标落在工作区之外或指向系统根目录。' +
+          `当前工作区：${workspaceKnown ? workspace : '(未知)'}。` +
+          '如果确实需要清理，请把目标限制在工作区内并给出确切路径（例如相对路径 .\\build），或让用户确认后手动执行。',
+      }
+    }
+    // A destructive verb we cannot place: `rm -rf` with a relative bare name is
+    // ordinary, `Remove-Item -Recurse <unknown absolute>` is not provable either way.
+    if (recursive && !workspaceKnown) {
+      return {
+        risk: 'unknown',
+        code: 'DESTRUCTIVE_COMMAND',
+        reason: 'DESTRUCTIVE_COMMAND：无法确认目标是否在工作区内（工作目录未知），请给出确切路径或确认后执行。',
+      }
+    }
+    return { risk: 'safe' }
+  }
+
+  if (SEARCH_VERB.test(text) && escapesWorkspace(text)) {
+    return {
+      risk: 'destructive',
+      code: 'GLOBAL_SEARCH',
+      reason:
+        'GLOBAL_SEARCH：禁止针对盘符根目录 / AppData / 用户目录 / 全局根（如 rg / 、Get-ChildItem -Recurse）的搜索。' +
+        `当前工作区：${workspace.trim().length > 0 ? workspace : '(未知)'}。` +
+        '找不到文件时请只在当前目录用 ls / dir 查找，或直接询问用户；不要换写法重试、不要向外层目录扩散。',
+    }
+  }
+  return { risk: 'safe' }
+}
+
+/**
+ * @deprecated v0.18: kept because callers and tests name it, and because `deny`
+ * remains its only verdict. New code asks `classifyAgentCommand` and lets the
+ * configured `safetyMode` decide.
+ */
+export function scanAgentCommand(command: string, workspace = ''): CommandVerdict | undefined {
+  const assessment = classifyAgentCommand(command, workspace)
+  if (assessment.risk !== 'destructive' || assessment.reason === undefined) return undefined
+  return { decision: 'deny', code: assessment.code ?? 'DESTRUCTIVE_COMMAND', reason: assessment.reason }
+}
+
+/**
  * v0.14 D1/D6: the command scanner, the enforcement point of both the workspace
  * red line and the destructive-command rule.
  *
@@ -9051,47 +9185,6 @@ export interface CommandVerdict {
  * UNBOUNDED DELETE (a destructive verb combined with recursion, aimed at a root
  * or at something that is not provably inside the session's workspace).
  */
-export function scanAgentCommand(command: string, workspace = ''): CommandVerdict | undefined {
-  const raw = typeof command === 'string' ? command : ''
-  if (raw.trim().length === 0) return undefined
-  const text = expandKnownRoots(raw)
-
-  // --- D6: destructive, unbounded, or escaping -------------------------------
-  if (DESTRUCTIVE_VERB.test(text)) {
-    const escaping = escapesWorkspace(text)
-    const recursive = RECURSIVE_FLAG.test(text)
-    const workspaceKnown = workspace.trim().length > 0
-    const targets = pathTokensOf(text)
-    const outsideWorkspace = workspaceKnown && targets.length > 0 && targets.every((target) => !isInsideWorkspace(target, workspace))
-    // No target at all is NOT automatically an escape: `rm -rf node_modules` is a
-    // relative delete. An unbounded one always names a root, and that is the
-    // `escaping` branch.
-    if (escaping || (recursive && outsideWorkspace)) {
-      return {
-        decision: 'deny',
-        code: 'DESTRUCTIVE_COMMAND',
-        reason:
-          'DESTRUCTIVE_COMMAND：该命令是递归/强制的破坏性删除，且目标落在工作区之外或指向系统根目录，已被本地护栏拒绝执行。' +
-          `当前工作区：${workspaceKnown ? workspace : '(未知)'}。` +
-          '如果确实需要清理，请把目标限制在工作区内并给出确切路径（例如 Remove-Item -Recurse .\\build），或让用户确认后手动执行。',
-      }
-    }
-  }
-
-  // --- D1: global search -----------------------------------------------------
-  if (SEARCH_VERB.test(text) && escapesWorkspace(text)) {
-    return {
-      decision: 'deny',
-      code: 'GLOBAL_SEARCH',
-      reason:
-        'GLOBAL_SEARCH：禁止针对盘符根目录 / AppData / 用户目录 / 全局根（如 rg / 、Get-ChildItem C:\\ -Recurse）的搜索，已被本地护栏拒绝执行。' +
-        `当前工作区：${workspace.trim().length > 0 ? workspace : '(未知)'}。` +
-        '找不到文件时请只在当前目录用 ls / dir 查找，或直接询问用户；不要换写法重试、不要向外层目录扩散。',
-    }
-  }
-  return undefined
-}
-
 /**
  * v0.14 D5: process-level lock reclamation.
  *
