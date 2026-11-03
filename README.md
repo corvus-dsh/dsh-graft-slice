@@ -1,5 +1,7 @@
 # dsh-graft-slice
 
+> 兄弟项目：[dsh-memory](https://github.com/corvus-dsh/dsh-memory) —— 能力记忆（SKILL.md / 负知识），与本插件只通过台账文件耦合。
+
 **DSH 日志切片与最小注入插件。** 在源会话最后一个 `turn/end` 处切取高保真磁带，创建一个零继承、可冷恢复的交接会话；不 fork，不引入 SQLite，不单独注入 `tool/result`。
 
 > 当前版本 **0.8.1（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
@@ -251,7 +253,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 268 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯 |
+| `test/*.test.mjs` | 273 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯 |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -857,7 +859,9 @@ boundary { boundarySeq: 7504, lastTurn: 91, turnCount: 92, droppedOpenTurns: 1 }
 tape turns 74, last tape turn 91, pointers 637
 ```
 
-语义代价：**当前这一轮对话不会被带进 target**。这是正确取舍——切片需要已闭合的稳定边界，而正在进行的 turn 既未完成、也仍在增长。
+语义代价：**当前这一轮不进入 target 的「骨架」**。这是正确取舍——切片需要已闭合的稳定边界，而正在进行的 turn 既未完成、也仍在增长。
+
+**v7.0 B1 / v7.4 P0-3b 更新**：开放轮的内容不再丢弃。骨架仍切在最后一个 `turn/end`，但开放轮里的用户指令、助手正文和已完成的工具结果会以 `open-turn-carryover` 块注入在磁带最前面（工具结果只带指针，用 `graft_read_result` 回读）。v7.4 修复了「快照在 boundary 处预截断、导致携带块永远是空尾巴」的事故；v7.4c 又补上了只有用户消息、模型还没回答的开放轮——这种形状此前会被 `buildInjectionPlan()` 整块丢掉。回归测试：`test/v74b-open-turn-carryover.test.mjs`、`test/v74-breakpoint-priority.test.mjs`。
 
 ## 工具
 
@@ -913,7 +917,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 268 个测试
+# 2) 273 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）

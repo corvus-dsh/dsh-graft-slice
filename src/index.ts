@@ -2033,6 +2033,11 @@ export function carryoverAssemblyNote(carryover: { assistantText: string }): str
     .trim()
     .split(/\n{2,}/u)
     .filter((paragraph) => paragraph.trim().length > 0)
+  if (paragraphs.length === 0) {
+    // v7.4c: the open turn may hold only the user's instruction (watermark hit
+    // before the model answered). Do not claim there is assistant prose.
+    return '（断点块：这一轮尚未结束，源会话还没有产出助手正文）'
+  }
   if (paragraphs.length < 2) {
     return '（断点块：这一轮尚未结束，正文取自断点前最后一步）'
   }
@@ -3448,7 +3453,20 @@ export function buildInjectionPlan(
     options?.includeOpenTurn === false
       ? undefined
       : extractOpenTurnCarryover(events, boundary.boundarySeq, typeof log.session?.id === 'string' ? log.session.id : undefined)
-  if (openTurnCarryover !== undefined && (openTurnCarryover.pointers.length > 0 || openTurnCarryover.assistantText.length > 0)) {
+  // v7.4c: `userTexts` counts as content on its own.
+  //
+  // The watermark can fire immediately after the user sends a decision and
+  // before the model answers: the open turn then holds a `user/message` and
+  // nothing else. The extractor returned that instruction, but this guard only
+  // looked at pointers and assistant text, so the whole carryover chunk was
+  // discarded. The target then read the PREVIOUS round as "the task" — the
+  // exact failure the carryover exists to prevent.
+  if (
+    openTurnCarryover !== undefined &&
+    (openTurnCarryover.userTexts.length > 0 ||
+      openTurnCarryover.pointers.length > 0 ||
+      openTurnCarryover.assistantText.length > 0)
+  ) {
     const lines: string[] = []
     if (openTurnCarryover.userTexts.length > 0) {
       for (const userText of openTurnCarryover.userTexts) {
@@ -5782,7 +5800,7 @@ export async function commitPreparedSlice(
   // legitimately appear several times, so a `Map<kind, text>` keeps only the last
   // one and reports every earlier occurrence as changed — a false mismatch that
   // refused every commit with "differs in recent-turn, recent-turn, recent-turn".
-  const tailKinds = new Set(['open-turn-carryover', 'pending-state', 'workspace-files', 'task-status', 'open-work'])
+  const tailKinds = new Set(['open-turn-carryover', 'pending-state', 'workspace-files', 'task-status', 'open-work', 'phase-roadmap'])
   const before = Array.isArray(entry.chunks) ? entry.chunks : []
   const after = Array.isArray(rebuilt?.chunks) ? rebuilt.chunks : []
   // v7.4b: compare the STABLE chunks against each other, ignoring tail chunks on
