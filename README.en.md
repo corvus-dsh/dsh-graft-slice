@@ -54,6 +54,16 @@ per turn. Every target's pending state now ends with
 so a grafted session continues instead of waiting for the user; turning `modelDrivenGraft` off removes
 both the hint and that bootstrap line.
 
+## v0.15.0: version alignment, and the joint defence with memory
+
+Both plugins now ship as **v0.15.0** (`package.json`, `manifest.json` and the READMEs agree). The number
+covers two releases made together: the seven guard rails plus `graft_debug_status` on this side (see
+v0.14.0 below), and bi-temporal memory on the `dsh-memory` side — `valid_at` / `invalid_at` /
+`superseded_by`, supersede adjudication with a mutual link and an audit ledger, and provenance tiers
+(`human` / `tool` / `inferred`) where anything the agent concluded carries `[来源：工具推断，请核实]`
+in the hint. `graft` decides where the model is and what it may do; `memory` decides which conclusions
+may enter the session and when they stop counting.
+
 ## v0.14.0: seven defences and a debug panel
 
 v0.13 added two guard rails as *requests*; v0.14 enforces them at the **tool layer** and

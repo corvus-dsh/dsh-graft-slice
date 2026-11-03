@@ -68,6 +68,42 @@ node scripts/verify-bundle.mjs   # 27 项：bundle 声明 / files 白名单 / ES
 
 `cordis.patch.yml` 用**包名**引用（`name: dsh-graft-slice`），不写相对路径——相对路径只在本机成立。
 
+## 已验证能力（v0.15.0 实战验收，2026-11-03）
+
+本节只记录**真实跑过**的结果；没跑到的部分如实标注。
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| 全量测试 | graft **321/321**、memory **138/138** | `node --test test/*.test.mjs`（两仓库） |
+| 文档/打包一致性 | `check-docs` 27 项一致、`verify-bundle` 27/27 | 同上 |
+| 幽灵条目清理 | projcache **574 → 10**（幽灵 564 → 0）、`retired` **5 → 0**、`targets` **8 → 0** | `scripts/prune-ghosts.mjs`（隔离到 `_quarantine-ghost-<ts>/`，含 `MANIFEST.json` + `restore.ps1`，**未删除任何文件**） |
+| 调试面板 | 真机注册表可查到 `graft_debug_status`；CLI 输出与取证报告逐项吻合 | `cordis_inspect_query Tool.listTools`、`scripts/debug-status.mjs` |
+| 命令护栏（D1/D6） | 在我自己的会话上**实战触发**：一条 `Get-ChildItem` + `$env:USERPROFILE` 的搜索被拒，理由与替代方案一并返回 | 会话内被拒记录；`test/v81-guardrails.test.mjs` |
+| 双时态失效 | 一条 `invalid_at` 已过期的旧规则在真实记忆库里**从未被召回**（`blockedInvalid` 计数确认） | 见 dsh-memory README 的验收段 |
+| 取代裁决 | 真实记忆库上执行 supersede：旧技能写入 `invalid_at` + `superseded_by` + 正文「已被取代」，新技能写入 `supersedes`，双边互链，`.memory-audit.jsonl` 记账 | 同上 |
+| 人工否决权 | 用 `tool` 来源技能取代 `human` 来源规则 → `refused:human-loser-protected`，**旧记录零改动**，审计留痕 | 同上 |
+| 来源标记 | 提示中真实出现 `[来源：工具推断，请核实]` | 同上 |
+| 水位面板 | 对真实闭合会话算出 1.14%（11,948 / 1,048,576，`source=usage`），并给出距 0.70 / 0.75 的 token 差 | `debug-status.mjs --session <id>` |
+| 主动转生 @70% | ⚠️ **未在真机上触发**：本会话上下文远低于 70%，无法在不伪造水位的前提下让它自然越线。触发逻辑由 `test/v76-*`、`test/v81-guardrails.test.mjs` 覆盖，`graft_prepare → graft_commit` 两阶段路径可用 `graft_prepare` 现场验证 | 见下 |
+
+关于最后一行：`graft_debug_status` 显示的当前水位是 `below-warn-line`，要真正观察“模型自己收尾并切走”，
+需要在长任务里自然跑到 70%；不伪造水位是本项目的一贯纪律（见 `test/v7*.test.mjs` 对 `readTokenWatermark`
+来源标注的断言）。
+
+## v0.15.0：版本对齐（v0.15.0）+ 与记忆侧的联合防线
+
+`dsh-graft-slice` 与 `dsh-memory` 统一到 **v0.15.0**（`package.json` / `manifest.json` / README 三处对齐），
+一个版本号覆盖两件同时发布的事：
+
+- **graft 侧**：七道防线（D1 封杀全局搜索 / D2 防死循环切片 / D5 进程级锁回收 / D6 危险命令拦截，
+  以及 memory 侧承载的 D3 工作区硬隔离 / D4 注入前防污染 / D7 一次性约束过滤）+ `graft_debug_status` 调试面板。
+  详见下面 v0.14.0 与 v0.13.0 两节。
+- **memory 侧**：双时态记忆（`valid_at` / `invalid_at` / `superseded_by`）、取代裁决（LLM 判定 → 互链 → 审计
+  `.memory-audit.jsonl`，且 `human` 来源不可被推断失效）、来源分级（`human` / `tool` / `inferred`，
+  非 human 的提示带 `[来源：工具推断，请核实]`）。
+
+两侧合起来才构成完整闭环：**graft 决定“模型在哪、能做什么”，memory 决定“哪些结论能进这个会话、什么时候不再算数”。**
+
 ## v0.14.0：七道防线 + 调试面板
 
 v0.13 的两道护栏是**提醒**；v0.14 把它们落到**工具层**，并补上“连环切片”“死锁”“注入污染”三类

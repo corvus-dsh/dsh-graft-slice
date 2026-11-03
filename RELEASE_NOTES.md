@@ -1,3 +1,49 @@
+# dsh-graft-slice v0.15.0 — 七道防线 + 跨仓库版本对齐（v0.15.0 军规）
+
+**发布日期**：2026-11-03　**状态**：预发布（v0.12.0 → v0.15.0）　**测试**：321/321（+25，含 v0.13 两项）
+
+> 版本号说明：本次把 `dsh-graft-slice` 与 `dsh-memory` 统一到 **v0.15.0**（`package.json` / `manifest.json` /
+> README 三处对齐）。graft 侧承载「七道防线 + 调试面板」，memory 侧承载「双时态记忆 + 取代裁决 + 来源分级」。
+
+---
+
+## 七道防线（v0.13 两项 + v0.14 五项）
+
+| # | 防线 | 落点 | 行为 |
+|---|---|---|---|
+| D1 | 封杀全局搜索 | `tools.guard` + system-prompt section + pre-step 注入 | 盘符根 / AppData / 用户目录的搜索在 dispatch 前被拒 |
+| D2 | 防死循环切片 | `isProtectedGraftTarget` 无条件生效 + nudge 抑制 + `graft_generation` | 目标前 2 轮任何自动路径都切不动，含 75% 兜底 |
+| D3 | 记忆工作区硬隔离 | memory 侧（写入记 `workspace`，读取端池级门禁） | 跨工作区/无 provenance 一律不注入 |
+| D4 | 记忆防污染 | memory 侧 `threat.ts` 注入前重扫 | 注入型文本直接丢弃，含未渲染正文 |
+| D5 | 进程级锁清理 | `apply()` 启动 `scanAndReclaimLocks()` | 按 owner PID 判活：死锁回收并审计，活持有者不动 |
+| D6 | 危险命令拦截 | 与 D1 同一 scanner | 逃出工作区的递归删除被拒；工作区内照常 |
+| D7 | 一次性约束过滤 | `extractConstraints` + LLM 提示 | “立刻删除某文件”这类只安全一次的步骤不进 HARD CONSTRAINTS |
+
+### 本次修掉的两个真漏洞
+
+1. **D2 的守卫一直存在，却恰好在无人值守那条路上被跳过**：`graftTargetGraceTurns` 嵌在
+   `ignoreTransferGuard !== true` 里，而两条自动路径（75% 兜底、确认模式）都传了 `ignoreTransferGuard: true`。
+   绕开“已退休/已转移”不等于绕开“这是刚出生的目标”，两者现已分离（仅 `forceSlice` 可绕过，自动路径都不传）。
+2. **D4 的扫描会被渲染器的截断击败**：`clipTitle` 把标题截到 30 字符，`Ignore all previous instructions`
+   变成 `Ignore all previous instructio…`，模式不再匹配。现在同时扫**未截断的源字段**。
+
+## 调试面板 `graft_debug_status`（+ CLI）
+
+- 工具：水位（token / 窗口 / 百分比 / 数据来源 / 距 70% 与 75% 还差多少）、锁与事务（`.lock` 持有者 pid 与存活、
+  `.txn` 未完成、retired/transferred/graft target 计数）、记忆库（技能/负知识/事实/经验/队列 + 带 `workspace`
+  时的同区/跨区/无 provenance 分类）。
+- CLI：`node scripts/debug-status.mjs --data <dir> --session <id> --workspace <path>`，锁扫描为 `dryRun`，只读。
+- 水位只认真实 provider usage；拿不到就**如实 unavailable**，不编一个与宿主 meter 不一致的数字。
+
+## 验证
+
+321/321（新增 25 条：`test/v80-guard.test.mjs` 6 条、`test/v81-guardrails.test.mjs` 19 条）、
+`check-docs` 27 项一致、`verify-bundle` 27/27。
+
+---
+
+# 以下为 v0.12.0 内容
+
 # dsh-graft-slice v0.12.0 — 主动转生闭环：预警被无视就升级，强切要留痕
 
 **发布日期**：2026-11-03　**状态**：预发布（v0.11.0 → v0.12.0）　**测试**：296/296（+4）
