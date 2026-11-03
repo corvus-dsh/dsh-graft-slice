@@ -125,28 +125,57 @@ test('v0.19: slimScene keeps the pen position and drops the stack trace', () => 
   assert.deepEqual(slim, { file: 'src/auth.ts', action: 'write' })
 })
 
-test('v0.19: the card states the result, the next action and the stop point', () => {
+test('v0.20: the card is a four-column board, and every column is labelled', () => {
   const card = renderInstructionCard({
     semantic: extractSemanticState([...pair('pwsh', { command: 'git commit -m x' }, '[main e8da8f6] done')]),
     body: '我接下来需要按上面「这个会话的任务」继续推进，并验证结果。',
+    request: '把两个插件升级到 v0.20 并跑通测试',
+    inProgress: '正在改 dsh-memory 的任务对齐过滤',
+    pending: ['提交两个仓库', '推送并核对远端 head'],
     stopPoint: { turn: 12, boundarySeq: 340 },
     sourceSessionId: 'session-source',
     pointerCount: 88,
   })
-  assert.match(card, /^## 交接指令卡/)
-  assert.match(card, /【最终结果】git commit e8da8f6 成功（seq=\d+）/u)
-  assert.match(card, /【停泊点】Turn 12 已完成 · 边界 seq=340 · 可回读指针 88 处 · sourceSessionId=session-source/u)
-  assert.ok(card.length <= INSTRUCTION_CARD_MAX_CHARS)
+  assert.match(card, /^## 交接任务看板/u)
+  // The four columns, in the order a worker asks them.
+  const order = ['原始用户要求', '✅ 已完成', '🔄 进行中', '⏭️ 待开始'].map((label) => card.indexOf(label))
+  assert.ok(order.every((at) => at >= 0), `missing a column: ${JSON.stringify(order)}`)
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'the columns are in reading order')
+
+  assert.match(card, /\*\*原始用户要求\*\*：把两个插件升级到 v0\.20/u)
+  assert.match(card, /✅ 已完成\*\*\n- git commit e8da8f6 成功（seq=\d+）/u)
+  assert.match(card, /🔄 进行中\*\*\n- 正在改 dsh-memory/u)
+  assert.match(card, /⏭️ 待开始\*\*\n- 提交两个仓库\n- 推送并核对远端 head/u)
+  // The board tells the reader to ignore the old log, and says which column to run.
+  assert.match(card, /旧会话的历史执行日志和临时错误无需理会/u)
+  assert.match(card, /请直接执行上面「⏭️ 待开始」里的待办项/u)
+  assert.ok(card.length <= INSTRUCTION_CARD_MAX_CHARS, `card was ${card.length} chars`)
 })
 
-test('v0.19: an honest card says when there was no verifiable ending', () => {
+test('v0.20: a board with no written todo list still states a real next action', () => {
+  const card = renderInstructionCard({
+    semantic: extractSemanticState([]),
+    body: '我接下来需要把 v0.20 的看板写进 README。',
+    stopPoint: {},
+    pointerCount: 0,
+  })
+  // The prose's own next-action line MOVES into the ⏭️ column rather than being
+  // dropped: a board whose only plan is "继续推进" is less informative than v0.19.
+  assert.match(card, /⏭️ 待开始\*\*\n- 把 v0\.20 的看板写进 README/u)
+  assert.doesNotMatch(card, /^我接下来需要/mu, 'the sentence is a column entry now, not a stray line')
+})
+
+test('v0.19/v0.20: an honest board says when there was no verifiable ending', () => {
   const card = renderInstructionCard({
     semantic: extractSemanticState([]),
     body: '',
     stopPoint: {},
     pointerCount: 0,
   })
-  assert.match(card, /没有留下可验证的结尾动作/u)
+  assert.match(card, /尚无已经验证完成的收尾动作/u)
+  // An EMPTY column is stated, not omitted: a missing column reads as "unknown",
+  // an explicit "none" reads as "nothing has landed yet". Different instructions.
+  assert.match(card, /🔄 进行中\*\*\n- 无/u)
 })
 
 test('v0.19 e2e: a noisy open turn produces a clean card, not the old house', () => {
@@ -217,18 +246,24 @@ test('v0.19 e2e: a noisy open turn produces a clean card, not the old house', ()
   const carry = plan.chunks.find((chunk) => chunk.kind === 'open-turn-carryover')
 
   // 1. the two facts survive
-  assert.match(card, /## 交接指令卡/u)
-  assert.match(card, /【未决报错】pwsh 失败：.*seq=/u)
+  assert.match(card, /## 交接任务看板/u)
+  // v0.20: the blocker is a board line with its seq.
+  assert.match(card, /唯一未决阻塞\*\*：pwsh 失败：.*（原文 seq=/u)
   assert.ok(carry !== undefined, 'the un-executed instruction still travels')
   assert.match(carry.text, /把红色测试修掉，然后提交。/u)
+  // v0.20: the open turn's instruction is ALSO the 🔄 column — one extractor, two
+  // renderings, so they cannot disagree about what was in flight.
+  assert.match(card, /🔄 进行中\*\*\n- 把红色测试修掉，然后提交。/u)
   // 2. the noise is gone
   assert.doesNotMatch(card, /y{200}/u, 'the error body is not inlined')
   assert.doesNotMatch(card, /z{200}/u, 'the narration is not inlined')
   assert.doesNotMatch(String(carry?.text), /z{200}/u)
   assert.ok(card.length < 1200, `card was ${card.length} chars`)
   // 3. the omission is declared, not silent
-  assert.match(card, /【已按语义瘦身】/u)
+  assert.match(card, /已按语义瘦身/u)
   assert.match(String(carry?.text), /已按语义瘦身/u)
+  // 4. and the board states the rule the ignition prompt also states
+  assert.match(card, /临时错误无需理会/u)
 })
 
 test('v0.19: the ignition prompt is never mined as a user constraint', () => {

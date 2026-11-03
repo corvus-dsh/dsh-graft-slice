@@ -107,17 +107,18 @@ test('v0.19: the last failure is NOT inlined — one line with its seq, no stack
   const plan = buildInjectionPlan(log, { adaptiveDepth: false, recentTurns: 0 })
   const pending = plan.chunks.find((chunk) => chunk.kind === 'pending-state')
   // One line, actionable, traceable — and the old house's stack trace stays out.
-  assert.match(pending.text, /【未决报错】pwsh 失败：.*（原文 seq=/u)
+  // v0.20: it is a board line now.
+  assert.match(pending.text, /唯一未决阻塞\*\*：pwsh 失败：.*（原文 seq=/u)
   assert.match(pending.text, /Cannot find module 'left-pad'/)
   assert.doesNotMatch(pending.text, /Require stack/u, "the stack trace is history, not a handoff fact")
   assert.doesNotMatch(pending.text, /\[已截断\]/u)
   assert.doesNotMatch(pending.text, /最后一条报错原文/u)
   assert.ok(
-    pending.text.length < 1200,
-    `the card must stay slim; got ${pending.text.length} chars`,
+    pending.text.length < 1400,
+    `the board must stay slim; got ${pending.text.length} chars`,
   )
   // The drop is DECLARED, not silent.
-  assert.match(pending.text, /【已按语义瘦身】/u)
+  assert.match(pending.text, /已按语义瘦身/u)
 })
 
 test('v7.2: a short failure is inlined whole, without a truncation mark', () => {

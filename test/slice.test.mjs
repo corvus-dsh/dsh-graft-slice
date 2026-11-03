@@ -100,7 +100,10 @@ test('phase 2: keeps an adaptive recent window, indexes older turns, embeds poin
   assert.ok(plan.chunks[0].text.length < 400, `index stays tiny, got ${plan.chunks[0].text.length}`)
   assert.equal(plan.chunks.at(-1).kind, 'pending-state')
   // v6.2：优先用 todo；无 todo 时回退到经过噪声过滤的散文。
-  assert.match(plan.chunks.at(-1).text, /我接下来需要/)
+  // v0.20: the card is a task board, so the next action lives in the ⏭️ column
+  // rather than in a "我接下来需要…" sentence.
+  assert.match(plan.chunks.at(-1).text, /⏭️ 待开始/)
+  assert.match(plan.chunks.at(-1).text, /继续推进，并验证结果/u)
   assert.equal(plan.chunks.at(-1).text.includes('当前假设：'), false)
   assert.equal(plan.chunks.at(-1).text.includes('已排除：'), false)
   assert.equal(plan.chunks.at(-1).text.includes('下一步：'), false)

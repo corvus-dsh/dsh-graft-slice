@@ -85,9 +85,14 @@ test('v7.0: pending state describes the last concrete step, not just the goal', 
   const plan = buildInjectionPlan(log, { adaptiveDepth: false, recentTurns: 0 })
   const pending = plan.chunks.find((chunk) => chunk.kind === 'pending-state')
   assert.ok(pending)
-  // The scene leads: with no replayed turn, this is the only concrete fact.
+  // v0.20: the scene leads the BODY, which the board carries as a note (the file and
+  // action are now the 🔄/note material). The property under test is unchanged: with
+  // no replayed turn, the last step must still reach the reader.
   assert.match(pending.text, /最后一步我(在)?(写|改) src\/auth\.ts/)
-  assert.match(pending.text, /pwsh/)
+  // v0.20: the error BODY is no longer inlined — the unresolved failure is one line
+  // with its seq, so `AssertionError` survives only as that line's text, and `pwsh`
+  // as the tool name on it.
+  assert.match(pending.text, /唯一未决阻塞.*pwsh/u)
   assert.match(pending.text, /AssertionError/)
 })
 
@@ -100,8 +105,12 @@ test('v7.0: pending state points at the goal instead of quoting it', () => {
   const pending = plan.chunks.find((chunk) => chunk.kind === 'pending-state')
   // The goal is a multi-anchor join since P2; quoting it produced a wall of
   // text that read as damaged prose. The pointer form is what survives.
+  //
+  // v0.20: the board's ⏭️ column carries that pointer, so the assertion moves with
+  // it. The property under test is unchanged: the card POINTS at the goal, it does
+  // not quote it.
   assert.equal(pending.text.includes('继续推进「'), false)
-  assert.match(pending.text, /按上面「这个会话的任务」继续推进/)
+  assert.match(pending.text, /按上面「(?:这个会话的任务|原始用户要求)」继续推进/)
 })
 
 test('v7.3.1: the goal is labelled as the session task, never as the current one', async () => {

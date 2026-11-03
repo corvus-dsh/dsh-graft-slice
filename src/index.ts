@@ -3266,29 +3266,110 @@ const CARD_HEADER = '## 交接指令卡（第一轮只要读这里）'
 /** Total budget for the card. Past this the card is the thing that needs slimming. */
 export const INSTRUCTION_CARD_MAX_CHARS = 1400
 
-export interface InstructionCardInput {
-  semantic: SemanticState
-  /** The next-action prose (already rendered, already slimmed). */
-  body: string
+/**
+ * v0.20: the card is a TASK BOARD, not a paragraph.
+ *
+ * v0.19 distilled the tape correctly but rendered the result as prose: one line of
+ * result, one paragraph of next-action, one line of stop point. A model reading
+ * prose has to DERIVE the board — which of these is done, which is running, which
+ * has not started — and that derivation is exactly where a resumed session drifts
+ * into re-doing finished work.
+ *
+ * A board states the four columns explicitly, in the order a worker asks them:
+ *
+ *   · 原始用户要求  what was asked (the axis everything else is measured against)
+ *   · ✅ 已完成      the verifiable result, with its seq
+ *   · 🔄 进行中      what is actually in flight right now
+ *   · ⏭️ 待开始      the next action, and only that
+ *
+ * `renderInstructionCard` stays as the single renderer; the board is what it
+ * renders. Splitting it into a second function would create two formats that drift.
+ */
+export interface TaskBoardInput {
+  /** The user's original ask, already extracted (goal). */
+  request: string
+  /** The verifiable final result, if any. */
+  outcome?: SemanticOutcome
+  /** What is in flight: the open turn's unfinished state, if any. */
+  inProgress?: string
+  /** The next actions, in order. First one is the immediate next step. */
+  pending: readonly string[]
   stopPoint: { turn?: number; boundarySeq?: number }
   sourceSessionId?: string
   pointerCount: number
+  /** The unresolved blocker, if one exists. */
+  unresolvedError?: { text: string; seq: number; tool: string }
+  discarded: SemanticDiscard
+  /** Pre-rendered extra prose (exclusion notes, artifact reuse, …). */
+  notes?: readonly string[]
 }
 
-export function renderInstructionCard(input: InstructionCardInput): string {
-  const lines: string[] = [CARD_HEADER]
-  const outcome = input.semantic.outcome
+/**
+ * 「进行中」is the column v0.19 did not have.
+ *
+ * A handoff cut mid-turn has work that is neither DONE (no result yet) nor PENDING
+ * (it was already started). Folding it into 待开始 makes the target restart it;
+ * folding it into 已完成 makes the target assume it landed. The open turn's own
+ * instruction is the only honest source, so it becomes this column verbatim.
+ */
+const BOARD_COLUMNS = {
+  request: '原始用户要求',
+  done: '✅ 已完成',
+  doing: '🔄 进行中',
+  todo: '⏭️ 待开始',
+} as const
+
+export function renderTaskBoard(input: TaskBoardInput): string {
+  const lines: string[] = [`## 交接任务看板（第一轮只要读这里）`]
+  const request = input.request.replace(/\s+/gu, ' ').trim()
   lines.push(
-    outcome === undefined
-      ? '【最终结果】源会话没有留下可验证的结尾动作（无提交/测试/落盘证据）。'
-      : `【最终结果】${outcome.text}（seq=${outcome.seq}）`,
+    `**${BOARD_COLUMNS.request}**：${request.length === 0 ? '（未提取到明确要求，见 goal 消息）' : truncateEnd(request, 300).text}`,
   )
-  const unresolved = input.semantic.unresolvedError
-  if (unresolved !== undefined) {
-    // ONE line, with the seq. The body itself stays in the log, one tool call away.
-    lines.push(`【未决报错】${unresolved.tool} 失败：${unresolved.text}（原文 seq=${unresolved.seq}）`)
+
+  // ✅ 已完成 — the verifiable result, WITH its seq. An empty board is stated as
+  // empty rather than omitted: a missing column reads as "unknown", an explicit
+  // "none" reads as "nothing has landed yet", and those are different instructions.
+  lines.push('', `**${BOARD_COLUMNS.done}**`)
+  if (input.outcome === undefined) {
+    lines.push('- 尚无已经验证完成的收尾动作（无提交 / 测试通过 / 落盘证据）。')
+  } else {
+    lines.push(`- ${input.outcome.text}（seq=${input.outcome.seq}）`)
   }
-  if (input.body.trim().length > 0) lines.push('', input.body.trim())
+
+  // 🔄 进行中 — the open turn, stated as work in flight.
+  lines.push('', `**${BOARD_COLUMNS.doing}**`)
+  const doing = input.inProgress === undefined ? '' : input.inProgress.replace(/\s+/gu, ' ').trim()
+  if (doing.length === 0) {
+    lines.push('- 无（断点落在一个已闭合的轮次之间）。')
+  } else {
+    lines.push(`- ${truncateEnd(doing, 300).text}`)
+  }
+
+  // ⏭️ 待开始 — the next action FIRST, rest after. This is the column the ignition
+  // prompt points at, so its first item has to be the real next step.
+  lines.push('', `**${BOARD_COLUMNS.todo}**`)
+  const pending = input.pending.map((item) => item.replace(/\s+/gu, ' ').trim()).filter((item) => item.length > 0)
+  if (pending.length === 0) {
+    lines.push('- 按上面的「原始用户要求」继续推进，并验证结果。')
+  } else {
+    for (const item of pending.slice(0, 4)) lines.push(`- ${truncateEnd(item, 200).text}`)
+    if (pending.length > 4) lines.push(`- 其余 ${pending.length - 4} 项按清单顺序处理。`)
+  }
+
+  if (input.unresolvedError !== undefined) {
+    // ONE line, with the seq. The body stays in the log, one tool call away.
+    lines.push(
+      '',
+      `**⚠️ 唯一未决阻塞**：${input.unresolvedError.tool} 失败：${input.unresolvedError.text}` +
+        `（原文 seq=${input.unresolvedError.seq}；只有后续工作确实卡在它上面时才去读）`,
+    )
+  }
+
+  for (const note of input.notes ?? []) {
+    const trimmed = note.trim()
+    if (trimmed.length > 0) lines.push('', trimmed)
+  }
+
   const stop: string[] = []
   if (input.stopPoint.turn !== undefined) stop.push(`Turn ${input.stopPoint.turn} 已完成`)
   if (input.stopPoint.boundarySeq !== undefined && input.stopPoint.boundarySeq > 0) {
@@ -3298,28 +3379,123 @@ export function renderInstructionCard(input: InstructionCardInput): string {
   if (input.sourceSessionId !== undefined && input.sourceSessionId.length > 0) {
     stop.push(`sourceSessionId=${input.sourceSessionId}`)
   }
-  if (stop.length > 0) lines.push('', `【停泊点】${stop.join(' · ')}`)
+  if (stop.length > 0) lines.push('', `**停泊点**：${stop.join(' · ')}`)
+
+  // v0.20: say WHICH TOOL opens the evidence.
+  //
+  // The board states seq numbers, so it must name the reader for them. v0.19 got
+  // this from the prose body's read-back reminder; the board drops that prose, so
+  // without this line the target is given coordinates and no way to use them.
+  if (input.pointerCount > 0 && input.sourceSessionId !== undefined && input.sourceSessionId.length > 0) {
+    lines.push(
+      `需要原文时用 graft_read_result(sourceSessionId="${input.sourceSessionId}", seq=…)，` +
+        '或用 graft_search_history 先搜后读；不要靠猜。',
+    )
+  }
+
   const drops: string[] = []
-  if (input.semantic.discarded.resolvedErrors > 0) {
-    drops.push(`${input.semantic.discarded.resolvedErrors} 条已解决的报错`)
-  }
-  if (input.semantic.discarded.errorBodies > 0) {
-    // The count is of failures found; only the unresolved one keeps a line.
-    drops.push(`${Math.max(0, input.semantic.discarded.errorBodies - (unresolved === undefined ? 0 : 1))} 段报错正文`)
-  }
-  if (input.semantic.discarded.narrationChars > 0) {
-    drops.push(`${input.semantic.discarded.narrationChars} 字符中间叙述`)
-  }
-  if (input.semantic.discarded.pointerLines > 0) {
-    drops.push(`${input.semantic.discarded.pointerLines} 行过程指针`)
-  }
+  if (input.discarded.resolvedErrors > 0) drops.push(`${input.discarded.resolvedErrors} 条已解决的报错`)
+  // `errorBodies` counts failures whose BODY is no longer inlined — and that
+  // includes the one kept as the blocker, whose body became a single line. So it is
+  // NOT reduced by the kept one: "the stack trace was dropped" and "the failure was
+  // dropped" are different facts, and this line reports the first.
+  if (input.discarded.errorBodies > 0) drops.push(`${input.discarded.errorBodies} 段报错正文（只保留一行摘要）`)
+  if (input.discarded.narrationChars > 0) drops.push(`${input.discarded.narrationChars} 字符中间叙述`)
+  if (input.discarded.pointerLines > 0) drops.push(`${input.discarded.pointerLines} 行过程指针`)
   if (drops.length > 0) {
-    lines.push('', `【已按语义瘦身】丢弃：${drops.join('、')}；需要时按上面的 seq 回读原文。`)
+    lines.push('', `**已按语义瘦身**：丢弃 ${drops.join('、')}；需要时按上面的 seq 回读原文。`)
   }
+  lines.push('', BOARD_TRAILER)
+
   const text = lines.join('\n')
   return text.length <= INSTRUCTION_CARD_MAX_CHARS
     ? text
-    : `${truncateEnd(text, INSTRUCTION_CARD_MAX_CHARS).text}\n…[指令卡已到上限，细节按 seq 回读]`
+    : `${truncateEnd(text, INSTRUCTION_CARD_MAX_CHARS).text}\n…[看板已到上限，细节按 seq 回读]`
+}
+
+/**
+ * v0.20: the board's own closing instruction.
+ *
+ * Deliberately inside the board and not only in the ignition prompt: the ignition
+ * prompt is admitted ONCE, while the board is re-read on every turn (it lives in
+ * the pending state). A rule that only exists in a one-shot message expires with
+ * that message.
+ */
+export const BOARD_TRAILER =
+  '旧会话的历史执行日志和临时错误无需理会——它们只作为回读证据保留。请直接执行上面「⏭️ 待开始」里的待办项。'
+
+export interface InstructionCardInput {
+  semantic: SemanticState
+  /** The next-action prose (already rendered, already slimmed). */
+  body: string
+  stopPoint: { turn?: number; boundarySeq?: number }
+  sourceSessionId?: string
+  pointerCount: number
+  /** v0.20: the user's original ask, for the board's first column. */
+  request?: string
+  /** v0.20: what the open turn already started, for the 进行中 column. */
+  inProgress?: string
+  /** v0.20: further next actions (openTodos), after the prose body. */
+  pending?: readonly string[]
+}
+
+/**
+ * v0.20: the card, rendered as a board.
+ *
+ * The prose body produced by `buildPendingState` is still where the "what stopped
+ * me and what is the exclusion" nuance lives, so it is carried as a note rather
+ * than discarded — but it no longer decides the card's SHAPE. Shape decides
+ * behaviour: four labelled columns survive being skimmed, a paragraph does not.
+ */
+export function renderInstructionCard(input: InstructionCardInput): string {
+  const unresolved = input.semantic.unresolvedError
+  const pending: string[] = []
+  for (const item of input.pending ?? []) {
+    const trimmed = item.replace(/\s+/gu, ' ').trim()
+    if (trimmed.length > 0 && !pending.includes(trimmed)) pending.push(trimmed)
+  }
+  const notes: string[] = []
+  // The prose body used to BE the card. Now the columns carry the next action, the
+  // result and the breakpoint, so most of it is duplication — and a board that
+  // restates itself is longer without being clearer. What does not survive in any
+  // column is the EXCLUSION ("我刚刚排除了 X") and the read-back reminder, so those
+  // lines are lifted out and the rest is dropped.
+  //
+  // v0.20: the body's own "我接下来需要 X" line is the next action when the model
+  // never wrote a todo list, so it MOVES INTO the ⏭️ column instead of being
+  // dropped. Dropping it would leave the board with "继续推进" as its only plan —
+  // strictly less information than v0.19 had.
+  const proseNext: string[] = []
+  for (const line of input.body.split(/\r?\n/u)) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) continue
+    const next = /^我接下来需要\s*(?:继续推进，前提是\s*)?(.+?)。?$/u.exec(trimmed)
+    if (next !== null && next[1].trim().length > 0) {
+      proseNext.push(next[1].trim())
+      continue
+    }
+    // Stated by 停泊点 / the trailer already.
+    if (/^前面提到的那些细节都还留着/u.test(trimmed)) continue
+    if (/^如果有不确定的报错或历史代码/u.test(trimmed)) continue
+    if (/^直接接着刚才的工作继续即可/u.test(trimmed)) continue
+    // Stated by the board's own footer already.
+    if (trimmed.startsWith(BOARD_TRAILER)) continue
+    notes.push(trimmed)
+  }
+  // The written plan wins when it exists; the body's line is the fallback.
+  const boardPending = pending.length > 0 ? pending : proseNext
+  return renderTaskBoard({
+    request: input.request ?? '',
+    ...(input.semantic.outcome === undefined ? {} : { outcome: input.semantic.outcome }),
+    ...(input.inProgress === undefined ? {} : { inProgress: input.inProgress }),
+    pending: boardPending,
+    stopPoint: input.stopPoint,
+    ...(input.sourceSessionId === undefined ? {} : { sourceSessionId: input.sourceSessionId }),
+    pointerCount: input.pointerCount,
+    ...(unresolved === undefined ? {} : { unresolvedError: unresolved }),
+    discarded: input.semantic.discarded,
+    notes,
+  })
 }
 
 // ===========================================================================
@@ -3359,9 +3535,25 @@ export function renderInstructionCard(input: InstructionCardInput): string {
  */
 export const IGNITION_MARKER = '[dsh-graft-slice 点火]'
 
+/**
+ * v0.20: the wake-up says WHICH part of the tape to act on.
+ *
+ * v0.19 woke the target but left it to work out that the replayed history is
+ * context, not assignment. A model handed a tape of a debugging session will often
+ * start by re-reading the last stack trace — the very thing the slimming removed
+ * from the board. So the prompt names the board as the instruction source and the
+ * tape as evidence, and explicitly relieves the target of the old log's temporary
+ * errors.
+ *
+ * Kept in sync with `BOARD_TRAILER` on purpose, but stated in both places: the
+ * ignition prompt is the FIRST thing the target reads, and the board is what it
+ * re-reads every turn. Either one alone leaves a gap.
+ */
 export const DEFAULT_IGNITION_PROMPT =
   `${IGNITION_MARKER} 你刚刚完成了一次物理切片：上一段会话的上下文已经交接给你，` +
-  '交接卡在工作区与历史里。请直接接着任务继续执行，不要复述交接过程，也不要重新调研已经完成的部分。'
+  '交接看板（交接任务看板 / PendingState）在工作区与历史里。' +
+  '旧会话的历史执行日志和临时错误无需理会，它们只作为回读证据保留；' +
+  '请直接执行看板中「⏭️ 待开始」里的待办项，不要复述交接过程，也不要重新调研已经完成的部分。'
 
 export interface IgnitionResult {
   /** The channel was available and a call was made. */
@@ -4056,10 +4248,50 @@ export function buildTape(
   // The scan covers the FULL log, not `sliced`: the newest result and the newest
   // unresolved failure usually live in the OPEN turn, which the boundary excludes
   // from the tape — and those are exactly the two facts the card exists to state.
+  // v0.20: the 进行中 column is the open turn's own unfinished instruction.
+  //
+  // Read here (in buildTape) rather than in buildInjectionPlan because the CARD is
+  // built here; the carryover CHUNK is built later and reuses the same extractor,
+  // so the two cannot disagree about what was in flight.
+  const openTurnForBoard = extractOpenTurnCarryover(events, boundary.boundarySeq, sourceSessionId)
+  const openTurnInstruction =
+    openTurnForBoard === undefined || openTurnForBoard.userTexts.length === 0
+      ? undefined
+      : truncateEnd(
+          openTurnForBoard.userTexts
+            .map((text) => text.replace(/\s+/gu, ' ').trim())
+            .filter((text) => text.length > 0)
+            .join(' / '),
+          300,
+        ).text
   const semantic = extractSemanticState(events)
+  // v0.20: the open turn's narration and pointer lines ARE dropped by the slimming,
+  // so they must be COUNTED here or the board's disclosure line silently reports
+  // less than was actually thrown away. (v0.19 wired these through a variable that a
+  // later edit removed; the counts stayed at zero and the disclosure vanished.)
+  if (openTurnForBoard !== undefined) {
+    if (openTurnForBoard.userTexts.length > 0) {
+      semantic.discarded.narrationChars += openTurnForBoard.assistantText.trim().length
+      semantic.discarded.pointerLines += openTurnForBoard.pointers.length
+    } else if (openTurnForBoard.assistantText.trim().length > 0) {
+      // No new instruction: the whole open turn is history. Nothing was replayed,
+      // so nothing was "dropped" — it was never a handoff fact to begin with.
+    }
+  }
+  // v0.20: the board's 进行中 / 待开始 columns come from different places.
+  //
+  //   进行中 = what the OPEN turn already started (its unfinished user instruction)
+  //   待开始 = the openTodos list, which is the model's own written plan
+  //
+  // Neither is invented: both were already available, they were just flattened into
+  // one prose paragraph where "started but not finished" and "not started yet"
+  // became indistinguishable.
   const instructionCard = renderInstructionCard({
     semantic,
     body: pendingBody,
+    request: goal.goal,
+    ...(openTurnInstruction === undefined ? {} : { inProgress: openTurnInstruction }),
+    pending: openTodos,
     stopPoint: {
       ...(typeof boundary.lastTurn === 'number' ? { turn: boundary.lastTurn } : {}),
       ...(typeof boundary.boundarySeq === 'number' ? { boundarySeq: boundary.boundarySeq } : {}),
