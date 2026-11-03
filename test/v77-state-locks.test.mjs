@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { apply, getTransferredSessions, resetRetiredSessions } from '../index.js'
+import { apply, getTransferredSessions, resetRetiredSessions, readLedgerPayload } from '../index.js'
 import { acquireFileLock } from '../index.js'
 import { dispatchPreStep, makeCtx, makeSourceLog } from './fake-harness.mjs'
 
@@ -52,7 +52,7 @@ function twoSessionsOneDir() {
 }
 
 function readRetired(dir) {
-  return JSON.parse(readFileSync(join(dir, '.retired.json'), 'utf8'))
+  return readLedgerPayload(join(dir, '.retired.json'))
 }
 
 test('v7.7: concurrent retirement writes merge instead of erasing each other', async () => {
@@ -73,7 +73,7 @@ test('v7.7: concurrent retirement writes merge instead of erasing each other', a
     [logA.session.id, logB.session.id].sort(),
     'B\'s write must ADD to the ledger, not replace it',
   )
-  const transfers = JSON.parse(readFileSync(join(dir, '.transferred.json'), 'utf8'))
+  const transfers = readLedgerPayload(join(dir, '.transferred.json'))
   assert.ok(transfers[logA.session.id], 'A\'s transfer survives B\'s write')
   assert.ok(transfers[logB.session.id], 'B\'s transfer is recorded')
   resetRetiredSessions()

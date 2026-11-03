@@ -23,7 +23,7 @@ import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { collectDebugStatus, scanAndReclaimLocks, collectMemoryStoreStatus } from '../index.js'
+import { collectDebugStatus, scanAndReclaimLocks, collectMemoryStoreStatus, readLedger } from '../index.js'
 
 const PLUGIN_DIR = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -105,8 +105,19 @@ async function main() {
   const skillsDir = typeof args.skills === 'string' && args.skills.length > 0 ? args.skills : join(homedir(), '.agents', 'skills')
 
   const locks = scanAndReclaimLocks([state.dir], true)
-  const retired = readJson(join(state.dir, '.retired.json'), [])
-  const transferred = readJson(join(state.dir, '.transferred.json'), {})
+  // v0.18: ledgers carry an epoch envelope; read the PAYLOAD, and report the
+  // epoch so this disk-only view says which format it is looking at.
+  const retiredRead = readLedger(join(state.dir, '.retired.json'))
+  const transferredRead = readLedger(join(state.dir, '.transferred.json'))
+  const retired = Array.isArray(retiredRead.payload) ? retiredRead.payload : []
+  const transferred =
+    transferredRead.payload !== null && typeof transferredRead.payload === 'object' && !Array.isArray(transferredRead.payload)
+      ? transferredRead.payload
+      : {}
+  const ledgerEpochs = {
+    retired: { epoch: retiredRead.epoch, defect: retiredRead.defect ?? null },
+    transferred: { epoch: transferredRead.epoch, defect: transferredRead.defect ?? null },
+  }
   const targets = readJson(join(state.dir, '.graft-targets.json'), {})
   const txns = (() => {
     try {
@@ -138,6 +149,7 @@ async function main() {
     },
     ...(watermark === undefined ? {} : { watermark }),
     locks,
+    ledgerEpochs,
     retired: Array.isArray(retired) ? retired : [],
     transferred: Object.entries(transferred).map(([id, value]) => ({
       id,
@@ -188,6 +200,7 @@ function renderHuman(status, state) {
   const transactions = status.transactions
   lines.push(`txn       : ${transactions.pending.length} unfinished${transactions.pending.length === 0 ? '' : ' -> ' + transactions.pending.map((txn) => `${txn.name}:${txn.state ?? '?'}`).join(', ')}`)
   lines.push(`retired   : ${transactions.retiredCount} session(s)`)
+  lines.push(`ledgers   : retired epoch ${status.ledgerEpochs.retired.epoch}${status.ledgerEpochs.retired.defect === null ? '' : ` (${status.ledgerEpochs.retired.defect})`}, transferred epoch ${status.ledgerEpochs.transferred.epoch}${status.ledgerEpochs.transferred.defect === null ? '' : ` (${status.ledgerEpochs.transferred.defect})`}`)
   lines.push(`targets   : ${transactions.graftTargetsCount} graft target(s)`)
   const memory = status.memory
   if (memory.available === false) {

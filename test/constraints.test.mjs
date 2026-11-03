@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { apply, buildInjectionPlan, extractConstraints } from '../index.js'
+import { apply, buildInjectionPlan, extractConstraints, extractConstraintsDetailed } from '../index.js'
 import { makeCtx, makeSourceLog } from './fake-harness.mjs'
 
 function withConstraints(log) {
@@ -108,7 +108,7 @@ test('v4.3: filters short, long, question-like and non-action sentences', () => 
   assert.equal(constraints.some((item) => item.includes('Write every number')), true)
 })
 
-test('v4.3: caps noisy candidate sets at eight constraints', () => {
+test('v0.18: capacity, not a count, decides how many constraints survive', () => {
   const seeds = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel', 'india', 'juliet', 'kilo', 'lima']
   const events = [
     {
@@ -124,8 +124,18 @@ test('v4.3: caps noisy candidate sets at eight constraints', () => {
       },
     },
   ]
-  const constraints = extractConstraints(events)
-  assert.equal(constraints.length, 8)
+  // v0.18: the old rule kept the best EIGHT and said nothing about the other four.
+  // Now every qualifying rule fits the declared capacity, and the ones that do not
+  // fit are REPORTED — which is what lets `buildInjectionPlan` abort instead of
+  // shipping a shortened list.
+  const selection = extractConstraintsDetailed(events)
+  assert.equal(selection.constraints.length, 12)
+  assert.deepEqual(selection.dropped, [])
+
+  const tight = extractConstraintsDetailed(events, 120)
+  assert.ok(tight.constraints.length < 12, 'a small budget cannot hold all twelve')
+  assert.equal(tight.constraints.length + tight.dropped.length, 12, 'every rule is kept or reported')
+  assert.ok(tight.dropped.every((item) => item.reason === 'budget'))
 })
 
 test('v7.0 A3: older turns become a metadata index, not squeezed prose', () => {

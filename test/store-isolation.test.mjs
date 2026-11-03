@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { apply, getRetiredSessions, resetRetiredSessions } from '../index.js'
+import { apply, getRetiredSessions, resetRetiredSessions, readLedgerPayload } from '../index.js'
 import { makeCtx, makeSourceLog, FakePersistence } from './fake-harness.mjs'
 
 /**
@@ -32,7 +32,8 @@ test('store: profile A retirement does not leak into profile B', async () => {
     .execute({ sourceSessionId: a.sourceLog.session.id, newSessionId: 'session-a-target' }, {})
   assert.equal(existsSync(join(dirA, '.retired.json')), true)
 
-  const retiredInA = JSON.parse(readFileSync(join(dirA, '.retired.json'), 'utf8'))
+  const retiredInA = readLedgerPayload(join(dirA, '.retired.json'))
+  assert.equal(Array.isArray(retiredInA), true)
   assert.equal(retiredInA.includes(a.sourceLog.session.id), true)
 
   resetRetiredSessions()
@@ -51,7 +52,7 @@ test('store: transfers are recorded per profile directory', async () => {
     .execute({ sourceSessionId: a.sourceLog.session.id, newSessionId: 'session-a-tr' }, {})
   alsoAssertTarget(report)
 
-  const transferred = JSON.parse(readFileSync(join(dirA, '.transferred.json'), 'utf8'))
+  const transferred = readLedgerPayload(join(dirA, '.transferred.json'))
   assert.equal(transferred[a.sourceLog.session.id].newSessionId, 'session-a-tr')
   assert.equal(existsSync(join(dirB, '.transferred.json')), false)
 })

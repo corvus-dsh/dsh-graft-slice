@@ -157,6 +157,24 @@ export const inject = ['tools', 'sessions', 'sessionQuery', 'sessionPersistence'
                                                                                 
                              
      
+                                                                        
+    
+                                                                                 
+                                                                                 
+                                                                              
+                                                                               
+     
+                              
+     
+                                                                                 
+    
+                                                                                 
+                                                                                 
+                                                                               
+                                         
+     
+                                
+     
                                                                                
     
                                                                              
@@ -382,6 +400,21 @@ export function isHumanAuthored(source         )          {
                        
                                             
      
+                                                  
+    
+                                                                           
+                                                                               
+                                                                                 
+                                                                   
+     
+                        
+                       
+                      
+                
+                          
+                   
+   
+     
                                                                             
                                                                                  
                                                                               
@@ -562,6 +595,8 @@ export function normalizeConfig(config                         )                
     watermarkMode: input.watermarkMode === 'fixed' ? 'fixed' : 'dynamic',
     growthSampleTurns: asFiniteInteger(input.growthSampleTurns, 6, 'growthSampleTurns'),
     growthReserveTurns: asFiniteInteger(input.growthReserveTurns, 2, 'growthReserveTurns'),
+    growthTokensPerTurn: asFiniteInteger(input.growthTokensPerTurn, DEFAULT_GROWTH_TOKENS_PER_TURN, 'growthTokensPerTurn'),
+    constraintBudgetChars: asFiniteInteger(input.constraintBudgetChars, CONSTRAINT_BUDGET_CHARS, 'constraintBudgetChars'),
     memoryDir: typeof input.memoryDir === 'string' && input.memoryDir.trim().length > 0 ? input.memoryDir.trim() : '',
     skillsDir: typeof input.skillsDir === 'string' && input.skillsDir.trim().length > 0 ? input.skillsDir.trim() : '',
     contextWindowTokens: asFiniteInteger(input.contextWindowTokens, 0, 'contextWindowTokens'),
@@ -862,8 +897,98 @@ function isOneOffAction(text        )          {
   return CONCRETE_ARTIFACT.test(text)
 }
 
-export function extractConstraints(events                             )           {
-  const candidates                                                        = []
+/**
+ * v0.18 module 3: HARD CONSTRAINTS are preserved COMPLETELY, or the handoff aborts.
+ *
+ * THE DEFECT THIS REPLACES
+ *
+ * The old selection was `candidates.slice(0, 8)` plus an 8000-character running
+ * total with a bare `break`. Both are silent: a twelfth standing rule, or a ninth
+ * one, simply was not in the goal message the target read, and nothing anywhere
+ * said so. The failure mode is the one the block exists to prevent — the model
+ * summarises "the main constraints" and drops exactly the rule it is about to
+ * violate — except the plugin was doing it first, at extraction time.
+ *
+ * The replacement states a CAPACITY instead of a count and never truncates a
+ * rule's text: everything that qualifies as a standing rule is ranked, packed in
+ * score order, and whatever does not fit becomes an ABORT (`GRAFT_ABORTED`), not a
+ * shorter list. Capacity is a config knob, so the answer to "we have more rules
+ * than that" is a number an operator can raise, deliberately.
+ */
+export const CONSTRAINT_BUDGET_CHARS = 8000
+
+                                      
+              
+               
+               
+ 
+
+                                 
+              
+               
+                  
+ 
+
+                                      
+                       
+                                                                            
+                           
+                     
+                    
+                        
+ 
+
+/** Pack ranked constraints into the declared capacity. Pure, so it is testable. */
+export function selectConstraints(
+  candidates                                ,
+  budgetChars         = CONSTRAINT_BUDGET_CHARS,
+)                      {
+  const budget = Number.isFinite(budgetChars) && budgetChars > 0 ? Math.trunc(budgetChars) : CONSTRAINT_BUDGET_CHARS
+  const ranked = [...candidates].sort((left, right) => right.score - left.score || left.index - right.index)
+  const kept                        = []
+  const dropped                   = []
+  let total = 0
+  for (const candidate of ranked) {
+    // No per-item truncation: a rule cut mid-sentence is a rule nobody can obey.
+    if (total + candidate.text.length > budget) {
+      dropped.push({ text: candidate.text, chars: candidate.text.length, reason: 'budget' })
+      continue
+    }
+    kept.push(candidate)
+    total += candidate.text.length
+  }
+  // Kept rules are re-ordered to their original position, so the target reads them
+  // in the order the user wrote them rather than by score.
+  kept.sort((left, right) => left.index - right.index)
+  return {
+    constraints: kept.map((candidate) => candidate.text),
+    dropped,
+    budgetChars: budget,
+    totalChars: total,
+    candidateCount: candidates.length,
+  }
+}
+
+export function assertConstraintsPreserved(selection                     , context = '')       {
+  if (selection.dropped.length === 0) return
+  const sample = selection.dropped
+    .slice(0, 3)
+    .map((item) => `"${item.text.slice(0, 60)}${item.text.length > 60 ? '…' : ''}"(${item.chars} chars)`)
+    .join('、')
+  throw graftError(
+    'GRAFT_ABORTED',
+    `constraints truncated: ${selection.dropped.length} of ${selection.candidateCount} standing rule(s) do not fit ` +
+      `constraintBudgetChars=${selection.budgetChars} (used ${selection.totalChars}). ${sample}` +
+      `${context.length === 0 ? '' : ` [${context}]`}. ` +
+      'A handoff with a shortened rule set is not shippable: raise constraintBudgetChars, or retire the rules that no longer apply.',
+  )
+}
+
+export function extractConstraintsDetailed(
+  events                             ,
+  budgetChars         = CONSTRAINT_BUDGET_CHARS,
+)                      {
+  const candidates                        = []
   let index = 0
   for (const event of events) {
     if (event.type !== 'user/message') continue
@@ -912,18 +1037,16 @@ export function extractConstraints(events                             )         
       candidates.push({ text: normalized, index: index++, score: hard + imperative + actionHits + lengthBonus + scopeBonus })
     }
   }
-  const selected = candidates.length > 8
-    ? [...candidates].sort((left, right) => right.score - left.score || left.index - right.index).slice(0, 8).sort((left, right) => left.index - right.index)
-    : candidates
-  const out           = []
-  let total = 0
-  for (const candidate of selected) {
-    const next = truncateEnd(candidate.text, 800)
-    if (total + next.text.length > 8000) break
-    out.push(next.text)
-    total += next.text.length
-  }
-  return out
+  return selectConstraints(candidates, budgetChars)
+}
+
+/**
+ * v0.18: the compatibility shape. Callers that only need the strings keep this;
+ * the LOSS REPORT is available through `extractConstraintsDetailed`, and the
+ * migration path uses that one so a dropped rule can never go unnoticed.
+ */
+export function extractConstraints(events                             , budgetChars         )           {
+  return extractConstraintsDetailed(events, budgetChars).constraints
 }
 
 const LLM_CONSTRAINT_PROMPT = [
@@ -3637,7 +3760,19 @@ export function buildInjectionPlan(
   }
 
   const warnings           = []
-  const constraints = constraintsOverride !== undefined ? [...constraintsOverride] : extractConstraints(log.events)
+  // v0.18 module 3: the rule set is packed to a declared CAPACITY, and the build
+  // refuses to continue when a qualified rule does not fit. This is the single
+  // choke point every path shares (graft_prepare, graft_commit, the auto path),
+  // so there is no builder that can ship a shortened block.
+  const constraintSelection                      =
+    constraintsOverride !== undefined
+      ? selectConstraints(
+          [...constraintsOverride].map((text, index) => ({ text, score: 100, index })),
+          settings.constraintBudgetChars,
+        )
+      : extractConstraintsDetailed(log.events, settings.constraintBudgetChars)
+  assertConstraintsPreserved(constraintSelection, `source=${String(log.session?.id ?? '?')}`)
+  const constraints = constraintSelection.constraints
   const taskState = extractTaskState(log.events)
   const recentCount = Math.min(effectiveSettings.recentTurns, tape.turns.length)
   const recentSlice = tape.turns.slice(tape.turns.length - recentCount)
@@ -4158,6 +4293,13 @@ export function buildInjectionPlan(
     olderToolNames: [...olderToolNames],
     constraints,
     constraintSource,
+    constraintIntegrity: {
+      budgetChars: constraintSelection.budgetChars,
+      totalChars: constraintSelection.totalChars,
+      kept: constraints.length,
+      candidateCount: constraintSelection.candidateCount,
+      dropped: constraintSelection.dropped.length,
+    },
     // v0.14: injected (see goalMessage) and used by the chain guard.
     generation,
     taskStatus: taskState.todos,
@@ -5053,8 +5195,26 @@ function configureRetiredStore(ctx                   , settings                 
       // Logging must not block activation.
     }
   }
+  // v0.18: both ledgers are read through the epoch-aware reader. A ledger from a
+  // newer writer, or a torn one, is REFUSED rather than half-understood.
+  for (const [path, label] of [
+    [transferredStorePath, 'transferred'],
+    [retiredStorePath, 'retired'],
+  ]         ) {
+    const defect = ledgerDefectOf(path)
+    if (defect !== undefined) {
+      try {
+        ctx.logger?.warn?.(
+          `[dsh-graft-slice] ${label} ledger at ${path} is not trustworthy this round (${defect}); ` +
+            'its entries are ignored until a complete write lands (versions must not read half a record).',
+        )
+      } catch {
+        // Logging must not block activation.
+      }
+    }
+  }
   try {
-    const parsed = JSON.parse(readFileSync(transferredStorePath, 'utf8'))
+    const parsed = ledgerRecord(transferredStorePath)
     if (isRecord(parsed)) {
       for (const [id, value] of Object.entries(parsed)) {
         if (!isRecord(value) || typeof value.newSessionId !== 'string') continue
@@ -5075,11 +5235,9 @@ function configureRetiredStore(ctx                   , settings                 
     }
   }
   try {
-    const parsed = JSON.parse(readFileSync(retiredStorePath, 'utf8'))
-    if (Array.isArray(parsed)) {
-      for (const id of parsed) {
-        if (typeof id === 'string' && id.length > 0) retiredSessions.add(id)
-      }
+    const parsed = ledgerArray(retiredStorePath)
+    for (const id of parsed) {
+      if (typeof id === 'string' && id.length > 0) retiredSessions.add(id)
     }
   } catch (error) {
     if ((error       )?.code !== 'ENOENT') {
@@ -5447,6 +5605,128 @@ export function withFileLock   (
 export function acquireSourceLock(sessionId        )             {
   const path = join(dirname(retiredStorePath), `.lock-source-${encodeURIComponent(sessionId)}`)
   return acquireFileLock(path, { timeoutMs: 60_000, staleMs: 120_000, leaseMs: 30_000, label: `source:${sessionId}` })
+}
+
+// ===========================================================================
+// v0.18 (shared defence) — the ledger EPOCH
+// ===========================================================================
+
+/**
+ * v0.18: the epoch stamped into `.retired.json` and `.transferred.json`.
+ *
+ * THE DEFECT THIS CLOSES (cross-process state, not cross-plugin cosmetics)
+ *
+ * `rename` makes each individual write atomic, so a reader never sees half a
+ * buffer. It says nothing about whether the RECORD is complete or whether the
+ * reader understands the writer. The two plugins share these files and are
+ * released separately: a `dsh-memory` from an older build reads a
+ * `.transferred.json` written by a newer one, recognises `{ newSessionId }` in
+ * what is now a differently-shaped document (or does not recognise it at all),
+ * and either harvests from a half-understood record or silently sees an empty
+ * ledger. dsh-memory then attributes a skill to a source whose handoff it only
+ * partly understood — "generating skills from half a record", which is exactly
+ * what the audit named.
+ *
+ * So the payload gets an ENVELOPE with an integer epoch, and the reader:
+ *
+ *   - epoch === LEDGER_EPOCH   → trust the payload
+ *   - epoch <  LEDGER_EPOCH    → trust it (an older reader/writer shape we still speak)
+ *   - epoch >  LEDGER_EPOCH    → REFUSE and wait for a retry (a newer writer)
+ *   - envelope without payload → REFUSE (torn)
+ *   - no envelope at all       → epoch 1, the legacy bare array/object
+ *
+ * The last rule is what makes this a migration instead of a flag day: a ledger
+ * written by v0.17 is still read correctly, and is upgraded in place on the next
+ * write.
+ */
+export const LEDGER_EPOCH = 2
+
+                                 
+               
+            
+             
+                  
+ 
+
+                                                                 
+
+                             
+                                                                                  
+               
+                  
+                                                 
+                       
+ 
+
+export function readLedger(path        )             {
+  let text        
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch {
+    return { epoch: 0, payload: undefined, defect: 'unreadable' }
+  }
+  let parsed         
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return { epoch: 0, payload: undefined, defect: 'unreadable' }
+  }
+  if (isRecord(parsed) && 'epoch' in parsed) {
+    const epoch = Number((parsed                           ).epoch)
+    if (!Number.isFinite(epoch) || epoch <= 0) return { epoch: 0, payload: undefined, defect: 'torn' }
+    if (epoch > LEDGER_EPOCH) return { epoch, payload: undefined, defect: 'future-epoch' }
+    if (!('payload' in parsed)) return { epoch, payload: undefined, defect: 'torn' }
+    const payload = (parsed                           ).payload
+    if (payload === undefined || payload === null) return { epoch, payload: undefined, defect: 'torn' }
+    return { epoch, payload }
+  }
+  return { epoch: 1, payload: parsed }
+}
+
+/** The epoch of a ledger file: 0 absent, 1 legacy, 2+ envelope. */
+export function readLedgerEpoch(path        )         {
+  return readLedger(path).epoch
+}
+
+/**
+ * The usable payload of a ledger file, whatever shape wrote it.
+ *
+ * Exported because the disk-only tools (`scripts/debug-status.mjs`,
+ * `scripts/prune-ghosts.mjs`) and the tests read the same files: one unwrap
+ * implementation, not five.
+ */
+export function readLedgerPayload(path        )          {
+  const read = readLedger(path)
+  return read.defect === undefined || read.defect === 'unreadable' ? read.payload : undefined
+}
+
+/** A defect worth telling the operator about, or undefined when the file is fine. */
+export function ledgerDefectOf(path        )                           {
+  const read = readLedger(path)
+  // An absent file is the normal first-run state, not a defect.
+  return read.defect === 'unreadable' ? undefined : read.defect
+}
+
+function ledgerArray(path        )            {
+  const read = readLedger(path)
+  if (read.defect !== undefined && read.defect !== 'unreadable') return []
+  return Array.isArray(read.payload) ? read.payload : []
+}
+
+function ledgerRecord(path        )                          {
+  const read = readLedger(path)
+  if (read.defect !== undefined && read.defect !== 'unreadable') return {}
+  return isRecord(read.payload) ? read.payload : {}
+}
+
+function writeLedgerAtomic(path        , payload         )       {
+  const envelope                 = {
+    epoch: LEDGER_EPOCH,
+    at: new Date().toISOString(),
+    pid: process.pid,
+    payload,
+  }
+  writeJsonAtomic(path, envelope)
 }
 
 function readJsonArray(path        )            {
@@ -5915,10 +6195,12 @@ function takeModelDrivenNudge(
   payload     ,
   watermark                            ,
   hardCutoffRatio                    ,
+  /** v0.18: the derived pair for this session; absent only for a legacy caller. */
+  thresholds                      ,
 )                                 {
   if (!settings.modelDrivenGraft) return []
   if (watermark === undefined) return []
-  const floor = settings.modelDrivenGraftAtRatio
+  const floor = thresholds?.warnAt ?? settings.modelDrivenGraftAtRatio
   // No forced cutoff for THIS session (autoGraft off, or excluded by the
   // allowlist) → the model is the only exit; the nudge lasts until the window
   // is genuinely full.
@@ -5999,7 +6281,7 @@ function persistRetiredStore(ctx                   , remove                    =
       // v7.7: read-modify-write under the lock. Serialising the in-memory set and
       // renaming it over the file is what let two sessions erase each other.
       const merged = new Set        (
-        readJsonArray(retiredStorePath).filter((value)                  => typeof value === 'string'),
+        ledgerArray(retiredStorePath).filter((value)                  => typeof value === 'string'),
       )
       for (const id of remove) merged.delete(id)
       for (const id of retiredSessions) {
@@ -6008,7 +6290,7 @@ function persistRetiredStore(ctx                   , remove                    =
       // Adopt the other writer's retirements; otherwise this process keeps
       // accepting a session the other one already closed.
       for (const id of merged) retiredSessions.add(id)
-      writeJsonAtomic(retiredStorePath, [...merged].sort())
+      writeLedgerAtomic(retiredStorePath, [...merged].sort())
     })
   } catch (error) {
     // v7.8: commit-critical writes must FAIL, not warn. A retirement that is only
@@ -6104,7 +6386,7 @@ function persistTransferredStore(ctx                   , remove                 
   try {
     mkdirSync(dirname(transferredStorePath), { recursive: true })
     withFileLock(transferredStorePath, () => {
-      const merged = readJsonRecord(transferredStorePath)                                                                        
+      const merged = ledgerRecord(transferredStorePath)                                                                        
       for (const id of remove) delete merged[id]
       for (const [id, value] of transferredSessions) {
         if (remove.includes(id)) continue
@@ -6117,7 +6399,7 @@ function persistTransferredStore(ctx                   , remove                 
         const current = transferredSessions.get(id)
         if (current === undefined || Number(value.at ?? 0) > Number(current.at ?? 0)) transferredSessions.set(id, value)
       }
-      writeJsonAtomic(transferredStorePath, merged)
+      writeLedgerAtomic(transferredStorePath, merged)
     })
   } catch (error) {
     if (strict) throw error
@@ -6404,6 +6686,235 @@ export function deriveAutoTapeBudget(contextWindow        , ratio = 0.5)        
   const safeRatio = Number.isFinite(ratio) && ratio > 0 && ratio <= 1 ? ratio : 0.5
   return Math.max(0, Math.floor(contextWindow * safeRatio))
 }
+
+// ===========================================================================
+// v0.18 module 2 — the DYNAMIC watermark
+// ===========================================================================
+
+/**
+ * v0.18: what one handoff COSTS, measured before deciding WHEN to run one.
+ *
+ * THE DEFECT THIS REPLACES
+ *
+ * `modelDrivenGraftAtRatio: 0.70` and `autoGraftAtRatio: 0.75` were constants. They
+ * encode one implicit assumption — that a graft costs roughly the same fraction of
+ * every window — and that assumption is false at both ends of the range. On a
+ * 1M-token window a 6k-token handoff is free and 0.75 is needlessly early; on a
+ * 16k-token window the same handoff plus one more turn with a tool result cannot
+ * fit in the 25% the constant leaves, so the migration is attempted and fails —
+ * `graft_prepare` reads a log, the model call comes back, and the write is refused
+ * because the window filled during the handoff itself. "Migrating at 90% of a
+ * window that a graft needs 12% of is not late, it is impossible."
+ *
+ * So the thresholds are DERIVED:
+ *
+ *     safeCeiling = 1 - (fixed + package + growthReserve) / windowLimit
+ *
+ * and the fixed ratios survive in exactly two places: as the LATEST point we ever
+ * cut (`WATERMARK_HARD_CEILING`, the measured turn-stopping point — a dynamic
+ * value is not license to migrate later than the host can survive), and verbatim
+ * under `watermarkMode: 'fixed'` for the differential test that proves this
+ * module is what moved the line.
+ */
+export const GRAFT_FIXED_COST_TOKENS = 6000
+export const DEFAULT_GROWTH_TOKENS_PER_TURN = 1200
+/** The historical `autoGraftAtRatio`: the latest ratio this plugin will ever cut at. */
+export const WATERMARK_HARD_CEILING = 0.75
+/**
+ * The earliest ratio a dynamic calculation may pull the cutoff to.
+ *
+ * A floor exists because "the estimate does not fit" must not become "migrate at
+ * 8%". Below this the honest answer is not an earlier cut but a visible
+ * `feasible: false` (the console and the debug panel report it) — the operator
+ * either raises `contextWindowTokens`' assumptions or moves to a larger window.
+ */
+export const WATERMARK_HARD_FLOOR = 0.5
+/** Never let the nudge land on top of the cutoff: the model needs a window to act in. */
+export const WATERMARK_MIN_GAP = 0.02
+/** Default distance between the nudge and the hard cutoff. */
+export const WATERMARK_NUDGE_MARGIN = 0.05
+/**
+ * Characters per token for the handoff package ECHO.
+ *
+ * The package is mostly paths, seq numbers, JSON and code, so 4 chars/token is
+ * the conservative end for Latin text and still generous for CJK prose. The tape
+ * itself is not re-priced here: this term is the cost of the source seeing the
+ * plan/review round trip, not the cost of the target's seeded history.
+ */
+const REVIEW_CHARS_PER_TOKEN = 4
+
+                                 
+                                                                                  
+                      
+                                                                                 
+                       
+                                                                                 
+                              
+                                                      
+                       
+ 
+
+                                    
+                     
+                     
+                      
+                       
+                             
+                      
+                             
+                     
+                                                                   
+               
+ 
+
+export function estimateGraftCost(windowLimit        , input                 = {})                    {
+  const limit = Number.isFinite(windowLimit) && windowLimit > 0 ? Math.trunc(windowLimit) : 0
+  const int = (value         , fallback        )         =>
+    Number.isFinite(value) ? Math.max(0, Math.trunc(value          )) : fallback
+  const fixedTokens = int(input.fixedTokens, GRAFT_FIXED_COST_TOKENS)
+  const packageChars = int(input.packageChars, deriveAutoTapeBudget(limit, 0.5))
+  const growthPerTurnTokens = int(input.growthPerTurnTokens, DEFAULT_GROWTH_TOKENS_PER_TURN)
+  const reserveTurns = int(input.reserveTurns, 2)
+  const packageTokens = Math.ceil(packageChars / REVIEW_CHARS_PER_TOKEN)
+  const growthReserveTokens = growthPerTurnTokens * reserveTurns
+  const totalTokens = fixedTokens + packageTokens + growthReserveTokens
+  return {
+    windowLimit: limit,
+    fixedTokens,
+    packageChars,
+    packageTokens,
+    growthPerTurnTokens,
+    reserveTurns,
+    growthReserveTokens,
+    totalTokens,
+    ratio: limit > 0 ? totalTokens / limit : 0,
+  }
+}
+
+                                      
+                           
+                                                                          
+                
+                                                           
+                
+                     
+                            
+                             
+                                                                                
+                     
+                                                                                     
+                   
+                
+ 
+
+function round4(value        )         {
+  return Number(value.toFixed(4))
+}
+
+function clampRatio(value        , low        , high        )         {
+  if (!Number.isFinite(value)) return high
+  return Math.min(high, Math.max(low, value))
+}
+
+                                   
+                     
+                      
+                    
+                 
+ 
+
+/**
+ * v0.18: the two ratios, derived from a window and an estimated handoff cost.
+ *
+ * `estimatedGraftCost` is a token COUNT (not a ratio), because that is the unit
+ * the caller can actually measure — see `estimateGraftCost`.
+ */
+export function calculateSafeWatermark(
+  windowLimit        ,
+  estimatedGraftCost        ,
+  options                   = {},
+)                      {
+  const limit = Number.isFinite(windowLimit) && windowLimit > 0 ? windowLimit : 0
+  const cost = Number.isFinite(estimatedGraftCost) && estimatedGraftCost > 0 ? estimatedGraftCost : 0
+  const hardCeiling = options.hardCeiling ?? WATERMARK_HARD_CEILING
+  const hardFloor = options.hardFloor ?? WATERMARK_HARD_FLOOR
+  const minGap = options.minGap ?? WATERMARK_MIN_GAP
+  const warnMargin = options.warnMargin ?? WATERMARK_NUDGE_MARGIN
+  if (limit === 0) {
+    return {
+      mode: 'dynamic',
+      warnAt: round4(Math.max(0.01, hardCeiling - warnMargin)),
+      hardAt: round4(hardCeiling),
+      windowLimit: 0,
+      estimatedGraftCost: cost,
+      growthReserveTokens: 0,
+      safeCeiling: round4(hardCeiling),
+      feasible: false,
+      reason: 'context window unknown; falling back to the hard ceiling',
+    }
+  }
+  const safeCeiling = 1 - cost / limit
+  const hardAt = round4(clampRatio(safeCeiling, hardFloor, hardCeiling))
+  const warnAt = round4(clampRatio(hardAt - warnMargin, 0.05, hardAt - minGap))
+  const feasible = safeCeiling >= hardFloor
+  const reason = safeCeiling >= hardCeiling
+    ? `cost ${cost} of ${limit} fits below the ceiling (${round4(safeCeiling)}); cutoff stays at ${hardCeiling}`
+    : feasible
+      ? `cost ${cost} of ${limit} = ${round4(cost / limit)} of the window; cutoff pulled to ${hardAt}`
+      : `cost ${cost} of ${limit} = ${round4(cost / limit)} of the window does not fit the floor ${hardFloor}; cutoff held at ${hardAt} and the handoff may still fail`
+  return {
+    mode: 'dynamic',
+    warnAt,
+    hardAt,
+    windowLimit: limit,
+    estimatedGraftCost: cost,
+    growthReserveTokens: 0,
+    safeCeiling: round4(safeCeiling),
+    feasible,
+    reason,
+  }
+}
+
+/**
+ * v0.18: the thresholds a session is actually governed by.
+ *
+ * `watermarkMode: 'fixed'` returns the configured ratios verbatim — the old
+ * behaviour, kept so a differential test can show that the DYNAMIC branch is what
+ * changed a decision rather than some unrelated edit.
+ */
+export function effectiveWatermarks(
+  settings                       ,
+  watermark                                              ,
+)                      {
+  const windowLimit = Number(
+    watermark?.contextWindow && watermark.contextWindow > 0
+      ? watermark.contextWindow
+      : settings.contextWindowTokens,
+  )
+  if (settings.watermarkMode === 'fixed') {
+    return {
+      mode: 'fixed',
+      warnAt: round4(settings.modelDrivenGraftAtRatio),
+      hardAt: round4(settings.autoGraftAtRatio),
+      windowLimit: Number.isFinite(windowLimit) && windowLimit > 0 ? windowLimit : 0,
+      estimatedGraftCost: 0,
+      growthReserveTokens: 0,
+      safeCeiling: round4(settings.autoGraftAtRatio),
+      feasible: true,
+      reason: 'watermarkMode=fixed: using modelDrivenGraftAtRatio / autoGraftAtRatio verbatim',
+    }
+  }
+  const cost = estimateGraftCost(
+    Number.isFinite(windowLimit) && windowLimit > 0 ? windowLimit : 0,
+    {
+      growthPerTurnTokens: settings.growthTokensPerTurn,
+      reserveTurns: settings.growthReserveTurns,
+    },
+  )
+  const thresholds = calculateSafeWatermark(cost.windowLimit, cost.totalTokens)
+  return { ...thresholds, growthReserveTokens: cost.growthReserveTokens }
+}
+
 
 /**
  * Phase 4: retire the source for the live `agent/pre-step` waterfall.
@@ -6882,10 +7393,10 @@ function loadAutoGraftSuppression()       {
  * not by a stale local view.
  */
 export function refreshMigrationLedgers()       {
-  for (const id of readJsonArray(retiredStorePath)) {
+  for (const id of ledgerArray(retiredStorePath)) {
     if (typeof id === 'string' && id.length > 0) retiredSessions.add(id)
   }
-  for (const [id, value] of Object.entries(readJsonRecord(transferredStorePath))) {
+  for (const [id, value] of Object.entries(ledgerRecord(transferredStorePath))) {
     if (isRecord(value) && typeof value.newSessionId === 'string' && !transferredSessions.has(id)) {
       transferredSessions.set(id, value         )
     }
@@ -8747,7 +9258,12 @@ async function autoGraftIfNeeded(
   autoGraftInFlight.add(sourceSessionId)
   try {
     const watermark = await readTokenWatermark(ctx, sourceSessionId, settings)
-    if (watermark === undefined || watermark.ratio < settings.autoGraftAtRatio) return undefined
+    if (watermark === undefined) return undefined
+    // v0.18: the cutoff is DERIVED from the window and the estimated cost of the
+    // handoff itself (see `calculateSafeWatermark`), not read from a constant.
+    // `watermarkMode: 'fixed'` restores the historical ratios exactly.
+    const thresholds = effectiveWatermarks(settings, watermark)
+    if (watermark.ratio < thresholds.hardAt) return undefined
 
     // v6.3 module 1: never cut a half-finished step.
     const snapshotForHarbor = (() => {
@@ -9176,6 +9692,60 @@ export function scanAgentCommand(command        , workspace = '')               
   return { decision: 'deny', code: assessment.code ?? 'DESTRUCTIVE_COMMAND', reason: assessment.reason }
 }
 
+                                       
+                   
+                          
+                                                
+                                                                                  
+                 
+ 
+
+/**
+ * v0.18: classify, then decide — the two jobs the string matcher used to do at once.
+ *
+ * `ask` deserves one paragraph, because the tool guard has no prompt channel:
+ * `tools.guard()` is synchronous and its only return value is a denial string.
+ * So `ask` is expressed as a REFUSAL THAT NAMES THE CONFIRMATION STEP: the call
+ * does not run, and the agent is told to obtain the user's explicit agreement for
+ * the exact command first. That is deliberately not the same as `allow` — in
+ * `autonomous` mode a destructive command stops being auto-refused, but it never
+ * becomes silent.
+ */
+export function evaluateCommandPolicy(
+  command        ,
+  workspace = '',
+  mode             = 'balanced',
+)                       {
+  const assessment = classifyAgentCommand(command, workspace)
+  const decision = policyDecision(assessment.risk, mode)
+  if (decision === 'allow') {
+    return {
+      risk: assessment.risk,
+      decision,
+      ...(assessment.code === undefined ? {} : { code: assessment.code }),
+    }
+  }
+  if (decision === 'deny') {
+    return {
+      risk: assessment.risk,
+      decision,
+      ...(assessment.code === undefined ? {} : { code: assessment.code }),
+      reason:
+        assessment.reason ??
+        `该命令无法被证明是安全的（risk=${assessment.risk}，safetyMode=${mode}），已拒绝执行。`,
+    }
+  }
+  return {
+    risk: assessment.risk,
+    decision,
+    ...(assessment.code === undefined ? {} : { code: assessment.code }),
+    reason:
+      `ASK（safetyMode=${mode}）：${assessment.reason ?? `该命令风险等级为 ${assessment.risk}。`}` +
+      'autonomous 模式不会为它做决定，也不会静默执行：请把要执行的确切命令、目标和影响清楚地告诉用户，' +
+      '得到用户明确同意后，再由用户确认执行。',
+  }
+}
+
 /**
  * v0.14 D1/D6: the command scanner, the enforcement point of both the workspace
  * red line and the destructive-command rule.
@@ -9345,10 +9915,20 @@ export function collectDebugStatus(input                  )                     
 
   if (section === 'all' || section === 'watermark') {
     const watermark = input.watermark
-    const warnAt = settings.modelDrivenGraftAtRatio
-    const hardAt = settings.autoGraftAtRatio
+    // v0.18: the two ratios are DERIVED, so the panel reports the derivation as
+    // well as the numbers — "why did the cutoff move to 0.61?" is answered here.
+    const thresholds = effectiveWatermarks(settings, watermark)
+    const warnAt = thresholds.warnAt
+    const hardAt = thresholds.hardAt
     out.watermark = watermark === undefined
-      ? { available: false, reason: 'no live session or no usage/context record for it', warnAt, hardAt }
+      ? {
+          available: false,
+          reason: 'no live session or no usage/context record for it',
+          warnAt,
+          hardAt,
+          watermarkMode: thresholds.mode,
+          thresholdReason: thresholds.reason,
+        }
       : {
           available: true,
           tokens: watermark.tokens,
@@ -9358,6 +9938,11 @@ export function collectDebugStatus(input                  )                     
           source: watermark.source,
           warnAt,
           hardAt,
+          watermarkMode: thresholds.mode,
+          estimatedGraftCost: thresholds.estimatedGraftCost,
+          safeCeiling: thresholds.safeCeiling,
+          feasible: thresholds.feasible,
+          thresholdReason: thresholds.reason,
           toWarnRatio: Number((warnAt - watermark.ratio).toFixed(4)),
           toWarnTokens: Math.max(0, Math.round(watermark.contextWindow * (warnAt - watermark.ratio))),
           toHardRatio: Number((hardAt - watermark.ratio).toFixed(4)),
@@ -9541,10 +10126,32 @@ export function collectMemoryStoreStatus(
  */
 export const CONSOLE_BOOLEAN_KEYS = ['modelDrivenGraft', 'autoGraft', 'workspaceRedline', 'commandGuard']         
 export const CONSOLE_RATIO_KEYS = ['modelDrivenGraftAtRatio', 'autoGraftAtRatio']         
+/**
+ * v0.18: the enumerated knobs. Adding them here is what keeps the v0.18 policy and
+ * watermark modes switchable from the panel — a mode that can only be changed by
+ * editing YAML is a mode that stays at its default for everyone.
+ */
+export const CONSOLE_ENUM_KEYS                                              = {
+  safetyMode: ['strict', 'balanced', 'autonomous'],
+  watermarkMode: ['fixed', 'dynamic'],
+}
+/** v0.18: the integer knobs, with the range a value must fall in. */
+export const CONSOLE_INTEGER_KEYS                                                         = {
+  growthTokensPerTurn: { min: 0, max: 100_000 },
+  growthReserveTurns: { min: 0, max: 50 },
+  constraintBudgetChars: { min: 500, max: 200_000 },
+}
+
+export const CONSOLE_WRITABLE_KEYS                    = [
+  ...CONSOLE_BOOLEAN_KEYS,
+  ...CONSOLE_RATIO_KEYS,
+  ...Object.keys(CONSOLE_ENUM_KEYS),
+  ...Object.keys(CONSOLE_INTEGER_KEYS),
+]
 
                                  
              
-                         
+                                  
  
 
 /**
@@ -9556,7 +10163,7 @@ export const CONSOLE_RATIO_KEYS = ['modelDrivenGraftAtRatio', 'autoGraftAtRatio'
 export function parseConsoleSetting(rawInput        )                                                                                  {
   const parts = String(rawInput ?? '').trim().split(/\s+/u).filter((part) => part.length > 0)
   if (parts.length < 2) {
-    return { error: `需要两个参数：<key> <value>；可写键：${[...CONSOLE_BOOLEAN_KEYS, ...CONSOLE_RATIO_KEYS].join(', ')}` }
+    return { error: `需要两个参数：<key> <value>；可写键：${CONSOLE_WRITABLE_KEYS.join(', ')}` }
   }
   const key = parts[0]
   const raw = parts[1].toLowerCase()
@@ -9572,7 +10179,19 @@ export function parseConsoleSetting(rawInput        )                           
     if (!Number.isFinite(value) || value <= 0 || value >= 1) return { error: `${key} 必须是 0 与 1 之间的小数（例如 0.70）` }
     return { setting: { key, value: Math.round(value * 100) / 100 } }
   }
-  return { error: `未知的配置键 ${key}；可写键：${[...CONSOLE_BOOLEAN_KEYS, ...CONSOLE_RATIO_KEYS].join(', ')}` }
+  const allowed = CONSOLE_ENUM_KEYS[key]
+  if (allowed !== undefined) {
+    if (!allowed.includes(raw)) return { error: `${key} 只接受 ${allowed.join(' / ')}（收到 ${parts[1]}）` }
+    return { setting: { key, value: raw } }
+  }
+  const range = CONSOLE_INTEGER_KEYS[key]
+  if (range !== undefined) {
+    const value = Number(raw)
+    if (!Number.isFinite(value) || !Number.isInteger(value)) return { error: `${key} 必须是整数（收到 ${parts[1]}）` }
+    if (value < range.min || value > range.max) return { error: `${key} 必须在 ${range.min} 与 ${range.max} 之间（收到 ${value}）` }
+    return { setting: { key, value } }
+  }
+  return { error: `未知的配置键 ${key}；可写键：${CONSOLE_WRITABLE_KEYS.join(', ')}` }
 }
 
 /**
@@ -9601,12 +10220,15 @@ export const CONSOLE_PATCH_ID = 'dsh-graft-slice'
                        
                  
                 
-                                                                           
+                                                                          
                       
                       
                
                     
                              
+                                                                            
+                
+                
  
 
                                     
@@ -9618,7 +10240,19 @@ export const CONSOLE_PATCH_ID = 'dsh-graft-slice'
                              
                          
                                  
+                                                                                     
+                          
+                                      
+                                 
+                               
+                              
    
+     
+                                                                                    
+                                                                                   
+                                                                           
+     
+                                                                          
                     
                      
  
@@ -10323,7 +10957,7 @@ async function appendTransitionCard(
       if (chainProtected && (autoGraftStates.get(agentId) ?? 'idle') === 'idle') {
         const watermark = await readTokenWatermark(stableCtx, agentId, settings)
         watermarkForNudge = watermark
-        if (watermark !== undefined && watermark.ratio >= settings.modelDrivenGraftAtRatio) {
+        if (watermark !== undefined && watermark.ratio >= effectiveWatermarks(settings, watermark).warnAt) {
           appendGraftAudit({
             at: new Date().toISOString(),
             kind: 'chain-guard',
@@ -10341,7 +10975,8 @@ async function appendTransitionCard(
       if (autoGraftApplies && state === 'idle') {
         const watermark = await readTokenWatermark(stableCtx, agentId, settings)
         watermarkForNudge = watermark
-        if (watermark !== undefined && watermark.ratio >= settings.autoGraftAtRatio) {
+        const thresholds = watermark === undefined ? undefined : effectiveWatermarks(settings, watermark)
+        if (watermark !== undefined && thresholds !== undefined && watermark.ratio >= thresholds.hardAt) {
           // v6.3 module 4: confirm mode asks here; the answer arrives next step.
           if (settings.graftMode === 'confirm' && !pendingConfirms.has(agentId)) {
             pendingConfirms.set(agentId, {
@@ -10434,6 +11069,8 @@ async function appendTransitionCard(
       if (settings.modelDrivenGraft && watermarkForNudge === undefined) {
         watermarkForNudge = await readTokenWatermark(stableCtx, agentId, settings)
       }
+      const nudgeThresholds =
+        watermarkForNudge === undefined ? undefined : effectiveWatermarks(settings, watermarkForNudge)
       const modelExtra =
         !chainProtected && settings.modelDrivenGraft
           ? takeModelDrivenNudge(
@@ -10442,7 +11079,8 @@ async function appendTransitionCard(
               agentId,
               payload,
               watermarkForNudge,
-              autoGraftApplies ? settings.autoGraftAtRatio : undefined,
+              autoGraftApplies && nudgeThresholds !== undefined ? nudgeThresholds.hardAt : undefined,
+              nudgeThresholds,
             )
           : []
       // v7.9: the nudge was ignored (the model started another step). One hard
@@ -10764,6 +11402,26 @@ async function appendTransitionCard(
    * guard can force-allow it. That is what makes this a refusal rather than a
    * request, and it is why the same scanner backs both the search ban (D1) and
    * the destructive-command ban (D6).
+   *
+   * v0.18: WHY THE POLICY TABLE IS WIRED HERE AND NOT INTO `tools/pre-execute`.
+   *
+   * The audit asked for a Deny -> Allow -> Ask decision "before tools.guard runs".
+   * Read against the live contract, that ordering is already what this does — the
+   * classifier and the table run FIRST, and only a non-`allow` verdict is handed to
+   * the guard. What must NOT happen is a second registration on the pre-execute
+   * waterfall, because the two extension points are not equivalent:
+   *
+   *   `tools.execute(...)` — "Execute through pre-policy, guards, around-dispatch,
+   *   post-policy, ..."; `guard(...)` — "Register a monotonic guard AFTER the
+   *   extensible `tools/pre-execute` waterfall ... Any matching guard may deny by
+   *   returning a reason, while NO guard can force-allow a call another guard
+   *   denied."
+   *
+   * A waterfall is overridable by construction; a guard is not. A ban that can be
+   * overridden downstream is a suggestion, so the denial lives in the only channel
+   * that cannot be undone — and the evidence (classification + mode) is computed
+   * before that channel is entered. A second listener on the waterfall would add no
+   * capability, only a second place to forget.
    */
   const registerCommandGuard = ()       => {
     if (!settings.commandGuard) return
@@ -10785,14 +11443,18 @@ async function appendTransitionCard(
       if (command.length === 0) return undefined
       const agentId = typeof execution?.agent?.id === 'string' ? execution.agent.id : ''
       const workspace = workspaceOfAgent(ctx, agentId)
-      const verdict = scanAgentCommand(command, workspace)
-      if (verdict === undefined) return undefined
+      // v0.18: classify (evidence) and decide (policy). The table lives in
+      // `policyDecision`; this call site only reports what the operator chose.
+      const verdict = evaluateCommandPolicy(command, workspace, settings.safetyMode)
+      if (verdict.decision === 'allow' || verdict.reason === undefined) return undefined
       try {
         appendGraftAudit({
           at: new Date().toISOString(),
-          kind: 'command-blocked',
+          kind: verdict.decision === 'ask' ? 'command-asked' : 'command-blocked',
           ...(agentId.length === 0 ? {} : { sessionId: agentId }),
-          detail: `${verdict.code}: ${command.replace(/\s+/gu, ' ').slice(0, 200)}`,
+          detail:
+            `${verdict.code ?? verdict.risk}/safetyMode=${settings.safetyMode}: ` +
+            command.replace(/\s+/gu, ' ').slice(0, 200),
         })
       } catch {
         // The audit line is evidence; the denial must not depend on it.
@@ -10835,6 +11497,7 @@ async function appendTransitionCard(
         if (sessionId.length === 0) continue
         const watermark = await readTokenWatermark(stableCtx, sessionId, settings)
         if (watermark === undefined) continue
+        const rowThresholds = effectiveWatermarks(settings, watermark)
         const mark = graftTargets.get(sessionId)
         const completed = (() => {
           const live = (stableCtx       ).sessions?.get?.(sessionId)       
@@ -10848,14 +11511,22 @@ async function appendTransitionCard(
           contextWindow: watermark.contextWindow,
           percent: Number((watermark.ratio * 100).toFixed(2)),
           source: watermark.source,
-          toWarnTokens: Math.max(0, Math.round(watermark.contextWindow * (settings.modelDrivenGraftAtRatio - watermark.ratio))),
-          toHardTokens: Math.max(0, Math.round(watermark.contextWindow * (settings.autoGraftAtRatio - watermark.ratio))),
+          toWarnTokens: Math.max(
+            0,
+            Math.round(watermark.contextWindow * (rowThresholds.warnAt - watermark.ratio)),
+          ),
+          toHardTokens: Math.max(
+            0,
+            Math.round(watermark.contextWindow * (rowThresholds.hardAt - watermark.ratio)),
+          ),
           state:
-            watermark.ratio >= settings.autoGraftAtRatio
+            watermark.ratio >= rowThresholds.hardAt
               ? 'over-hard-cutoff'
-              : watermark.ratio >= settings.modelDrivenGraftAtRatio
+              : watermark.ratio >= rowThresholds.warnAt
                 ? 'over-warn-line'
                 : 'below-warn-line',
+          warnAt: rowThresholds.warnAt,
+          hardAt: rowThresholds.hardAt,
           generation: mark?.generation ?? 0,
           graceTurnsRemaining:
             completed === undefined || mark === undefined ? 0 : Math.max(0, settings.graftTargetGraceTurns - completed),
@@ -10863,6 +11534,20 @@ async function appendTransitionCard(
       }
     }
     rows.sort((left, right) => right.percent - left.percent)
+    // v0.18: the thresholds are derived per window, so the panel shows the pair
+    // that governs the HIGHEST session and the cost model behind it, rather than
+    // two constants the operator cannot reconcile with what the rows say.
+    const representative = rows[0]
+    const thresholds = effectiveWatermarks(
+      settings,
+      representative === undefined
+        ? undefined
+        : { contextWindow: representative.contextWindow },
+    )
+    const cost = estimateGraftCost(thresholds.windowLimit, {
+      growthPerTurnTokens: settings.growthTokensPerTurn,
+      reserveTurns: settings.growthReserveTurns,
+    })
     return {
       config: {
         modelDrivenGraft: settings.modelDrivenGraft,
@@ -10872,7 +11557,13 @@ async function appendTransitionCard(
         workspaceRedline: settings.workspaceRedline,
         commandGuard: settings.commandGuard,
         graftTargetGraceTurns: settings.graftTargetGraceTurns,
+        safetyMode: settings.safetyMode,
+        watermarkMode: settings.watermarkMode,
+        constraintBudgetChars: settings.constraintBudgetChars,
+        growthTokensPerTurn: settings.growthTokensPerTurn,
+        growthReserveTurns: settings.growthReserveTurns,
       },
+      thresholds: { ...thresholds, estimate: thresholds.windowLimit > 0 ? cost : null },
       rows,
       generatedAt: new Date().toISOString(),
     }

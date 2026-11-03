@@ -32,6 +32,9 @@ function setup({ window = 2600 } = {}) {
     modelDrivenGraft: true,
     modelDrivenGraftAtRatio: 0.7,
     contextWindowTokens: window,
+    // v0.18: the escalation chain is a MECHANISM test at the historical ratios;
+    // the derived-ratio behaviour has its own file (v018-watermark).
+    watermarkMode: 'fixed',
     retireSource: true,
     verifyReadBack: true,
   })

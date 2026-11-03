@@ -1,3 +1,41 @@
+# dsh-graft-slice v0.18.0 — 风险/策略分离、动态水位、硬约束零丢失、台账 epoch
+
+**发布日期**：2026-11-04　**状态**：预发布（v0.17.0 → v0.18.0）　**测试**：356/356（+23）
+
+## 问题
+第三方审计：本插件仍在用**字符串防御**。三处具体缺陷：
+1. `scanAgentCommand` 同时承担"判定命令是什么"和"决定拦不拦"，策略散落在正则里，没有可读的操作员表；
+2. 水位是写死的 `0.70` / `0.75`：小窗口下交接本身装不下（迁移在交接过程中被窗口填满而失败），大窗口下又过早；
+3. `extractConstraints` 用 `slice(0, 8)` + 8000 字符 `break` **静默**砍掉规则——目标读到的 HARD CONSTRAINTS
+   可能正好缺了它即将违反的那条。
+加上共有防线缺口：`.retired.json` / `.transferred.json` 无版本号，另一个插件可能"读到半条记录"就用它生成技能。
+
+## 修法
+1. **风险/策略分离**：`classifyAgentCommand` 只给 `safe | unknown | destructive`；`policyDecision(risk, mode)`
+   是一张表（strict / balanced / autonomous）。`tools.guard` 按 `safetyMode` 执行，审计区分
+   `command-blocked` 与 `command-asked`。`destructive` 在 `autonomous` 是 **ask**（拒绝并指名确认步骤），
+   不是 allow。
+2. **动态水位**：`estimateGraftCost` + `calculateSafeWatermark(windowLimit, estimatedGraftCost)`；
+   `0.75` 降级为**天花板**（历史实测最晚可切点），下限 0.50；增长预测来自 `growthTokensPerTurn × growthReserveTurns`。
+   `feasible: false` 明确表示"这个窗口装不下一次交接"。`watermarkMode: 'fixed'` 保留旧常量供差分测试。
+3. **硬约束零丢失**：容量驱动打包（`constraintBudgetChars`，默认 8000），逐条不截断；装不下 → 报告，
+   `assertConstraintsPreserved` 抛 `GRAFT_ABORTED: constraints truncated`。可返回的计划带
+   `constraintIntegrity` 正向证据。
+4. **台账 epoch**：两个台账写成 `{epoch, at, pid, payload}` 信封；旧形状（epoch 1）继续读并在下次写入时就地升级；
+   未来 epoch 与缺 payload 的信封**拒读并等下一次重试**。`dsh-memory` 同步实现，harvest 报 `ledger.deferred`，
+   `memory_migrate_evidence` 在被拒时不再猜"最新会话"。
+
+## 验证
+23 条新测试：`test/v018-policy.test.mjs`（决策表 + guard 按配置模式执行 + 审计分类 + **拒绝的单调性**：
+后注册的宽松 guard 无法推翻我们的拒绝——这正是"策略只接 `tools.guard`、不接可被覆盖的
+`tools/pre-execute` 瀑布"这条架构决定的测试表达）、
+`test/v018-watermark.test.mjs`（成本模型、单调性、夹取、不回归、增长预测、fixed 差分、端到端更早切断）、
+`test/v018-constraints.test.mjs`（容量与报告、`GRAFT_ABORTED`、计划内正向证据、容量可调）、
+`test/v018-ledger-epoch.test.mjs`（信封写入、旧形状兼容与升级、未来 epoch 拒读、撕裂拒读与重试）。
+356/356 全绿。
+
+---
+
 # dsh-graft-slice v0.17.0 — 宿主噪音过滤
 
 **发布日期**：2026-11-04　**状态**：预发布（v0.16.0 → v0.17.0）　**测试**：333/333（+6）

@@ -9,6 +9,7 @@ import {
   graftReadResult,
   graftSliceAndInject,
   isRetired,
+  readLedgerPayload,
   resetRetiredSessions,
   TURN_STOPPING_EVENT,
 } from '../index.js'
@@ -356,7 +357,7 @@ test('phase 4: persists retirement IDs and reloads them after restart', async ()
     .get('graft_slice_and_inject')
     .execute({ sourceSessionId: sourceLog.session.id, newSessionId: 'session-graft-retired' }, {})
   const file = join(ctx.paths.data, '.retired.json')
-  const ids = JSON.parse(readFileSync(file, 'utf8'))
+  const ids = readLedgerPayload(file)
   assert.equal(Array.isArray(ids), true)
   assert.equal(ids.includes(sourceLog.session.id), true)
 

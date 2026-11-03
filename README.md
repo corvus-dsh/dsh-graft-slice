@@ -4,7 +4,7 @@
 
 **DSH 日志切片与最小注入插件。** 在源会话最后一个 `turn/end` 处切取高保真磁带，创建一个零继承、可冷恢复的交接会话；不 fork，不引入 SQLite，不单独注入 `tool/result`。
 
-> 当前版本 **0.11.0（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
+> 当前版本 **0.18.0（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
 > 发布说明：[RELEASE_NOTES.md](./RELEASE_NOTES.md)（v0.8.1 归档见 [RELEASE_NOTES-v0.8.1.md](./RELEASE_NOTES-v0.8.1.md)）。
 > 目标运行时：DeepSeek Harness **0.2.1-rc.5**（当前桌面端）。
 > 规格书 v2.1 写的是 rc.4；本实现已按 rc.5 的真实源码校正了两处会导致冷恢复失败的问题。
@@ -67,6 +67,58 @@ node scripts/verify-bundle.mjs   # 27 项：bundle 声明 / files 白名单 / ES
 | 未设 `type: "module"` | CJS 引 ESM 核心包，启动即崩 | `type: "module"` 已校验 |
 
 `cordis.patch.yml` 用**包名**引用（`name: dsh-graft-slice`），不写相对路径——相对路径只在本机成立。
+
+## v0.18.0：风险与策略分离、动态水位、硬约束零丢失、台账 epoch
+
+审计的判词是「字符串防御」：`scanAgentCommand` 同时干了两件事——判定命令**是什么**（证据，正则擅长）
+和决定**拦不拦**（策略，该由一张操作员能读能改的表决定）。这一个版本把四件事分开焊死。
+
+### 1. 风险（evidence）与策略（policy）分离
+
+- `classifyAgentCommand(command, workspace)` → `risk: safe | unknown | destructive`，**只给等级，不给裁决**；
+- `policyDecision(risk, mode)` → 决策表，一处可读：
+
+| risk | `strict` | `balanced`（默认） | `autonomous` |
+|---|---|---|---|
+| `safe` | allow | allow | allow |
+| `unknown` | deny | deny | allow |
+| `destructive` | deny | deny | **ask** |
+
+`unknown` 是"无法证明它被限制在工作区内"的变更类命令。`destructive` 在 `autonomous` 变成 **ask 而不是
+allow**：模式可以降低仪式感，但**没有任何模式会静默执行无界删除**。`tools.guard()` 是同步的、只有"拒绝"
+一个返回通道，所以 ask 表达为**指名确认步骤的拒绝**：调用不执行，并告诉 agent 先把确切命令与影响交给用户确认。
+
+审计线区分 `command-blocked` 与 `command-asked`。
+
+### 2. 动态水位（写死的 0.70 / 0.75 退休）
+
+```text
+estimateGraftCost(window) = fixed(6000) + package(窗口的一半字符 / 4) + growthPerTurn × growthReserveTurns
+safeCeiling = 1 - estimatedGraftCost / windowLimit
+hardAt      = clamp(safeCeiling, 0.50, 0.75)      # 0.75 = 历史实测的"最晚可切点"，是天花板
+warnAt      = hardAt - 0.05                        # 永远留出模型自救的窗口
+```
+
+- 大窗口（128k）：估价装得下 → 仍然 0.75 / 0.70（**不回归**，写成断言）；
+- 小窗口（32k）：`hardAt = 0.6125`，**比旧的 0.75 更早切**；
+- 2.6k 这种装不下一次交接的窗口：`feasible: false` 明确报出来（面板/调试面板都显示），而不是切在 50% 装作没事；
+- `growthTokensPerTurn` 就是"工具长尾"的增长预测（默认 1200 tok/轮）；
+- `watermarkMode: 'fixed'` 原样恢复两个常量——它就是给差分测试用的。
+
+### 3. HARD CONSTRAINTS 零丢失
+
+旧选择器是 `candidates.slice(0, 8)` + 8000 字符 `break`，两者都**静默**：第 9 条规则不进目标，没人知道。
+现在按**容量**打包（`constraintBudgetChars`，默认 8000），逐条不截断；装不下的规则进入 `dropped` 报告，
+`assertConstraintsPreserved()` 直接抛 `GRAFT_ABORTED: constraints truncated`——**缩水的规则集不上路**。
+`buildInjectionPlan` 是所有路径（prepare / commit / auto）的唯一收口，所以没有构建器能绕过。
+能返回的计划都带 `constraintIntegrity`（budgetChars / totalChars / kept / candidateCount / dropped: 0）作为正向证据。
+
+### 4. 台账 epoch（跨进程防撕裂）
+
+`.retired.json` / `.transferred.json` 现在写成信封 `{epoch, at, pid, payload}`。读取端四种结局：
+无信封（epoch 1，v0.17 的旧形状，**继续读**，并在下一次写入时就地升级）、`epoch == 2` 信任、
+`epoch > 2` **拒读并等下一次重试**、信封缺 payload **拒读**。`dsh-memory` 侧同样实现，且：
+`memory_migrate_evidence` 在台账被拒时**不再猜"最新会话"**，harvest 报告里带 `ledger.deferred` 说明原因。
 
 ## v0.17.0：宿主噪音过滤（tape 不再携带别人的机器路径）
 
@@ -519,7 +571,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 333 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板 |
+| `test/*.test.mjs` | 356 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -1186,7 +1238,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 333 个测试
+# 2) 356 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）

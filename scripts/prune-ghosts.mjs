@@ -36,7 +36,7 @@ import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-import { collectDebugStatus, scanAndReclaimLocks, collectMemoryStoreStatus } from '../index.js'
+import { collectDebugStatus, scanAndReclaimLocks, collectMemoryStoreStatus, readLedger } from '../index.js'
 
 const PLUGIN_DIR = dirname(dirname(fileURLToPath(import.meta.url)))
 const args = process.argv.slice(2)
@@ -90,6 +90,29 @@ function readJson(path, fallback) {
   }
 }
 
+/**
+ * v0.18: the ledgers carry an epoch envelope, so a bare `readJson` sees an object
+ * where it expects an array. These two unwrap through the plugin's own reader —
+ * the same one the runtime uses, so this script cannot drift from it.
+ */
+function ledgerPayload(path) {
+  const read = readLedger(path)
+  return read.defect === undefined || read.defect === 'unreadable' ? read.payload : undefined
+}
+function ledgerArray(path) {
+  const payload = ledgerPayload(path)
+  return Array.isArray(payload) ? payload : []
+}
+function ledgerRecord(path) {
+  const payload = ledgerPayload(path)
+  return payload !== null && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}
+}
+/** The empty form of a reset ledger, in the CURRENT epoch. */
+function emptyLedgerText(name) {
+  const payload = name === '.transferred.json' || name === '.graft-targets.json' ? {} : []
+  return JSON.stringify({ epoch: 2, at: new Date().toISOString(), pid: process.pid, payload }, null, 2) + '\n'
+}
+
 /** Move within a volume, falling back to copy+unlink across volumes. */
 function moveFile(from, to) {
   mkdirSync(dirname(to), { recursive: true })
@@ -134,8 +157,8 @@ function main() {
     section: 'locks',
     settings: { modelDrivenGraftAtRatio: 0.7, autoGraftAtRatio: 0.75, contextWindowTokens: 0 },
     locks: scanAndReclaimLocks([stateDir], true),
-    retired: readJson(join(stateDir, '.retired.json'), []),
-    transferred: Object.entries(readJson(join(stateDir, '.transferred.json'), {})).map(([id, value]) => ({ id, newSessionId: value?.newSessionId, at: value?.at })),
+    retired: ledgerArray(join(stateDir, '.retired.json')),
+    transferred: Object.entries(ledgerRecord(join(stateDir, '.transferred.json'))).map(([id, value]) => ({ id, newSessionId: value?.newSessionId, at: value?.at })),
     targets: Object.entries(readJson(join(stateDir, '.graft-targets.json'), {})).map(([id, mark]) => ({ id, generation: Number(mark?.generation ?? 1), sourceSessionId: String(mark?.sourceSessionId ?? ''), createdAt: Number(mark?.createdAt ?? 0) })),
   })
 
@@ -168,8 +191,9 @@ function main() {
     moveFile(from, to)
     manifest.moved.push({ from, to, bytes: statSync(to).size, sha256: sha256(to) })
     const empty = name === '.transferred.json' || name === '.graft-targets.json' ? '{}\n' : '[]\n'
-    writeFileSync(from, empty, 'utf8')
-    manifest.reset.push({ path: from, written: empty.trim() })
+    const written = name === '.retired.json' || name === '.transferred.json' ? emptyLedgerText(name) : empty
+    writeFileSync(from, written, 'utf8')
+    manifest.reset.push({ path: from, written: written.trim() })
   }
 
   // 2. ghost cache entries -> quarantine.
@@ -203,8 +227,8 @@ function main() {
     section: 'locks',
     settings: { modelDrivenGraftAtRatio: 0.7, autoGraftAtRatio: 0.75, contextWindowTokens: 0 },
     locks: [],
-    retired: readJson(join(stateDir, '.retired.json'), []),
-    transferred: Object.entries(readJson(join(stateDir, '.transferred.json'), {})).map(([id, value]) => ({ id, newSessionId: value?.newSessionId, at: value?.at })),
+    retired: ledgerArray(join(stateDir, '.retired.json')),
+    transferred: Object.entries(ledgerRecord(join(stateDir, '.transferred.json'))).map(([id, value]) => ({ id, newSessionId: value?.newSessionId, at: value?.at })),
     targets: Object.entries(readJson(join(stateDir, '.graft-targets.json'), {})).map(([id, mark]) => ({ id, generation: Number(mark?.generation ?? 1), sourceSessionId: String(mark?.sourceSessionId ?? ''), createdAt: Number(mark?.createdAt ?? 0) })),
   })
   // The memory panel is asked for separately: `collectDebugStatus` only fills the

@@ -41,6 +41,10 @@ function setup({ window = 2600, config = {} } = {}) {
     modelDrivenGraft: true,
     modelDrivenGraftAtRatio: 0.7,
     contextWindowTokens: window,
+    // v0.18: THIS file tests the nudge MECHANICS at the historical ratios, on a
+    // deliberately tiny window. `fixed` is exactly the differential mode the
+    // dynamic branch ships for: the derivation itself is covered by v018-watermark.
+    watermarkMode: 'fixed',
     retireSource: true,
     verifyReadBack: true,
     ...config,

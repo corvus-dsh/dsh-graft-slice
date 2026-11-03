@@ -50,6 +50,9 @@ window.__ModuleLoader__.load({
 .gc-btn:disabled{opacity:.5;cursor:default}
 .gc-err{color:#b91c1c;white-space:pre-wrap}
 .gc-mono{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;opacity:.75}
+.gc-seg{display:inline-flex;border:1px solid var(--dsw-alias-border-secondary,rgba(128,128,128,.3));border-radius:8px;overflow:hidden;flex:0 0 auto}
+.gc-seg button{border:0;background:transparent;color:inherit;font:inherit;padding:4px 10px;cursor:pointer;opacity:.65}
+.gc-seg button[aria-pressed="true"]{background:var(--dsw-alias-brand-primary,#3b82f6);color:#fff;opacity:1}
 `
 
     /** Try the plausible Client→Host command shapes; report which one worked. */
@@ -151,9 +154,59 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    function SessionRow({ row, warnAt, hardAt }) {
+    function Segmented({ label, hint, value, options, onChange }) {
+      return h('div', { className: 'gc-row' }, [
+        h('span', { key: 'l', className: 'gc-label' }, [
+          h('span', { key: 'a' }, label),
+          hint ? h('span', { key: 'b', className: 'gc-hint' }, hint) : null,
+        ]),
+        h('span', { key: 's', className: 'gc-seg', role: 'group', 'aria-label': label },
+          options.map((option) => h('button', {
+            key: option.value,
+            type: 'button',
+            'aria-pressed': String(option.value === value),
+            title: option.title || option.value,
+            onClick: () => onChange(option.value),
+          }, option.label))),
+      ])
+    }
+
+    /** A bounded integer knob (v0.18 capacity/rate settings). */
+    function NumberRow({ label, hint, value, min, max, onChange }) {
+      const [draft, setDraft] = React.useState(String(value))
+      React.useEffect(() => { setDraft(String(value)) }, [value])
+      const commit = (raw) => {
+        const parsed = Number(raw)
+        if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) { setDraft(String(value)); return }
+        if (parsed < min || parsed > max) { setDraft(String(value)); return }
+        if (parsed !== value) onChange(parsed)
+      }
+      return h('div', { className: 'gc-row' }, [
+        h('span', { key: 'l', className: 'gc-label' }, [
+          h('span', { key: 'a' }, label),
+          hint ? h('span', { key: 'b', className: 'gc-hint' }, hint) : null,
+        ]),
+        h('input', {
+          key: 'n',
+          className: 'gc-num',
+          type: 'number',
+          min: String(min),
+          max: String(max),
+          step: '1',
+          value: draft,
+          'aria-label': label,
+          onChange: (event) => setDraft(event.target.value),
+          onBlur: () => commit(draft),
+          onKeyDown: (event) => { if (event.key === 'Enter') commit(draft) },
+        }),
+      ])
+    }
+
+    function SessionRow({ row }) {
       const color = row.state === 'over-hard-cutoff' ? '#b91c1c' : row.state === 'over-warn-line' ? '#b45309' : '#10b981'
       const cls = row.state === 'over-hard-cutoff' ? 'gc-over' : row.state === 'over-warn-line' ? 'gc-warn' : 'gc-ok'
+      const warnAt = typeof row.warnAt === 'number' ? row.warnAt : 0.7
+      const hardAt = typeof row.hardAt === 'number' ? row.hardAt : 0.75
       return h('tr', null, [
         h('td', { key: 'id' }, [
           h('div', { key: 'a', className: 'gc-mono' }, row.sessionId),
@@ -165,8 +218,8 @@ window.__ModuleLoader__.load({
           h('div', { key: 'c', className: 'gc-hint' }, `数据来源 ${row.source}`),
         ]),
         h('td', { key: 'd' }, [
-          h('div', { key: 'a' }, `→70% 还差 ${row.toWarnTokens.toLocaleString()} tok`),
-          h('div', { key: 'b', className: 'gc-hint' }, `→75% 还差 ${row.toHardTokens.toLocaleString()} tok`),
+          h('div', { key: 'a' }, `→提示线 ${Math.round(warnAt * 100)}% 还差 ${row.toWarnTokens.toLocaleString()} tok`),
+          h('div', { key: 'b', className: 'gc-hint' }, `→强制线 ${Math.round(hardAt * 100)}% 还差 ${row.toHardTokens.toLocaleString()} tok`),
         ]),
         h('td', { key: 's' }, [
           h('span', { key: 'a', className: `gc-badge ${cls}` }, row.state),
@@ -231,14 +284,14 @@ window.__ModuleLoader__.load({
           h(Toggle, {
             key: 'mdg',
             label: '主动转生（modelDrivenGraft）',
-            hint: '到 70% 提醒模型自己收尾并 graft_prepare；关掉后模型不会被提示',
+            hint: '到提示线提醒模型自己收尾并 graft_prepare；关掉后模型不会被提示',
             checked: config ? config.modelDrivenGraft === true : false,
             onChange: (next) => write('modelDrivenGraft', next),
           }),
           h(Toggle, {
             key: 'ag',
             label: '强制兜底（autoGraft）',
-            hint: '到 75% 由系统强制迁移，模型忽略提示也不会无限硬扛',
+            hint: '到强制线由系统强制迁移，模型忽略提示也不会无限硬扛',
             checked: config ? config.autoGraft === true : false,
             onChange: (next) => write('autoGraft', next),
           }),
@@ -248,17 +301,67 @@ window.__ModuleLoader__.load({
           h(Ratio, {
             key: 'w',
             label: '提示线（modelDrivenGraftAtRatio）',
-            hint: '默认 0.70；必须低于强制线，否则提示没有余地',
+            hint: '默认 0.70；固定模式下生效，动态模式下是提示线的下限来源',
             value: config ? config.modelDrivenGraftAtRatio : 0.7,
             onChange: (next) => write('modelDrivenGraftAtRatio', next),
           }),
           h(Ratio, {
             key: 'h',
             label: '强制线（autoGraftAtRatio）',
-            hint: '默认 0.75；系统兜底强切的水位',
+            hint: '默认 0.75；固定模式下的兜底水位，动态模式下是最晚可切的天花板',
             value: config ? config.autoGraftAtRatio : 0.75,
             onChange: (next) => write('autoGraftAtRatio', next),
           }),
+        ]),
+        h('div', { key: 'modes', className: 'gc-card' }, [
+          h('h3', { key: 'h', className: 'gc-h' }, '模式与容量（v0.18）'),
+          h(Segmented, {
+            key: 'wm',
+            label: '水位来源（watermarkMode）',
+            hint: 'dynamic：按窗口与一次交接的估价推导；fixed：直接用上面两个常量',
+            value: config ? config.watermarkMode : 'dynamic',
+            options: [
+              { value: 'dynamic', label: '动态', title: '推导 safeCeiling = 1 - 估价/窗口' },
+              { value: 'fixed', label: '固定', title: '原样使用两个常量（差分测试用）' },
+            ],
+            onChange: (next) => write('watermarkMode', next),
+          }),
+          h(Segmented, {
+            key: 'sm',
+            label: '命令策略（safetyMode）',
+            hint: 'strict 全拒未知/破坏性；balanced 默认；autonomous 对破坏性只 ASK，不静默执行',
+            value: config ? config.safetyMode : 'balanced',
+            options: [
+              { value: 'strict', label: 'strict' },
+              { value: 'balanced', label: 'balanced' },
+              { value: 'autonomous', label: 'autonomous' },
+            ],
+            onChange: (next) => write('safetyMode', next),
+          }),
+          h(NumberRow, {
+            key: 'cb',
+            label: '硬约束容量（constraintBudgetChars）',
+            hint: '装不下的规则会让迁移抛 GRAFT_ABORTED，而不是静默缩短规则集',
+            value: config ? config.constraintBudgetChars : 8000,
+            min: 500,
+            max: 200000,
+            onChange: (next) => write('constraintBudgetChars', next),
+          }),
+          h(NumberRow, {
+            key: 'gt',
+            label: '增长预测（growthTokensPerTurn）',
+            hint: '每轮新增 token 的估计（工具长尾）；越大 → 越早切',
+            value: config ? config.growthTokensPerTurn : 1200,
+            min: 0,
+            max: 100000,
+            onChange: (next) => write('growthTokensPerTurn', next),
+          }),
+          h('p', { key: 'derived', className: 'gc-sub', style: { margin: '10px 0 0' } },
+            state && state.thresholds
+              ? `当前推导：强制线 ${(state.thresholds.hardAt * 100).toFixed(2)}% · 提示线 ${(state.thresholds.warnAt * 100).toFixed(2)}%` +
+                ` · 单次交接估价 ${state.thresholds.estimatedGraftCost.toLocaleString()} tok` +
+                (state.thresholds.feasible ? '' : ' · ⚠ 该窗口装不下一次交接（feasible=false）')
+              : '当前推导：读取中…'),
         ]),
         h('div', { key: 'guard', className: 'gc-card' }, [
           h('h3', { key: 'h', className: 'gc-h' }, '护栏'),
@@ -298,8 +401,6 @@ window.__ModuleLoader__.load({
                   h('tbody', { key: 'tb' }, state.rows.map((row) => h(SessionRow, {
                     key: row.sessionId,
                     row,
-                    warnAt: config ? config.modelDrivenGraftAtRatio : 0.7,
-                    hardAt: config ? config.autoGraftAtRatio : 0.75,
                   }))),
                 ]),
         ]),
