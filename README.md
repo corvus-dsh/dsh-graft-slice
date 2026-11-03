@@ -5,6 +5,7 @@
 **DSH 日志切片与最小注入插件。** 在源会话最后一个 `turn/end` 处切取高保真磁带，创建一个零继承、可冷恢复的交接会话；不 fork，不引入 SQLite，不单独注入 `tool/result`。
 
 > 当前版本 **0.9.0（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
+> 发布说明：[RELEASE_NOTES.md](./RELEASE_NOTES.md)（v0.8.1 归档见 [RELEASE_NOTES-v0.8.1.md](./RELEASE_NOTES-v0.8.1.md)）。
 > 目标运行时：DeepSeek Harness **0.2.1-rc.5**（当前桌面端）。
 > 规格书 v2.1 写的是 rc.4；本实现已按 rc.5 的真实源码校正了两处会导致冷恢复失败的问题。
 
@@ -631,7 +632,7 @@ v6.3 的真实长会话盲测暴露的最后一个缺口是 **A5（无感）只�
 | 含 write/edit 的路径 | 3,526 |
 | **最近一次尝试报错的路径** | **38** |
 | 会因此出现 `未确认落盘` 的日志 | 22 |
-| 例：`534030e7…`（cwd `D:\live2d模型分析`） | `- work\audit\residual\e5b_minification.py（最近一次：edit ×5，seq=479，最近一次报错，未确认落盘）` |
+| 例：`534030e7…`（cwd `D:\demo-workspace`） | `- work\audit\residual\e5b_minification.py（最近一次：edit ×5，seq=479，最近一次报错，未确认落盘）` |
 
 同一份 11 MB 真实语料（`session-51ba018f…`，15,062 事件）：`write/edit` 调用 475 次、去重 327 个路径、块内列 20 个 → 声明省略 307 个。
 

@@ -52,7 +52,7 @@ both the hint and that bootstrap line.
 ## Test and demo
 
 ```powershell
-cd 'D:\鎸佷箙灞傝兘鍔涙灦鏋刓dsh-graft-slice'
+cd '<plugin-dir>'
 node scripts/build.mjs                 # requires Node >= 22.6 (type stripping); runtime needs >= 20
 node --test test/*.test.mjs            # 284 tests
 node scripts/check-docs.mjs            # docs vs code: version, build freshness, tool list, test count, feature status
@@ -126,7 +126,7 @@ real v4 validator: synthetic-1-1 PASS, real-log PASS, plugin:graft fallback PASS
 ## Install
 
 ```text
-plugin_manager(action: "install_bundle", target: "D:\\鎸佷箙灞傝兘鍔涙灦鏋刓\dsh-graft-slice")
+plugin_manager(action: "install_bundle", target: "<path-to-dsh-graft-slice>")
 ```
 
 Then call:
