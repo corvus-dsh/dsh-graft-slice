@@ -1,5 +1,7 @@
 # dsh-graft-slice
 
+> 兄弟项目：[dsh-memory](https://github.com/corvus-dsh/dsh-memory) —— 能力记忆（SKILL.md / 负知识），与本插件只通过台账文件耦合。
+
 **DSH 日志切片与最小注入插件。** 在源会话最后一个 `turn/end` 处切取高保真磁带，创建一个零继承、可冷恢复的交接会话；不 fork，不引入 SQLite，不单独注入 `tool/result`。
 
 > 当前版本 **0.8.1（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
