@@ -1,4 +1,4 @@
-﻿# dsh-graft-slice
+# dsh-graft-slice
 
 Log slicing and minimal injection for DeepSeek Harness. It cuts a finished source session at its last `turn/end`, then creates a zero-inheritance, cold-resumable handoff session. No fork, no SQLite, no standalone `tool/result` injection.
 
@@ -18,6 +18,26 @@ Target runtime: DSH **0.2.1-rc.5** (the installed desktop build).
   - Phase 4: persist through `sessionPersistence`, cold-read and validate the artifact, retire the source in memory, and expose `{ kind: 'reject' }` through `agent/pre-step`.
 - `graft_read_result({ sourceSessionId, seq })`: reads a v4 `tool/result` payload from the source log (also accepts the v3 nested `tool-result` shape).
 
+## v0.9.0 Model-Driven handoff
+
+The 75% cutoff is a physical interruption when the model is mid-implementation. Default is now a
+5% margin: at **70%** pre-step injects one quiet hint per turn — call `graft_prepare` to inspect the
+handoff, then `graft_slice_and_inject` when you judge the task needs a new stage. At **75%** the
+system still force-migrates if the hint was ignored.
+
+```yaml
+modelDrivenGraft: true        # default true
+modelDrivenGraftAtRatio: 0.70 # must stay below autoGraftAtRatio
+autoGraft: true
+autoGraftAtRatio: 0.75        # the fallback cutoff
+```
+
+The hint rides the pre-step `messages` channel (no log write, no step number consumed), at most once
+per turn. Every target's pending state now ends with
+`[系统提示] 你刚刚完成了一次自我切片。请直接接着“当前任务”继续执行，无需等待用户确认。`
+so a grafted session continues instead of waiting for the user; turning `modelDrivenGraft` off removes
+both the hint and that bootstrap line.
+
 ## Red lines
 
 - no `ctx.sessions.fork()`
@@ -34,7 +54,7 @@ Target runtime: DSH **0.2.1-rc.5** (the installed desktop build).
 ```powershell
 cd 'D:\鎸佷箙灞傝兘鍔涙灦鏋刓dsh-graft-slice'
 node scripts/build.mjs                 # requires Node >= 22.6 (type stripping); runtime needs >= 20
-node --test test/*.test.mjs            # 273 tests
+node --test test/*.test.mjs            # 284 tests
 node scripts/check-docs.mjs            # docs vs code: version, build freshness, tool list, test count, feature status
 node scripts/demo.mjs                  # real persisted log + fake host, never writes the real store
 node scripts/scan-real-logs.mjs        # read-only scan of every local persisted log

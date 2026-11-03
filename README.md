@@ -4,7 +4,7 @@
 
 **DSH 日志切片与最小注入插件。** 在源会话最后一个 `turn/end` 处切取高保真磁带，创建一个零继承、可冷恢复的交接会话；不 fork，不引入 SQLite，不单独注入 `tool/result`。
 
-> 当前版本 **0.8.1（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
+> 当前版本 **0.9.0（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
 > 目标运行时：DeepSeek Harness **0.2.1-rc.5**（当前桌面端）。
 > 规格书 v2.1 写的是 rc.4；本实现已按 rc.5 的真实源码校正了两处会导致冷恢复失败的问题。
 
@@ -66,6 +66,32 @@ node scripts/verify-bundle.mjs   # 27 项：bundle 声明 / files 白名单 / ES
 | 未设 `type: "module"` | CJS 引 ESM 核心包，启动即崩 | `type: "module"` 已校验 |
 
 `cordis.patch.yml` 用**包名**引用（`name: dsh-graft-slice`），不写相对路径——相对路径只在本机成立。
+
+## v0.9.0：Model-Driven 交接 —— 模型自己挑时点，系统只做兜底
+
+75% 由系统直接斩杀，在长实现步骤里过于粗暴：模型正在写的句子、刚发出的工具调用都随之中断。
+现在默认留 5% 安全余量：
+
+| 水位 | 行为 |
+|---|---|
+| < 70% | 不变 |
+| ≥ 70% 且 < 75% | pre-step 注入一句提示（每轮最多一次）：请模型先 `graft_prepare` 看交接单，确认后自己调用 `graft_slice_and_inject` |
+| ≥ 75% | 兜底防线不变：系统按 `autoGraft` 强制迁移 |
+
+```yaml
+modelDrivenGraft: true        # 默认 true
+modelDrivenGraftAtRatio: 0.70 # 预警水位；须低于 autoGraftAtRatio
+autoGraft: true
+autoGraftAtRatio: 0.75        # 兜底强切
+```
+
+提示走 pre-step 的 `messages` 通道（不写日志、不占 step 号），因此不会破坏 v4 的 step 时序；
+同一 `turn` 最多注入一次。若 `modelDrivenGraftAtRatio` 配到 ≥ `autoGraftAtRatio`，预警窗口为空、
+永不触发——不做静默钳制，配置错了就是没有预警。
+
+**Target 自启**：切片产物的 pending state 底部固定追加一行
+`[系统提示] 你刚刚完成了一次自我切片。请直接接着“当前任务”继续执行，无需等待用户确认。`
+（`pending-state` 受预算保护，不会被截断）。关闭 `modelDrivenGraft` 时该行一并消失。
 
 ## v0.8.0：Phase Roadmap（节点计划）
 
@@ -253,7 +279,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 273 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯 |
+| `test/*.test.mjs` | 284 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位 |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -899,6 +925,8 @@ skeletonTurn: 1          # rc.5 必须为 1
 skeletonStep: 1          # rc.5 必须为 1
 autoGraft: false
 autoGraftAtRatio: 0.75
+modelDrivenGraft: true           # v7.6: 70% 先让模型自己收尾并切片
+modelDrivenGraftAtRatio: 0.70    # 预警水位（须低于 autoGraftAtRatio）
 contextWindowTokens: 0   # 0 = 从 request/context 推断
 autoGraftIdPrefix: auto-graft
 autoGraftSessionIds: []  # 空 = 所有会话
@@ -917,7 +945,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 273 个测试
+# 2) 284 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）

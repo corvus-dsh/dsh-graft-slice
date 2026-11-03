@@ -74,6 +74,26 @@ export interface GraftConfig {
   autoGraft?: boolean
   /** v4.0: watermark ratio, default 0.75. */
   autoGraftAtRatio?: number
+  /**
+   * v7.6 (Model-Driven): let the MODEL decide to hand over before the system does.
+   *
+   * At `modelDrivenGraftAtRatio` (default 0.70) pre-step injects ONE quiet nudge
+   * per turn, leaving a 5% safety margin: the model can finish the sentence or
+   * tool call it is in, then call `graft_prepare` / `graft_slice_and_inject`
+   * itself. The system still force-grafts at `autoGraftAtRatio` (default 0.75)
+   * when the model ignores the nudge — the hard cutoff stays the fallback.
+   *
+   * Default true: a forced kill mid-thought is the failure mode this removes.
+   */
+  modelDrivenGraft?: boolean
+  /**
+   * v7.6: nudge watermark, default 0.70.
+   *
+   * Keep it strictly below `autoGraftAtRatio`; the gap is the model's safety
+   * margin. A value at/above the hard cutoff leaves no window and the nudge can
+   * never fire (no clamping: silent correction would hide the misconfiguration).
+   */
+  modelDrivenGraftAtRatio?: number
   /** v4.0: fallback context window when request/context does not publish one. */
   contextWindowTokens?: number
   /** v4.0: target-id prefix for automatically generated sessions. */
@@ -453,6 +473,10 @@ export function normalizeConfig(config: GraftConfig | undefined): Required<Graft
     skeletonStep: asFiniteInteger(input.skeletonStep, 1, 'skeletonStep'),
     autoGraft: input.autoGraft === true,
     autoGraftAtRatio: asRatio(input.autoGraftAtRatio, 0.75, 'autoGraftAtRatio'),
+    // v7.6: on by default. 70% leaves the model a 5% margin to close what it is
+    // writing; the 75% hard cutoff remains the fallback for an ignored nudge.
+    modelDrivenGraft: input.modelDrivenGraft === undefined ? true : input.modelDrivenGraft === true,
+    modelDrivenGraftAtRatio: asRatio(input.modelDrivenGraftAtRatio, 0.7, 'modelDrivenGraftAtRatio'),
     contextWindowTokens: asFiniteInteger(input.contextWindowTokens, 0, 'contextWindowTokens'),
     autoGraftIdPrefix:
       typeof input.autoGraftIdPrefix === 'string' && input.autoGraftIdPrefix.trim().length > 0
@@ -3048,6 +3072,23 @@ export function buildTape(
   // 硬约束 7: provenance for inherited constraints goes FIRST in the pending
   // state, ahead of every other line a reader might act on.
   const constraintAnchor = inheritedConstraintAnchor(events, sourceSessionId)
+  // v7.6 (Model-Driven): the target boots itself.
+  //
+  // A grafted session whose first move is "waiting for the user" throws away the
+  // handoff: the direction was already approved, and the pending state describes
+  // exactly where the work stopped. This line is the standing instruction to keep
+  // going, and it sits at the BOTTOM of the pending state because it is the last
+  // thing the reader sees before acting.
+  //
+  // The chunk is protected from budget trimming (`protectedKinds` includes
+  // pending-state), so "forced" holds even on a tight tape.
+  const selfSliceBootstrap =
+    config.modelDrivenGraft === false
+      ? undefined
+      : '[系统提示] 你刚刚完成了一次自我切片。请直接接着“当前任务”继续执行，无需等待用户确认。'
+  const pendingStateText = [constraintAnchor, pendingBody, selfSliceBootstrap]
+    .filter((part): part is string => typeof part === 'string' && part.length > 0)
+    .join('\n\n')
   return {
     boundary,
     sourceTemplate: extractSourceTemplate(sliced),
@@ -3055,7 +3096,7 @@ export function buildTape(
     goal: goal.goal,
     goalSource: goal.source,
     phase: 'handoff',
-    pendingStateText: constraintAnchor === undefined ? pendingBody : `${constraintAnchor}\n\n${pendingBody}`,
+    pendingStateText,
     pointerCount,
     ...(replayedMessagesSkipped === 0 ? {} : { replayedMessagesSkipped }),
   }
@@ -5228,6 +5269,60 @@ function takePlanNudge(
   ]
 }
 
+/**
+ * v7.6 (Model-Driven): the 70% "you may hand over yourself" nudge.
+ *
+ * WHY A NUDGE AND NOT A KILL
+ *
+ * The system used to cut at 75% regardless of what the model was doing. Inside a
+ * long implementation step that is a physical interruption: the sentence being
+ * written, and the tool call just issued, are lost. Five points of margin turns
+ * an involuntary kill into a decision the model can make at a safe point.
+ *
+ * DISCIPLINE (same as the plan nudge):
+ *   - delivered through the pre-step `messages` channel: no log write, no step
+ *     number consumed, therefore no lifecycle risk;
+ *   - at most ONE per turn, whatever the step count;
+ *   - only in the [modelDrivenGraftAtRatio, autoGraftAtRatio) window — above the
+ *     ceiling the hard cutoff runs and never reaches this code.
+ */
+const MODEL_DRIVEN_NUDGE_LEAD = '[系统提示] 当前上下文水位已达'
+const MODEL_DRIVEN_NUDGE_BODY =
+  '如果你觉得当前任务需要跨阶段进行，请先调用 graft_prepare 查看交接单；确认无误后，调用 graft_slice_and_inject 进行自我切片。'
+
+/** agentId -> the `turn` whose nudge was already sent. */
+const modelDrivenNudgeTurns = new Map<string, number>()
+
+function takeModelDrivenNudge(
+  settings: Required<GraftConfig>,
+  agentId: string,
+  payload: any,
+  watermark: TokenWatermark | undefined,
+  hardCutoffRatio: number | undefined,
+): Array<Record<string, unknown>> {
+  if (!settings.modelDrivenGraft) return []
+  if (watermark === undefined) return []
+  const floor = settings.modelDrivenGraftAtRatio
+  // No forced cutoff for THIS session (autoGraft off, or excluded by the
+  // allowlist) → the model is the only exit; the nudge lasts until the window
+  // is genuinely full.
+  const ceiling = hardCutoffRatio ?? 1
+  if (!(watermark.ratio >= floor && watermark.ratio < ceiling)) return []
+  const turn = Number(payload?.turn)
+  const turnKey = Number.isFinite(turn) ? turn : Number(payload?.step) || 0
+  if (modelDrivenNudgeTurns.get(agentId) === turnKey) return []
+  modelDrivenNudgeTurns.set(agentId, turnKey)
+  const pct = Math.min(99, Math.max(1, Math.round(watermark.ratio * 100)))
+  return [
+    {
+      id: `graft-model-nudge-${agentId}-${turnKey}`,
+      role: 'user',
+      content: [{ type: 'text', text: `${MODEL_DRIVEN_NUDGE_LEAD} ${pct}%。${MODEL_DRIVEN_NUDGE_BODY}` }],
+      source: { kind: GRAFT_REPLAY_SOURCE_KIND },
+    },
+  ]
+}
+
 function loadPendingConstraints(ctx: PluginContextLike): void {
   try {
     const parsed = JSON.parse(readFileSync(pendingConstraintsPath, 'utf8'))
@@ -5363,6 +5458,9 @@ export function resetRetiredSessions(): void {
   constraintsReasserted.clear()
   watermarkCache.clear()
   taskBoundaryDeferrals.clear()
+  // v7.6: the per-turn nudge mark is session state too; a reset that kept it
+  // would silence the 70% warning for the first turn of the next test.
+  modelDrivenNudgeTurns.clear()
   // v7.4: a reset must also drop the resume grace, or a test that resumes a
   // session poisons every later test that expects the watermark to fire.
   autoGraftSuppressedUntil.clear()
@@ -8442,6 +8540,16 @@ async function appendTransitionCard(
       const current = isRecord(agents) && typeof agents.currentInitiator === 'function' ? agents.currentInitiator() : undefined
       agentId = isRecord(current) && typeof current.id === 'string' ? current.id : undefined
     }
+    // v7.6: measured here when the auto-graft check already read it, and once
+    // more below when only the nudge needs it. `readTokenWatermark` folds
+    // incrementally, so the second read costs the appended tail, not the log.
+    let watermarkForNudge: TokenWatermark | undefined
+    /**
+     * v7.6: whether the hard cutoff applies to THIS session (autoGraft on, and
+     * not excluded by the allowlist). The nudge ceiling depends on it: a session
+     * with no cutoff has no rescue line behind the nudge.
+     */
+    let autoGraftApplies = false
     if (typeof agentId === 'string') {
       // v5.2 补丁二：后台约束通过 pre-step 的 messages 注入，见下方 takePendingConstraintMessages。
       /**
@@ -8581,8 +8689,12 @@ async function appendTransitionCard(
         }
       }
 
-      if (settings.autoGraft && (settings.autoGraftSessionIds.length === 0 || settings.autoGraftSessionIds.includes(agentId)) && state === 'idle') {
+      autoGraftApplies =
+        settings.autoGraft &&
+        (settings.autoGraftSessionIds.length === 0 || settings.autoGraftSessionIds.includes(agentId))
+      if (autoGraftApplies && state === 'idle') {
         const watermark = await readTokenWatermark(stableCtx, agentId, settings)
+        watermarkForNudge = watermark
         if (watermark !== undefined && watermark.ratio >= settings.autoGraftAtRatio) {
           // v6.3 module 4: confirm mode asks here; the answer arrives next step.
           if (settings.graftMode === 'confirm' && !pendingConfirms.has(agentId)) {
@@ -8656,7 +8768,20 @@ async function appendTransitionCard(
       // v7.5: the node-plan hint rides the same channel (and the same discipline:
       // once, quiet, non-blocking).
       const planExtra = takePlanNudge(ctx, agentId, payload?.messages)
-      const appended = [...extra, ...planExtra]
+      // v7.6: the model-driven handover nudge. Between the nudge line and the
+      // hard cutoff the model decides; above the cutoff the auto-graft branch
+      // has already returned and this code is never reached.
+      if (settings.modelDrivenGraft && watermarkForNudge === undefined) {
+        watermarkForNudge = await readTokenWatermark(stableCtx, agentId, settings)
+      }
+      const modelExtra = takeModelDrivenNudge(
+        settings,
+        agentId,
+        payload,
+        watermarkForNudge,
+        autoGraftApplies ? settings.autoGraftAtRatio : undefined,
+      )
+      const appended = [...extra, ...planExtra, ...modelExtra]
       if (appended.length === 0) return merged === undefined ? decision : { ...decision, messages }
       return { ...decision, messages: [...messages, ...appended] }
     }

@@ -10,3 +10,10 @@
         verifyReadBack: true
         skeletonTurn: 1
         skeletonStep: 1
+        # v7.6 Model-Driven 交接（默认）：70% 只提示模型自己收尾并切片，
+        # 模型可以写完当前这一步；75% 系统兜底强切，绝不无限硬扛。
+        modelDrivenGraft: true
+        modelDrivenGraftAtRatio: 0.70
+        # 兜底防线：模型忽略 70% 提示时，75% 仍然由系统强制迁移。
+        autoGraft: true
+        autoGraftAtRatio: 0.75
