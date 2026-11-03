@@ -33,6 +33,16 @@
         #   dispatch 之前被拒绝执行，并写一条 .graft-audit.jsonl 的 command-blocked 记录。
         #   工作区内部的搜索与删除不受影响——会拦正常工作的护栏活不过一天。
         commandGuard: true
+        # v0.19 物理点火：目标会话 flush 成功后，由宿主 sessionController.prompt 直接开跑。
+        #   igniteTarget: 缺省 true——等人类点一下的交接不叫交接（源会话此时已退休）。
+        #   ignitionMode:
+        #     queue = 作为目标的下一轮用户输入（默认，最稳）；
+        #     steer = 插到当前轮之前（目标已经在跑时更即时）。
+        #   通道缺失 / 调用失败不会让迁移失败：目标仍然可用，意图写进
+        #   <dataDir>/.graft-pending-ignition.json，下一次激活重试（最多 3 次）。
+        #   想先检查目标再让它跑，把 igniteTarget 设为 false。
+        igniteTarget: true
+        ignitionMode: queue
         # v0.14 调试面板（graft_debug_status）读取记忆库的位置，只读、永不写入。
         # 留空 = <state dir>/.dsh-memory 与 ~/.agents/skills；真机 profile 里显式给出，
         # 因为 dsh-memory 的 memoryDir 被 override 到了别的目录。
