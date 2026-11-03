@@ -208,10 +208,10 @@ test('v7.4b: a call with no result keeps its own seq (it was interrupted)', () =
 })
 
 // ---------------------------------------------------------------------------
-// Carryover: say that the block is an assembly, not one message
+// Carryover: v0.19 — the instruction travels, the work log does not
 // ---------------------------------------------------------------------------
 
-test('v7.4b: an assembled carryover says it is assembled', () => {
+test('v0.19: an open turn with NO new instruction produces no carryover at all', () => {
   const log = makeSourceLog({ turns: 3 })
   const seq = log.events.at(-1).seq
   log.events.push(
@@ -233,7 +233,12 @@ test('v7.4b: an assembled carryover says it is assembled', () => {
   )
   const plan = buildInjectionPlan(log, {})
   const carry = plan.chunks.find((chunk) => chunk.kind === 'open-turn-carryover')
-  assert.ok(carry !== undefined)
-  assert.match(carry.text, /不是一条完整消息/u)
-  assert.match(carry.text, /2 段/u)
+  // v0.19: narration alone is history. It used to be carried (with a note saying
+  // it was assembled from several steps); now it is not carried at all, because
+  // the read-back index already points at every seq it produced.
+  assert.equal(carry, undefined, 'a work log with no new user instruction is not a handoff fact')
+  assert.ok(
+    !JSON.stringify(plan.chunks).includes('第一段：重启后先验证构建。'),
+    'the narration must not appear anywhere in the tape',
+  )
 })

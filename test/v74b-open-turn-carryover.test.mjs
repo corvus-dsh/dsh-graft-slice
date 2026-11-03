@@ -143,7 +143,7 @@ test('buildInjectionPlan: an open turn holding ONLY the user instruction is stil
   )
 })
 
-test('buildInjectionPlan: a worked open turn keeps the instruction, narration and pointer', () => {
+test('v0.19: a worked open turn keeps the INSTRUCTION; narration and pointers are dropped', () => {
   const log = makeSourceLog({ turns: 3 })
   const { resultSeq } = appendWorkedOpenTurn(log, { turn: 4, text: USER_ONLY, narration: NARRATION })
 
@@ -153,8 +153,15 @@ test('buildInjectionPlan: a worked open turn keeps the instruction, narration an
   assert.ok(carry, 'the open turn must produce a carryover chunk')
   assert.equal(plan.chunks[0].kind, 'open-turn-carryover', 'the breakpoint is injected first')
   assert.ok(carry.text.includes(USER_ONLY), 'user instruction survives')
-  assert.ok(carry.text.includes(NARRATION), 'assistant narration survives')
-  assert.ok(carry.text.includes(`seq=${resultSeq}`), 'the completed tool result stays reachable by seq')
+  // v0.19: the narration is a work log — dropped, and the drop is declared.
+  assert.ok(!carry.text.includes(NARRATION), 'narration no longer travels')
+  assert.match(carry.text, /已按语义瘦身/u)
+  // The result is still reachable: by seq inside the read-back index.
+  assert.ok(
+    JSON.stringify(plan.chunks).includes(`seq=${resultSeq}`) ||
+      JSON.stringify(plan.chunks).includes(String(resultSeq)),
+    'the completed tool result stays reachable by seq',
+  )
 })
 
 test('buildInjectionPlan: no open turn, no invented carryover', () => {

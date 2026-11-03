@@ -1,3 +1,50 @@
+# dsh-graft-slice v0.19.0 — 切片极限瘦身 + 物理点火
+
+**发布日期**：2026-11-04　**状态**：预发布（v0.18.0 → v0.19.0）　**测试**：374/374（+18）
+
+## 问题一：交接带着旧房子的报错
+`open-turn-carryover` 把开放轮次基本原样搬走——助手叙述逐字、指针逐行，加上 `renderLastStepScene`
+里那条**完整报错正文**（上限 2000 字符）。这是目标既不能执行也不能验证的最大一块文本，而且它让
+新会话开局先修一个已经修好的问题。
+
+## 修法一：语义状态提取（`extractSemanticState` + `renderInstructionCard`）
+只提炼「最终结果 + 未执行的下一步 + 停泊点」，装进一张 ≤1400 字符的**指令卡**：
+- 最终结果从证据里读：`git commit <sha>` / `git push` / `测试 N 通过` / `写入 <file>`，**每条都带 seq**；
+- 扫描自新到旧、遇到第一个成功即停 ⇒ 更早的失败一律视为已覆盖（`resolvedErrors`），**不进新上下文**；
+- 只有**没有任何成功覆盖过**的那条报错保留一行（160 字符 + seq），因为它是下一步的阻塞；
+- 丢弃**必须声明**（`【已按语义瘦身】`）；指针散文丢了但**坐标保留**（`seq=…`），可达性不变；
+- `open-turn-carryover` 只保留**未执行的用户指令** + 指针坐标 + 丢弃声明；
+- `extractConstraints` 跳过 `[dsh-graft-slice 点火]` 消息：它是真实 `user/message`，但它是我们写的
+  引导语，不是人声明的规则。
+
+## 问题二：目标会话正确但静止
+交接成功、源会话已退休，而目标**等人点它**——工作停在交接成功的那一刻。`selfSliceBootstrap`
+是一句写给目标的话，不是机制。
+
+## 修法二：物理点火（`igniteTargetSession`）
+`graft_slice_and_inject` 在 `handle.flush()` 之后、退休事务提交之后调用宿主
+`sessionController.prompt(request, signal)`（Web 输入框同一条通道，会从持久化冷恢复会话），
+投递带 `[dsh-graft-slice 点火]` 标记的唤醒指令。缺省开启（`igniteTarget: true`，`ignitionMode: queue`）。
+- 通道缺失/抛错/超时 20s：**迁移照样成功**，`ignition` 如实上报，意图写入
+  `<dataDir>/.graft-pending-ignition.json` 由下一次 `apply()` 重试；
+- 目标日志已有点火消息：`alreadyIgnited`，**不再投递**（重复投递 = 同一句话被读成两轮用户意图）；
+- 连续 3 次失败：放弃并审计 `ignite-failed`；
+- 审计线：`ignite` / `ignite-failed` / `ignite-skipped`。
+
+## 控制台
+新增「物理点火」卡片：`igniteTarget` 开关、`ignitionMode`（queue/steer）、**未点火会话列表**
+（含重试次数）。`igniteTarget` 与 `ignitionMode` 均可实时落盘，无需重启。
+
+## 验证
+18 条新测试：`test/v019-semantic-card.test.mjs`（10 条：提交/推送/测试/落盘识别、最新结果优先、
+已解决报错丢弃并计数、未决报错一行带 seq、`slimScene`、卡片结构、诚实空卡、
+**端到端**——噪声开放轮只留干净卡片且丢弃有声明、点火消息不进约束）与
+`test/v019-ignition.test.mjs`（8 条：标记与默认值、通道被调用且 sessionId 是目标、
+**点火在落盘之后**、无通道如实上报并入队、抛错不回溯迁移并审计、
+已点火不重复投递、`igniteTarget:false` 差分开关、Remote 面兜底）。374/374 全绿。
+
+---
+
 # dsh-graft-slice v0.18.0 — 风险/策略分离、动态水位、硬约束零丢失、台账 epoch
 
 **发布日期**：2026-11-04　**状态**：预发布（v0.17.0 → v0.18.0）　**测试**：356/356（+23）

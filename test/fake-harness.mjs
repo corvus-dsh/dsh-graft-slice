@@ -410,6 +410,11 @@ export function makeCtx({ sourceLog, persistence = new FakePersistence(), paths,
       if (name === 'workingDirectory') return ctx.workingDirectory
       if (name === 'commands') return ctx.commands
       if (name === 'configEditor') return ctx.configEditor
+      // v0.19: the physical-ignition channel. Attached by the test AFTER makeCtx,
+      // like the token meter and the tool registry, so the lookup reads the live
+      // property rather than a captured copy.
+      if (name === 'sessionController') return ctx.sessionController
+      if (name === 'remote') return ctx.remote
       return undefined
     },
     on(name, listener) {

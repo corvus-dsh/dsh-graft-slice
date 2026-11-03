@@ -99,18 +99,20 @@ test('v7.4 P1-2: events inside the OPEN turn refresh the tail instead of voiding
   // Work continues in the turn that is already open. The boundary does not move,
   // so the reviewed history is intact; the carryover and pending state are simply
   // fresher than the ones that were displayed.
+  //
+  // v0.19: what refreshes the tail is a NEW INSTRUCTION, not more narration. The
+  // work log no longer travels (see the semantic slimming), so appending an
+  // assistant paragraph is correctly a no-op for the tape; appending a user
+  // message is what changes what the target will be told to do.
   log.events.push({
-    type: 'assistant/message',
+    type: 'user/message',
     seq: log.events.at(-1).seq + 1,
     time: 1,
     data: {
-      turn: 4,
-      step: 2,
-      message: {
-        role: 'assistant',
-        source: { kind: 'model' },
-        content: [{ type: 'text', text: '一段在审核期间写下的新段落，它会让 carryover 比审核时更长。' }],
-      },
+      id: 'user-review-refresh',
+      role: 'user',
+      content: [{ type: 'text', text: '审核期间我又追加了一句：顺便把控制台面板一起改掉。' }],
+      source: { kind: 'user' },
     },
   })
 

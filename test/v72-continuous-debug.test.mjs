@@ -67,7 +67,7 @@ function debugLog() {
   return log
 }
 
-test('v7.2: the last failure is inlined verbatim, bounded and marked', () => {
+test('v0.19: the last failure is NOT inlined — one line with its seq, no stack trace', () => {
   const log = makeSourceLog({ turns: 2 })
   const body = `Error: Cannot find module 'left-pad'\nRequire stack:\n- /app/src/index.ts\n${'x'.repeat(3000)}`
   log.events.push({
@@ -96,6 +96,8 @@ test('v7.2: the last failure is inlined verbatim, bounded and marked', () => {
     event.seq = index
   })
 
+  // The EXTRACTOR still keeps the whole failure: it is evidence, and a caller may
+  // render it. What changed in v0.19 is that the INJECTION no longer does.
   const scene = extractLastStepScene(log.events)
   assert.equal(scene.failingTool, 'pwsh')
   assert.equal(scene.errorTruncated, true)
@@ -104,11 +106,18 @@ test('v7.2: the last failure is inlined verbatim, bounded and marked', () => {
 
   const plan = buildInjectionPlan(log, { adaptiveDepth: false, recentTurns: 0 })
   const pending = plan.chunks.find((chunk) => chunk.kind === 'pending-state')
-  // The reader must see the error's own words, not a 180-char gist.
-  assert.match(pending.text, /最后一条报错原文（seq=/)
+  // One line, actionable, traceable — and the old house's stack trace stays out.
+  assert.match(pending.text, /【未决报错】pwsh 失败：.*（原文 seq=/u)
   assert.match(pending.text, /Cannot find module 'left-pad'/)
-  assert.match(pending.text, /Require stack/)
-  assert.match(pending.text, /\[已截断\]/)
+  assert.doesNotMatch(pending.text, /Require stack/u, "the stack trace is history, not a handoff fact")
+  assert.doesNotMatch(pending.text, /\[已截断\]/u)
+  assert.doesNotMatch(pending.text, /最后一条报错原文/u)
+  assert.ok(
+    pending.text.length < 1200,
+    `the card must stay slim; got ${pending.text.length} chars`,
+  )
+  // The drop is DECLARED, not silent.
+  assert.match(pending.text, /【已按语义瘦身】/u)
 })
 
 test('v7.2: a short failure is inlined whole, without a truncation mark', () => {

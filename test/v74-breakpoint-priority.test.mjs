@@ -91,7 +91,7 @@ function appendOpenTurn(log, { turn, userText, narration, toolName = 'pwsh' }) {
   return log
 }
 
-test('v7.4 P0-3b: an open turn is injected FIRST, with the user’s own words', () => {
+test('v7.4 P0-3b / v0.19: an open turn is injected FIRST, with the user’s own words', () => {
   const log = makeSourceLog({ turns: 3 })
   appendOpenTurn(log, { turn: 4, userText: ANCHOR, narration: NARRATION })
 
@@ -99,7 +99,11 @@ test('v7.4 P0-3b: an open turn is injected FIRST, with the user’s own words', 
   assert.equal(plan.chunks[0]?.kind, 'open-turn-carryover', `first chunk was ${plan.chunks[0]?.kind}`)
   assert.match(plan.chunks[0].text, /Turn 4 · 进行中/u)
   assert.ok(plan.chunks[0].text.includes(ANCHOR), 'the user’s instruction must survive verbatim')
-  assert.ok(plan.chunks[0].text.includes(NARRATION), 'the last narration names the work in progress')
+  // v0.19: the narration of the in-flight round is history. It is dropped, and the
+  // drop is declared in the same chunk instead of being carried into the new window.
+  assert.ok(!plan.chunks[0].text.includes(NARRATION), 'the work log does not travel')
+  assert.match(plan.chunks[0].text, /已按语义瘦身/u)
+  assert.match(plan.chunks[0].text, /字符中间叙述/u)
 })
 
 test('v7.4 P0-3b: without an open turn nothing is invented', () => {
@@ -135,5 +139,8 @@ test('v7.4 P0-3b: auto-graft keeps the in-flight round, not the previous one', a
     dump.includes('ANCHOR-BREAKPOINT-41'),
     'the in-flight round must survive the graft; losing it is the bug this test exists for',
   )
-  assert.ok(dump.includes(NARRATION), 'the narration of the work in progress must be carried')
+  // v0.19: the narration is NOT carried any more — but its coordinates are, so the
+  // work log is one graft_read_result away rather than gone.
+  assert.ok(!dump.includes(NARRATION), 'the work log stays in the old log, reachable by seq')
+  assert.match(dump, /本轮过程指针：seq=/u, 'the open turn keeps its pointer coordinates')
 })

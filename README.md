@@ -4,7 +4,7 @@
 
 **DSH 日志切片与最小注入插件。** 在源会话最后一个 `turn/end` 处切取高保真磁带，创建一个零继承、可冷恢复的交接会话；不 fork，不引入 SQLite，不单独注入 `tool/result`。
 
-> 当前版本 **0.18.0（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
+> 当前版本 **0.19.0（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
 > 发布说明：[RELEASE_NOTES.md](./RELEASE_NOTES.md)（v0.8.1 归档见 [RELEASE_NOTES-v0.8.1.md](./RELEASE_NOTES-v0.8.1.md)）。
 > 目标运行时：DeepSeek Harness **0.2.1-rc.5**（当前桌面端）。
 > 规格书 v2.1 写的是 rc.4；本实现已按 rc.5 的真实源码校正了两处会导致冷恢复失败的问题。
@@ -67,6 +67,69 @@ node scripts/verify-bundle.mjs   # 27 项：bundle 声明 / files 白名单 / ES
 | 未设 `type: "module"` | CJS 引 ESM 核心包，启动即崩 | `type: "module"` 已校验 |
 
 `cordis.patch.yml` 用**包名**引用（`name: dsh-graft-slice`），不写相对路径——相对路径只在本机成立。
+
+## v0.19.0：切片极限瘦身 + 物理点火（最后两块拼图）
+
+前两个版本让交接**正确**；这一版让它**干净**并且**自己会跑**。
+
+### 1. 语义状态提取（不再搬运旧房子的报错）
+
+`open-turn-carryover` 以前把开放轮次「基本原样」搬过去：助手叙述逐字、指针逐行，加上
+`renderLastStepScene` 里那条**完整报错正文**（上限 2000 字符的栈回溯）。这是目标既不能执行、
+也不能验证的最大一块文本，而且它把旧会话的问题带进新上下文——**新会话开局先修一个早就修好的东西**。
+
+现在只提炼两件事 + 一个指针，构成一张**指令卡**：
+
+```
+## 交接指令卡（第一轮只要读这里）
+【最终结果】git commit e8da8f6 成功（seq=14821）
+【未决报错】pwsh 失败：Cannot find module 'left-pad'（原文 seq=14903）   ← 只有未解决的才有这一行
+我接下来需要 …
+【停泊点】Turn 47 已完成 · 边界 seq=14950 · 可回读指针 340 处 · sourceSessionId=…
+【已按语义瘦身】丢弃：2 条已解决的报错、1 段报错正文、812 字符中间叙述；需要时按 seq 回读原文。
+```
+
+- **最终结果**：`git commit <sha> 成功` / `git push 成功（main）` / `测试 N 通过` / `写入 <file> 完成`，
+  每种都带 `seq`，所以它是**可核对**的声明而不是一句总结；
+- **已解决的冲突/报错强制丢弃**：扫描自新到旧，遇到第一个成功就停；比它更早的失败都算已被覆盖
+  （计入 `resolvedErrors`，**不进新上下文**）；
+- **唯一例外**：一直没有被后续成功覆盖的那条报错，保留**一行**（正文 160 字符 + seq），因为它是
+  **下一步的阻塞**，属于「未执行的下一步」的一部分；
+- **丢弃必须声明**：`【已按语义瘦身】` 列出丢了什么。静默删除是这套系统一贯要避免的失效模式；
+- **指针坐标保留**：`（本轮过程指针：seq=9,15,23；正文按 seq 回读）`——散文丢了，可达性没丢，
+  「每个结论都有 seq 可开」这条契约不变；
+- **点火指令不算人类约束**：`extractConstraints` 跳过带 `[dsh-graft-slice 点火]` 标记的消息。
+  它是以真实 `user/message` 投递的，按来源看像人话，但它是我们写的引导语；把它当硬约束传下去，
+  下一代就会把「继续执行任务」当成人亲口声明的规则。
+
+### 2. 物理点火（新会话自己开跑）
+
+在此之前，每个版本产出的目标都是**正确但静止**的：目标拿着 goal、磁带、指令卡和约束，然后**等人点它**。
+而它替换掉的源会话已经被退休——**交接成功的那一刻，工作停了**。插件自己写的
+`selfSliceBootstrap`（「无需等待用户确认」）只是一句写给目标的话，而没人启动的目标收不到任何话。
+
+宿主有这个通道：`sessionController.prompt(request, signal)` ——「Admit one prompt after explicitly
+resuming its Session」。它正是 Web 输入框走的那条路，会**从持久化里冷恢复**会话，所以它也是插件让
+冷目标跑起来的正规接口。`graft_slice_and_inject` 在 `handle.flush()` **之后**、退休事务提交**之后**
+调用它一次，往目标投递：
+
+```
+[dsh-graft-slice 点火] 你刚刚完成了一次物理切片：上一段会话的上下文已经交接给你…
+```
+
+幂等与诚实：
+
+| 情形 | 行为 |
+|---|---|
+| 通道存在、接受 | `ignition.ok=true`，记录 `channel`，清空队列 |
+| 通道缺失 | `attempted=false` + 原因；**迁移仍然成功**；意图落盘排队重试 |
+| 调用抛错/超时（20s） | `ok=false` + 原因；**不回溯迁移**；同样排队重试 |
+| 目标日志里已有点火消息 | `alreadyIgnited=true`，**不再投递**——重复投递会让目标把同一句话读成两轮用户意图 |
+| 连续失败 3 次 | 放弃并审计 `ignite-failed`（目标仍在，可人工打开） |
+
+队列文件 `<dataDir>/.graft-pending-ignition.json`，`apply()` 末尾 `resumePendingIgnitions()` 消费；
+审计线记 `ignite` / `ignite-failed` / `ignite-skipped`。控制台新增「物理点火」卡片：开关、投递方式
+（`queue` / `steer`）、以及**未点火会话列表**（含重试次数）。
 
 ## v0.18.0：风险与策略分离、动态水位、硬约束零丢失、台账 epoch
 
@@ -571,7 +634,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 356 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch |
+| `test/*.test.mjs` | 374 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -1238,7 +1301,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 356 个测试
+# 2) 374 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）

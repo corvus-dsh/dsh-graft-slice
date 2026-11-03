@@ -175,6 +175,19 @@ export const inject = ['tools', 'sessions', 'sessionQuery', 'sessionPersistence'
      
                                 
      
+                                            
+    
+                                                                               
+                                                                                   
+                                                                                 
+                                                  
+     
+                        
+                                                                     
+                                  
+                                                                                 
+                         
+     
                                                                                
     
                                                                              
@@ -345,6 +358,8 @@ export function isHumanAuthored(source         )          {
                
                           
                       
+                                                                                  
+                          
                                                                                       
                                   
  
@@ -471,6 +486,13 @@ export function isHumanAuthored(source         )          {
    
                        
                                             
+     
+                                                                              
+    
+                                                                                  
+                                                                                 
+     
+                           
                                                                                   
                     
               
@@ -597,6 +619,13 @@ export function normalizeConfig(config                         )                
     growthReserveTurns: asFiniteInteger(input.growthReserveTurns, 2, 'growthReserveTurns'),
     growthTokensPerTurn: asFiniteInteger(input.growthTokensPerTurn, DEFAULT_GROWTH_TOKENS_PER_TURN, 'growthTokensPerTurn'),
     constraintBudgetChars: asFiniteInteger(input.constraintBudgetChars, CONSTRAINT_BUDGET_CHARS, 'constraintBudgetChars'),
+    // v0.19: on by default — a handoff that waits for a human is not a handoff.
+    igniteTarget: input.igniteTarget === undefined ? true : input.igniteTarget === true,
+    ignitionMode: input.ignitionMode === 'steer' ? 'steer' : 'queue',
+    ignitionPrompt:
+      typeof input.ignitionPrompt === 'string' && input.ignitionPrompt.trim().length > 0
+        ? input.ignitionPrompt.trim()
+        : '',
     memoryDir: typeof input.memoryDir === 'string' && input.memoryDir.trim().length > 0 ? input.memoryDir.trim() : '',
     skillsDir: typeof input.skillsDir === 'string' && input.skillsDir.trim().length > 0 ? input.skillsDir.trim() : '',
     contextWindowTokens: asFiniteInteger(input.contextWindowTokens, 0, 'contextWindowTokens'),
@@ -1013,6 +1042,15 @@ export function extractConstraintsDetailed(
     if (event.data?.source?.kind !== 'user') continue
     const text = textOfMessage(event.data)
     if (text.length === 0) continue
+    // v0.19: the plugin's own ignition prompt is not something the user said.
+    //
+    // The physical-ignition call admits a real `user/message` (the host admits it
+    // through the same channel the composer uses), so by source kind alone it looks
+    // like human intent. It is not: it is a bootstrap we wrote. Carrying it into a
+    // HARD CONSTRAINTS block would let a later generation treat "继续执行任务" as a
+    // standing rule the human declared — the exact confusion the P5 marker exists
+    // to prevent, one channel over.
+    if (isIgnitionText(text)) continue
     // Filtering happens per sentence: a user message can legitimately carry a
     // real standing rule next to harness preamble.
     const messageScope = SESSION_SCOPE_PATTERN.test(text)
@@ -3024,6 +3062,571 @@ function buildPendingState(
   return text
 }
 
+// ===========================================================================
+// v0.19 module 1 — SEMANTIC STATE, not a log (the instruction card)
+// ===========================================================================
+
+/**
+ * v0.19: what the source session's LAST RESULT was, stated as one verifiable line.
+ *
+ * THE DEFECT THIS REPLACES
+ *
+ * The tape used to hand the open turn over more or less whole: the assistant's
+ * narration, every pointer line, and — through `renderLastStepScene` — the failing
+ * tool's FULL error body, up to 2000 characters of stack trace. On this project's
+ * own slices that was the single largest source of text the target could neither
+ * act on nor verify, and it carried the old house's problems into the new context:
+ * a target that opens by reading a resolved stack trace starts by fixing something
+ * that is already fixed.
+ *
+ * What a resumed worker actually needs is two facts and one pointer:
+ *
+ *   [最终结果] git commit e8da8f6 成功（seq=14821）
+ *   [下一步] …（未执行的那一个动作）
+ *   [停泊点] Turn 47 已完成 · 指针 340 处可回读
+ *
+ * Everything else is history, and history is reachable by seq. So it is DROPPED,
+ * and the drop is declared (`discarded`) rather than silent — the same discipline
+ * the omitted-turn declaration uses.
+ */
+                                                                                          
+
+                                  
+                                                
+              
+                           
+                                                                                
+             
+              
+ 
+
+                                     
+              
+                                                                
+              
+                       
+ 
+
+/** Evidence of what the slimming threw away. The point of the module, not a metric. */
+                                  
+                                                         
+                     
+                                                                
+                        
+                                                                   
+                        
+                                                                                     
+                      
+ 
+
+                                
+                           
+                                                              
+                                                               
+                           
+                            
+ 
+
+/** Test runners and git are the two honest "this finished" signals on this project. */
+const TEST_PASS_PATTERNS                    = [
+  /ℹ pass (\d+)/u,
+  /(\d+)\s+passing\b/u,
+  /(\d+)\/(\d+)\s+checks passed/u,
+  /(\d+)\s+passed\b/u,
+]
+
+function outcomeOfResult(
+  tool        ,
+  args                                     ,
+  text        ,
+  seq        ,
+)                              {
+  const command = typeof args?.command === 'string' ? args.command : ''
+  if (/(^|[;&|\s])git push\b/u.test(command)) {
+    const ref = /([\w./-]+)\s*->\s*([\w./-]+)/u.exec(text)
+    return {
+      kind: 'push',
+      text: ref === null ? 'git push 成功' : `git push 成功（${ref[2].trim()}）`,
+      seq,
+      tool,
+    }
+  }
+  if (/(^|[;&|\s])git commit\b/u.test(command)) {
+    const ref = /\[[^\]]*?\s([0-9a-f]{7,40})\]/u.exec(text)
+    return {
+      kind: 'commit',
+      text: ref === null ? 'git commit 成功' : `git commit ${ref[1].slice(0, 7)} 成功`,
+      seq,
+      tool,
+    }
+  }
+  for (const pattern of TEST_PASS_PATTERNS) {
+    const match = pattern.exec(text)
+    if (match === null) continue
+    const first = Number(match[1])
+    const second = match[2] === undefined ? undefined : Number(match[2])
+    if (!Number.isFinite(first) || first <= 0) continue
+    const label = second === undefined || second === first ? `${first}` : `${first}/${second}`
+    return { kind: 'test-pass', text: `测试 ${label} 通过`, seq, tool }
+  }
+  if (tool === 'write' || tool === 'edit') {
+    const path = typeof args?.file_path === 'string' ? args.file_path : ''
+    const base = path.split(/[\\/]/u).filter((part) => part.length > 0).at(-1)
+    if (base !== undefined && base.length > 0) {
+      return { kind: 'artifact', text: `${tool === 'write' ? '写入' : '修改'} ${base} 完成`, seq, tool }
+    }
+  }
+  return undefined
+}
+
+/**
+ * v0.19: read the LAST RESULT, the UNRESOLVED failure, and what was thrown away.
+ *
+ * The scan is newest-first and stops at the first success: anything older than the
+ * newest success is history. A failure found after that success (i.e. older) was
+ * therefore superseded — it is counted as `resolvedErrors` and dropped, which is
+ * the concrete meaning of "已解决的冲突不带进新上下文".
+ */
+export function extractSemanticState(events                             )                {
+  const discarded                  = { errorBodies: 0, resolvedErrors: 0, narrationChars: 0, pointerLines: 0 }
+  const calls = new Map                                                                     ()
+  for (const event of events) {
+    if (event?.type !== 'tool/call') continue
+    const callId = typeof event.data?.callId === 'string' ? event.data.callId : ''
+    if (callId.length === 0) continue
+    const tool = typeof event.data?.name === 'string' ? event.data.name : ''
+    let args                                     
+    try {
+      const parsed = JSON.parse(String(event.data?.arguments ?? '{}'))
+      if (isRecord(parsed)) args = parsed
+    } catch {
+      // Arguments that are not JSON cannot name a command or a path.
+    }
+    calls.set(callId, { tool, args })
+  }
+
+  let outcome                             
+  let unresolved                                  
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'tool/result') continue
+    const seq = Number(event.seq)
+    const message = event.data?.message
+    const callId = String(message?.toolCallId ?? message?.source?.callId ?? '')
+    const call = calls.get(callId)
+    const tool = call?.tool ?? ''
+    const text = textOfMessage(message)
+    const isError = message?.isError === true || event.data?.error !== undefined
+    if (isError) {
+      if (outcome !== undefined || unresolved !== undefined) {
+        // Something succeeded after it: the failure was superseded. Drop it.
+        discarded.resolvedErrors += 1
+        continue
+      }
+      const line =
+        text
+          .split(/\r?\n/u)
+          .map((candidate) => candidate.trim())
+          .find((candidate) => /error|失败|exception|assert|not found|cannot|exit code/iu.test(candidate)) ??
+        text.split(/\r?\n/u)[0] ??
+        ''
+      unresolved = {
+        text: truncateEnd(line.replace(/\s+/gu, ' '), 160).text,
+        seq,
+        tool: tool.length > 0 ? tool : 'tool',
+      }
+      discarded.errorBodies += 1
+      continue
+    }
+    if (outcome !== undefined) continue
+    const found = outcomeOfResult(tool, call?.args, text, seq)
+    if (found !== undefined) outcome = found
+  }
+
+  return {
+    ...(outcome === undefined ? {} : { outcome }),
+    ...(unresolved === undefined ? {} : { unresolvedError: unresolved }),
+    discarded,
+  }
+}
+
+/**
+ * v0.19: the scene without its error body.
+ *
+ * `extractLastStepScene` keeps the whole failure on purpose (it is evidence, and a
+ * caller may render it). The INJECTION must not: see `extractSemanticState`.
+ */
+export function slimScene(scene               )                {
+  return {
+    ...(scene.file === undefined ? {} : { file: scene.file }),
+    ...(scene.action === undefined ? {} : { action: scene.action }),
+  }
+}
+
+const CARD_HEADER = '## 交接指令卡（第一轮只要读这里）'
+/** Total budget for the card. Past this the card is the thing that needs slimming. */
+export const INSTRUCTION_CARD_MAX_CHARS = 1400
+
+                                       
+                         
+                                                                   
+              
+                                                    
+                          
+                      
+ 
+
+export function renderInstructionCard(input                      )         {
+  const lines           = [CARD_HEADER]
+  const outcome = input.semantic.outcome
+  lines.push(
+    outcome === undefined
+      ? '【最终结果】源会话没有留下可验证的结尾动作（无提交/测试/落盘证据）。'
+      : `【最终结果】${outcome.text}（seq=${outcome.seq}）`,
+  )
+  const unresolved = input.semantic.unresolvedError
+  if (unresolved !== undefined) {
+    // ONE line, with the seq. The body itself stays in the log, one tool call away.
+    lines.push(`【未决报错】${unresolved.tool} 失败：${unresolved.text}（原文 seq=${unresolved.seq}）`)
+  }
+  if (input.body.trim().length > 0) lines.push('', input.body.trim())
+  const stop           = []
+  if (input.stopPoint.turn !== undefined) stop.push(`Turn ${input.stopPoint.turn} 已完成`)
+  if (input.stopPoint.boundarySeq !== undefined && input.stopPoint.boundarySeq > 0) {
+    stop.push(`边界 seq=${input.stopPoint.boundarySeq}`)
+  }
+  if (input.pointerCount > 0) stop.push(`可回读指针 ${input.pointerCount} 处`)
+  if (input.sourceSessionId !== undefined && input.sourceSessionId.length > 0) {
+    stop.push(`sourceSessionId=${input.sourceSessionId}`)
+  }
+  if (stop.length > 0) lines.push('', `【停泊点】${stop.join(' · ')}`)
+  const drops           = []
+  if (input.semantic.discarded.resolvedErrors > 0) {
+    drops.push(`${input.semantic.discarded.resolvedErrors} 条已解决的报错`)
+  }
+  if (input.semantic.discarded.errorBodies > 0) {
+    // The count is of failures found; only the unresolved one keeps a line.
+    drops.push(`${Math.max(0, input.semantic.discarded.errorBodies - (unresolved === undefined ? 0 : 1))} 段报错正文`)
+  }
+  if (input.semantic.discarded.narrationChars > 0) {
+    drops.push(`${input.semantic.discarded.narrationChars} 字符中间叙述`)
+  }
+  if (input.semantic.discarded.pointerLines > 0) {
+    drops.push(`${input.semantic.discarded.pointerLines} 行过程指针`)
+  }
+  if (drops.length > 0) {
+    lines.push('', `【已按语义瘦身】丢弃：${drops.join('、')}；需要时按上面的 seq 回读原文。`)
+  }
+  const text = lines.join('\n')
+  return text.length <= INSTRUCTION_CARD_MAX_CHARS
+    ? text
+    : `${truncateEnd(text, INSTRUCTION_CARD_MAX_CHARS).text}\n…[指令卡已到上限，细节按 seq 回读]`
+}
+
+// ===========================================================================
+// v0.19 module 2 — PHYSICAL IGNITION (the target starts itself)
+// ===========================================================================
+
+/**
+ * v0.19: after the target is durable, START IT — do not wait for a human.
+ *
+ * THE GAP THIS CLOSES
+ *
+ * Everything up to v0.18 produced a target that was correct and INERT. It had the
+ * goal, the tape, the instruction card and the constraints — and it sat there
+ * until somebody clicked it. Meanwhile the session it replaced was already
+ * retired, so the work stopped at the exact moment the handoff succeeded. The
+ * plugin's own escape hatch (`selfSliceBootstrap`: "无需等待用户确认") was a
+ * message to the target, and a message to a target nobody started is not a
+ * mechanism.
+ *
+ * The Host has the channel: `sessionController.prompt(request, signal)` —
+ * "Admit one prompt after explicitly resuming its Session". It is what the Web
+ * composer calls, it resumes a COLD session from persistence, and it is therefore
+ * also what a plugin must use to make a cold target run. This module calls it
+ * once, after the target's `flush()` and after the retirement transaction, and
+ * records what happened.
+ *
+ * IDEMPOTENCE AND HONESTY
+ *
+ *  - The intent is written to `.graft-pending-ignition.json` BEFORE the call and
+ *    removed only after it succeeds. A crash between the two leaves a retry.
+ *  - A retry first asks the target's own log whether the ignition prompt is
+ *    already there. A prompt that was admitted but not acknowledged must not be
+ *    admitted twice: a queued duplicate would make the target read the same
+ *    instruction as two turns of user intent.
+ *  - A failure never fails the migration. The session exists and is loadable; the
+ *    outcome is reported (`ignition`) and audited (`ignite` / `ignite-failed`).
+ */
+export const IGNITION_MARKER = '[dsh-graft-slice 点火]'
+
+export const DEFAULT_IGNITION_PROMPT =
+  `${IGNITION_MARKER} 你刚刚完成了一次物理切片：上一段会话的上下文已经交接给你，` +
+  '交接卡在工作区与历史里。请直接接着任务继续执行，不要复述交接过程，也不要重新调研已经完成的部分。'
+
+                                 
+                                                       
+                    
+             
+                  
+                      
+                 
+                                                                            
+                       
+ 
+
+                                  
+                  
+                         
+            
+                  
+ 
+
+/** How many activation rounds a failed ignition is retried before giving up. */
+export const IGNITION_MAX_ATTEMPTS = 3
+/** A prompt that has not been admitted in this long is retried next activation. */
+const IGNITION_TIMEOUT_MS = 20_000
+
+// `PLUGIN_DIR` is declared further down, so this path is resolved lazily: reading
+// it at module-evaluation time would throw before the module finished loading.
+let pendingIgnitionPath = ''
+
+function ignitionPath()         {
+  return pendingIgnitionPath.length > 0 ? pendingIgnitionPath : join(PLUGIN_DIR, '.graft-pending-ignition.json')
+}
+
+const pendingIgnitions = new Map                         ()
+
+export function buildIgnitionPrompt(settings                                               )         {
+  const custom = settings.ignitionPrompt.trim()
+  if (custom.length === 0) return DEFAULT_IGNITION_PROMPT
+  return custom.startsWith(IGNITION_MARKER) ? custom : `${IGNITION_MARKER} ${custom}`
+}
+
+/** Is this user message the plugin's own ignition, rather than something a human typed? */
+export function isIgnitionText(text        )          {
+  return typeof text === 'string' && text.trimStart().startsWith(IGNITION_MARKER)
+}
+
+export function loadPendingIgnitions(ctx                               )       {
+  try {
+    for (const value of readJsonArray(ignitionPath())) {
+      if (!isRecord(value)) continue
+      const targetId = typeof value.targetId === 'string' ? value.targetId : ''
+      if (targetId.length === 0) continue
+      pendingIgnitions.set(targetId, {
+        targetId,
+        sourceSessionId: typeof value.sourceSessionId === 'string' ? value.sourceSessionId : '',
+        at: Number(value.at ?? 0),
+        attempts: Number(value.attempts ?? 0),
+      })
+    }
+  } catch (error) {
+    try {
+      ctx?.logger?.warn?.(`[dsh-graft-slice] cannot read ${ignitionPath()}: ${String((error       )?.message ?? error)}`)
+    } catch {
+      // Logging must not block activation.
+    }
+  }
+}
+
+function persistPendingIgnitions(ctx                               )       {
+  try {
+    mkdirSync(dirname(ignitionPath()), { recursive: true })
+    writeJsonAtomic(ignitionPath(), [...pendingIgnitions.values()])
+  } catch (error) {
+    try {
+      ctx?.logger?.warn?.(`[dsh-graft-slice] cannot write ${ignitionPath()}: ${String((error       )?.message ?? error)}`)
+    } catch {
+      // Logging must not change the migration result.
+    }
+  }
+}
+
+export function getPendingIgnitions()                                       {
+  return pendingIgnitions
+}
+
+/** Does the target's own log already carry the ignition prompt? */
+async function alreadyIgnited(ctx                   , targetId        )                   {
+  try {
+    const raw = await ctx.sessionQuery.readSession(targetId)
+    const events = Array.isArray((raw       )?.events) ? ((raw       ).events                      ) : []
+    for (const event of events) {
+      if (event?.type !== 'user/message') continue
+      if (isIgnitionText(textOfMessage(event.data))) return true
+    }
+    return false
+  } catch (error) {
+    // Two different failures, two different answers:
+    //  - the session does not exist  -> it was certainly not ignited; proceed (the
+    //    call itself will report a bad id);
+    //  - anything else (transient I/O) -> UNKNOWN, and an unknown must not be
+    //    prompted twice: a duplicate admission reads to the target as the same
+    //    instruction given twice, which is how one ask becomes two turns of intent.
+    const message = String((error       )?.message ?? error)
+    return !/not found|enoent|no such/iu.test(message)
+  }
+}
+
+/**
+ * v0.19: the one call that turns a durable artifact into a running worker.
+ *
+ * Channels are tried in order and REPORTED: `sessionController.prompt` is the Host
+ * service (what the composer uses); `remote.session.prompt` is the same operation
+ * through the generated Remote namespace, for a composition where only that face is
+ * mounted. No channel means the capability is absent, which is reported as such —
+ * never as a silent no-op.
+ */
+export async function igniteTargetSession(
+  ctx                   ,
+  settings                       ,
+  targetId        ,
+  sourceSessionId        ,
+)                          {
+  if (!settings.igniteTarget) return { attempted: false, ok: false, reason: 'igniteTarget=false' }
+  const prompt = buildIgnitionPrompt(settings)
+  if (await alreadyIgnited(ctx, targetId)) {
+    return { attempted: false, ok: true, alreadyIgnited: true, promptChars: prompt.length }
+  }
+  const request = ()                          => ({
+    requestId: `graft-ignite-${targetId}-${Date.now().toString(36)}`,
+    sessionId: targetId,
+    mode: settings.ignitionMode,
+    content: [{ type: 'text', text: prompt }],
+  })
+  const channels                                          = []
+  const service = (() => {
+    try {
+      return (ctx.get       )?.('sessionController')
+    } catch {
+      return undefined
+    }
+  })()
+  if (isRecord(service) && typeof (service       ).prompt === 'function') {
+    channels.push(['sessionController.prompt', () => (service       ).prompt(request(), undefined)])
+  }
+  const remote = (() => {
+    try {
+      return (ctx.get       )?.('remote')
+    } catch {
+      return undefined
+    }
+  })()
+  const remoteSession = isRecord(remote) ? (remote       ).session : undefined
+  if (remoteSession !== undefined && typeof remoteSession.prompt === 'function') {
+    channels.push(['remote.session.prompt', () => remoteSession.prompt(request(), undefined)])
+  }
+  if (channels.length === 0) {
+    return {
+      attempted: false,
+      ok: false,
+      reason: 'no ignition channel: ctx.sessionController.prompt is not mounted',
+    }
+  }
+  const failures           = []
+  for (const [label, run] of channels) {
+    try {
+      const settled = await Promise.race([
+        run(),
+        new Promise((_resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error(`timeout after ${IGNITION_TIMEOUT_MS}ms`)), IGNITION_TIMEOUT_MS)
+          if (typeof (timer       ).unref === 'function') (timer       ).unref()
+        }),
+      ])
+      const accepted = isRecord(settled) ? (settled       ).accepted !== false : true
+      if (accepted) return { attempted: true, ok: true, channel: label, promptChars: prompt.length }
+      failures.push(`${label}: prompt was not accepted`)
+    } catch (error) {
+      failures.push(`${label}: ${String((error       )?.message ?? error)}`)
+    }
+  }
+  return { attempted: true, ok: false, reason: failures.join(' | '), promptChars: prompt.length }
+}
+
+/**
+ * v0.19: queue -> ignite -> clear. The durable intent is what makes a crash
+ * between "the target is on disk" and "the target is running" recoverable.
+ */
+export async function attemptIgnition(
+  ctx                   ,
+  settings                       ,
+  sourceSessionId        ,
+  targetId        ,
+)                          {
+  if (!settings.igniteTarget) return { attempted: false, ok: false, reason: 'igniteTarget=false' }
+  const existing = pendingIgnitions.get(targetId)
+  pendingIgnitions.set(targetId, {
+    targetId,
+    sourceSessionId,
+    at: existing?.at ?? Date.now(),
+    attempts: existing?.attempts ?? 0,
+  })
+  persistPendingIgnitions(ctx)
+  const result = await igniteTargetSession(ctx, settings, targetId, sourceSessionId)
+  if (result.ok) {
+    pendingIgnitions.delete(targetId)
+    persistPendingIgnitions(ctx)
+  } else {
+    const entry = pendingIgnitions.get(targetId)
+    if (entry !== undefined) {
+      pendingIgnitions.set(targetId, { ...entry, attempts: entry.attempts + 1 })
+      persistPendingIgnitions(ctx)
+    }
+  }
+  try {
+    appendGraftAudit({
+      at: new Date().toISOString(),
+      kind: result.ok ? 'ignite' : result.attempted ? 'ignite-failed' : 'ignite-skipped',
+      sessionId: targetId,
+      ...(sourceSessionId.length === 0 ? {} : { targetSessionId: sourceSessionId }),
+      detail:
+        `${result.ok ? 'ok' : result.reason ?? 'not attempted'}` +
+        `${result.channel === undefined ? '' : ` via ${result.channel}`}` +
+        `${result.alreadyIgnited === true ? ' (already ignited)' : ''}`,
+    })
+  } catch {
+    // The audit line is evidence; the migration must not depend on it.
+  }
+  return result
+}
+
+/**
+ * v0.19: consume the queue — one activation, one attempt per pending target.
+ *
+ * Called at the end of `apply()`. It retries what a crash or a missing channel left
+ * behind, and it GIVES UP after `IGNITION_MAX_ATTEMPTS` instead of retrying forever:
+ * a target nobody can start is a fact to report, not a loop.
+ */
+export async function resumePendingIgnitions(
+  ctx                   ,
+  settings                       ,
+)                                                                     {
+  const out                                                            = []
+  for (const entry of [...pendingIgnitions.values()]) {
+    if (!settings.igniteTarget) break
+    if (entry.attempts >= IGNITION_MAX_ATTEMPTS) {
+      pendingIgnitions.delete(entry.targetId)
+      persistPendingIgnitions(ctx)
+      out.push({ targetId: entry.targetId, ok: false, reason: `gave up after ${entry.attempts} attempts` })
+      try {
+        appendGraftAudit({
+          at: new Date().toISOString(),
+          kind: 'ignite-failed',
+          sessionId: entry.targetId,
+          detail: `gave up after ${entry.attempts} attempts; the target is durable and can be opened by hand`,
+        })
+      } catch {
+        // Evidence only.
+      }
+      continue
+    }
+    const result = await attemptIgnition(ctx, settings, entry.sourceSessionId, entry.targetId)
+    out.push({ targetId: entry.targetId, ok: result.ok, ...(result.reason === undefined ? {} : { reason: result.reason }) })
+  }
+  return out
+}
+
 /**
  * v7.0 A1/A2: render one turn as a replay of the real conversation flow.
  *
@@ -3394,7 +3997,12 @@ export function buildTape(
     // happened recently" precisely when the most recent action was the one
     // that mattered. The scene is a fact about the source session, not about
     // what the tape chose to replay.
-    extractLastStepScene(events),
+    //
+    // v0.19: ...and then SLIMMED. The file/action pair says where the pen stopped
+    // in one clause; the failure body that used to ride along was up to 2000
+    // characters of another session's stack trace. The unresolved failure still
+    // appears — once, as one line with its seq, in the instruction card.
+    slimScene(extractLastStepScene(events)),
     lastOpenCall,
     todoFreshness,
   )
@@ -3439,7 +4047,28 @@ export function buildTape(
   // v7.9: if the model ignored the 70% nudge and was cut at the hard watermark,
   // the target must know the interruption was forced, not planned.
   const forcedCutNote = noteForcedCut(sourceSessionId)
-  const pendingStateText = [constraintAnchor, pendingBody, forcedCutNote, artifactNote, selfSliceBootstrap]
+  // v0.19: the semantic state and the instruction card.
+  //
+  // The card is what the target reads in its first turn: the source's final
+  // result, the one next action, the stop point, and — when there is one — the
+  // single unresolved failure as a LINE WITH A SEQ rather than as a body. The
+  // counts in `discarded` make the slimming visible instead of silent.
+  //
+  // The scan covers the FULL log, not `sliced`: the newest result and the newest
+  // unresolved failure usually live in the OPEN turn, which the boundary excludes
+  // from the tape — and those are exactly the two facts the card exists to state.
+  const semantic = extractSemanticState(events)
+  const instructionCard = renderInstructionCard({
+    semantic,
+    body: pendingBody,
+    stopPoint: {
+      ...(typeof boundary.lastTurn === 'number' ? { turn: boundary.lastTurn } : {}),
+      ...(typeof boundary.boundarySeq === 'number' ? { boundarySeq: boundary.boundarySeq } : {}),
+    },
+    ...(sourceSessionId === undefined || sourceSessionId.length === 0 ? {} : { sourceSessionId }),
+    pointerCount,
+  })
+  const pendingStateText = [constraintAnchor, instructionCard, forcedCutNote, artifactNote, selfSliceBootstrap]
     .filter((part)                 => typeof part === 'string' && part.length > 0)
     .join('\n\n')
   return {
@@ -3451,6 +4080,7 @@ export function buildTape(
     phase: 'handoff',
     pendingStateText,
     pointerCount,
+    semantic,
     ...(replayedMessagesSkipped === 0 ? {} : { replayedMessagesSkipped }),
   }
 }
@@ -3853,8 +4483,20 @@ export function buildInjectionPlan(
   const olderTruncated = false
 
   const chunks                        = []
-  // v7.0 B1: the open turn is placed first and kept verbatim — it is the most
-  // recent work, and a budget squeeze must not be the thing that hides it.
+  // v7.0 B1: the open turn is placed first — it is the most recent work, and a
+  // budget squeeze must not be the thing that hides it.
+  //
+  // v0.19 SLIMMING: the chunk stops carrying the turn "more or less whole".
+  //
+  // It used to hold the assistant's narration verbatim plus every pointer line the
+  // turn produced. Both are history: the narration is a work log the target cannot
+  // act on, and the pointers already exist, deduplicated and grouped, in the
+  // read-back index. What must survive verbatim is the ONE thing that carries
+  // intent and that no later block repeats: the user's un-executed instruction.
+  //
+  // So the carryover becomes that instruction (bounded), its pointers' COORDINATES,
+  // and a declared count of what was dropped. The old house's problems do not
+  // travel; its unfinished ask does.
   const openTurnCarryover =
     options?.includeOpenTurn === false
       ? undefined
@@ -3867,43 +4509,50 @@ export function buildInjectionPlan(
   // looked at pointers and assistant text, so the whole carryover chunk was
   // discarded. The target then read the PREVIOUS round as "the task" — the
   // exact failure the carryover exists to prevent.
-  if (
-    openTurnCarryover !== undefined &&
-    (openTurnCarryover.userTexts.length > 0 ||
-      openTurnCarryover.pointers.length > 0 ||
-      openTurnCarryover.assistantText.length > 0)
-  ) {
-    const lines           = []
-    if (openTurnCarryover.userTexts.length > 0) {
-      for (const userText of openTurnCarryover.userTexts) {
-        lines.push(`【用户】${neutralizeStructure(userText.trim())}`)
+  if (openTurnCarryover !== undefined && openTurnCarryover.userTexts.length > 0) {
+    const instruction = truncateEnd(
+      openTurnCarryover.userTexts.map((text) => neutralizeStructure(text.trim())).filter((text) => text.length > 0).join('\n'),
+      900,
+    ).text
+    if (instruction.length > 0) {
+      const dropped           = []
+      if (openTurnCarryover.assistantText.trim().length > 0) {
+        dropped.push(`${openTurnCarryover.assistantText.trim().length} 字符中间叙述`)
       }
-    }
-    if (openTurnCarryover.assistantText.length > 0) {
-      lines.push(`【我】${neutralizeStructure(openTurnCarryover.assistantText.trim())}`)
-    }
-    if (openTurnCarryover.pointers.length > 0) {
-      lines.push(renderPointerLines(openTurnCarryover.pointers))
-    }
-    chunks.push({
-      kind: 'open-turn-carryover',
-      // v7.0 B4: no "交接瞬间" narration. The label states the turn and what is
-      // missing; a reader resuming work does not need to be told a boundary
-      // happened, only which turn this is and that unfinished work is absent.
+      if (openTurnCarryover.pointers.length > 0) {
+        dropped.push(`${openTurnCarryover.pointers.length} 行过程指针`)
+      }
+      // v0.19: the POINTERS' coordinates stay even though their prose does not.
       //
-      // v7.4b: say when the block is ASSEMBLED from several steps.
-      //
-      // Measured on `handoff-demo`: the carryover read like one coherent
-      // message, but every paragraph was lifted verbatim from a different step
-      // (seq 14949/14956/14963/14968) with the English reasoning dropped. The
-      // target read it as "the last thing I said" and had to be corrected by
-      // reading the log. Naming the assembly is cheap and prevents that.
-      text:
-        `[Turn ${openTurnCarryover.turn} · 进行中]\n` +
-        `${carryoverAssemblyNote(openTurnCarryover)}\n${lines.join('\n')}`,
-      truncated: false,
-    })
+      // Dropping a pointer line without keeping its seq would make the work
+      // unreachable — the tape's whole contract is that every claim has a seq you
+      // can open. A bare number list costs ~20 characters and keeps that contract
+      // while removing the prose the target cannot act on.
+      const seqList = [...openTurnCarryover.pointers]
+        .sort((left, right) => left.seq - right.seq)
+        .map((item) => `${item.seq}${item.isError === true ? '!' : ''}`)
+      const coordinates =
+        seqList.length === 0
+          ? ''
+          : `\n（本轮过程指针：seq=${seqList.slice(0, 16).join(',')}` +
+            `${seqList.length > 16 ? ` …共 ${seqList.length} 处` : ''}；正文按 seq 回读）`
+      chunks.push({
+        kind: 'open-turn-carryover',
+        // v7.0 B4: no "交接瞬间" narration. The label states the turn and what is
+        // missing; a reader resuming work does not need to be told a boundary
+        // happened, only which turn this is and that unfinished work is absent.
+        text:
+          `[Turn ${openTurnCarryover.turn} · 进行中 · 未执行的用户指令]\n` +
+          `${instruction}` +
+          coordinates +
+          (dropped.length === 0 ? '' : `\n（已按语义瘦身：丢弃 ${dropped.join('、')}）`),
+        truncated: false,
+      })
+    }
   }
+  // Assistant work with no new instruction is history, not a handoff fact: it
+  // produces no chunk at all. The read-back index already points at every seq it
+  // produced, so nothing becomes unreachable by dropping the prose.
   if (olderLines.length > 0) {
     chunks.push({
       kind: 'old-summary',
@@ -5170,6 +5819,9 @@ function configureRetiredStore(ctx                   , settings                 
   txnDirPath = join(dataDir, '.txn')
   constraintSectionsPath = join(dataDir, '.graft-constraint-sections.json')
   pendingConstraintsPath = join(dataDir, '.pending-constraints.json')
+  // v0.19: the ignition queue lives with the rest of the per-profile state, so a
+  // crash between "target durable" and "target running" is recoverable per profile.
+  pendingIgnitionPath = join(dataDir, '.graft-pending-ignition.json')
   draftsPath = join(dataDir, '.graft-drafts.json')
   preparedStorePath = join(dataDir, '.graft-prepared.json')
   leftoversStorePath = join(dataDir, '.graft-leftovers.json')
@@ -7962,6 +8614,25 @@ async function graftSliceAndInjectUnlocked(
 
     const firstSeq = 0
     const lastSeq = events.length - 1
+    // v0.19 PHYSICAL IGNITION: the artifact is durable (handle.flush() above) and
+    // the retirement transaction has committed, so this is the exact moment the
+    // target becomes a session the host can resume. Ask the host to start it.
+    //
+    // Deliberately AFTER the durability barrier and BEFORE the report, and
+    // deliberately non-fatal: a session that exists but did not wake is reported
+    // (and retried from `.graft-pending-ignition.json`), while a failed ignition
+    // must never roll back a completed migration.
+    const ignition = await attemptIgnition(ctx, settings, sourceId, newId)
+    if (!ignition.ok) {
+      try {
+        ctx.logger?.warn?.(
+          `[dsh-graft-slice] ignition ${ignition.attempted ? 'failed' : 'skipped'} for ${newId}: ` +
+            `${ignition.reason ?? 'unknown'}; the target is durable and queued for a retry`,
+        )
+      } catch {
+        // Logging must not change the migration result.
+      }
+    }
     // v5.2 补丁二：迁移已经落盘并可用，LLM 精修在后台进行。
     // 这里刻意不 await：它不该影响「用户看到新会话」的时间。
     options?.refineConstraints?.(sourceId, newId, raw.events)
@@ -8006,6 +8677,10 @@ async function graftSliceAndInjectUnlocked(
       },
       constraints: plan.constraints,
       constraintSource: plan.constraintSource,
+      // v0.19: whether the new session was actually STARTED, and through which
+      // channel. A handoff that produced a session nobody wakes is a fact the
+      // caller must see, not a detail to discover by staring at the sidebar.
+      ignition,
       // v0.14 D2: the chain depth of the created target, so a caller can see it
       // without reading the target's log first.
       generation: plan.generation,
@@ -10124,7 +10799,7 @@ export function collectMemoryStoreStatus(
  * is to make the common knobs reachable without hand-editing, not to become a
  * general config editor that can silently produce an invalid patch.
  */
-export const CONSOLE_BOOLEAN_KEYS = ['modelDrivenGraft', 'autoGraft', 'workspaceRedline', 'commandGuard']         
+export const CONSOLE_BOOLEAN_KEYS = ['modelDrivenGraft', 'autoGraft', 'workspaceRedline', 'commandGuard', 'igniteTarget']         
 export const CONSOLE_RATIO_KEYS = ['modelDrivenGraftAtRatio', 'autoGraftAtRatio']         
 /**
  * v0.18: the enumerated knobs. Adding them here is what keeps the v0.18 policy and
@@ -10134,6 +10809,7 @@ export const CONSOLE_RATIO_KEYS = ['modelDrivenGraftAtRatio', 'autoGraftAtRatio'
 export const CONSOLE_ENUM_KEYS                                              = {
   safetyMode: ['strict', 'balanced', 'autonomous'],
   watermarkMode: ['fixed', 'dynamic'],
+  ignitionMode: ['queue', 'steer'],
 }
 /** v0.18: the integer knobs, with the range a value must fall in. */
 export const CONSOLE_INTEGER_KEYS                                                         = {
@@ -10246,7 +10922,15 @@ export const CONSOLE_PATCH_ID = 'dsh-graft-slice'
                                  
                                
                               
+                                                                    
+                         
+                                   
    
+     
+                                                                                  
+                                                                            
+     
+                                                                                                      
      
                                                                                     
                                                                                    
@@ -10280,6 +10964,9 @@ export function apply(ctx                   , config              = {})       {
   // disappears on restart, leaving the constraints reachable by `/compact`.
   loadConstraintSections(ctx)
   loadPendingConstraints(ctx)
+  // v0.19: ignition intents a crash (or a missing channel) left behind. Consumed
+  // below, once the services this needs are actually resolvable.
+  loadPendingIgnitions(ctx)
   loadDrafts(ctx)
   loadLeftovers(ctx)
   loadAutoGraftSuppression()
@@ -10306,6 +10993,22 @@ export function apply(ctx                   , config              = {})       {
       `[dsh-graft-slice] archived-fork registration failed: ${String((error       )?.message ?? error)}`,
     )
   })
+  // v0.19: retry what a crash or a missing channel left un-ignited. Fire-and-forget:
+  // activation must not wait on another session's agent resuming, and the durable
+  // queue means a second failure is simply retried on the next start.
+  void resumePendingIgnitions(ctx, settings)
+    .then((results) => {
+      const failed = results.filter((item) => !item.ok)
+      if (failed.length > 0) {
+        ctx.logger?.warn?.(
+          `[dsh-graft-slice] ignition retry: ${failed.length} target(s) still not started ` +
+            `(${failed.map((item) => `${item.targetId}: ${item.reason ?? 'unknown'}`).join('; ')})`,
+        )
+      }
+    })
+    .catch((error) => {
+      ctx.logger?.warn?.(`[dsh-graft-slice] ignition retry failed: ${String((error       )?.message ?? error)}`)
+    })
   const captured = new Map                 ()
   for (const service of ['sessionPersistence', 'workspaceRegistry', 'paths', 'sessionQuery', 'sessions', 'agents']) {
     try {
@@ -11562,9 +12265,19 @@ async function appendTransitionCard(
         constraintBudgetChars: settings.constraintBudgetChars,
         growthTokensPerTurn: settings.growthTokensPerTurn,
         growthReserveTurns: settings.growthReserveTurns,
+        igniteTarget: settings.igniteTarget,
+        ignitionMode: settings.ignitionMode,
       },
       thresholds: { ...thresholds, estimate: thresholds.windowLimit > 0 ? cost : null },
       rows,
+      // v0.19: "the target is durable but nobody started it" is a state the panel
+      // has to be able to show, not a log line the operator has to go find.
+      pendingIgnitions: [...pendingIgnitions.values()].map((entry) => ({
+        targetId: entry.targetId,
+        sourceSessionId: entry.sourceSessionId,
+        attempts: entry.attempts,
+        at: entry.at,
+      })),
       generatedAt: new Date().toISOString(),
     }
   }
@@ -11639,6 +12352,8 @@ async function appendTransitionCard(
       'Create a durable, zero-inheritance handoff session from a finished source session. ' +
       'Slices through the last turn/end, injects a goal seed, older-turn summaries, the last N turns verbatim, ' +
       'and a first-person pending state into one closed turn/step skeleton. ' +
+      'After the target is durable it is IGNITED (sessionController.prompt) so it starts working without a human; ' +
+      'the report carries `ignition` and a failed ignition is queued for retry, never a silent no-op. ' +
       'Refuses an open turn, a missing source cwd, a duplicate target id, or a source without a closed turn. ' +
       'Never forks and never writes standalone tool/result events.',
     parameters: {

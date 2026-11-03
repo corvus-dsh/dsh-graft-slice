@@ -380,6 +380,32 @@ window.__ModuleLoader__.load({
             onChange: (next) => write('commandGuard', next),
           }),
         ]),
+        h('div', { key: 'ignite', className: 'gc-card' }, [
+          h('h3', { key: 'h', className: 'gc-h' }, '物理点火（v0.19）'),
+          h(Toggle, {
+            key: 'it',
+            label: '落盘后自动唤醒（igniteTarget）',
+            hint: '目标会话 flush 成功后由宿主 sessionController.prompt 直接开跑，无需人工点击',
+            checked: config ? config.igniteTarget === true : false,
+            onChange: (next) => write('igniteTarget', next),
+          }),
+          h(Segmented, {
+            key: 'im',
+            label: '唤醒投递方式（ignitionMode）',
+            hint: 'queue：作为下一条用户输入；steer：插到当前轮之前',
+            value: config ? config.ignitionMode : 'queue',
+            options: [
+              { value: 'queue', label: 'queue' },
+              { value: 'steer', label: 'steer' },
+            ],
+            onChange: (next) => write('ignitionMode', next),
+          }),
+          state && state.pendingIgnitions && state.pendingIgnitions.length > 0
+            ? h('p', { key: 'p', className: 'gc-sub', style: { color: '#b45309', margin: '8px 0 0' } },
+                `未点火（已排队重试）：${state.pendingIgnitions.map((item) => `${item.targetId}（第 ${item.attempts} 次）`).join('、')}`)
+            : h('p', { key: 'p', className: 'gc-hint', style: { margin: '8px 0 0' } },
+                '当前没有待点火的会话。'),
+        ]),
         h('div', { key: 'live', className: 'gc-card' }, [
           h('div', { key: 'h', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, [
             h('h3', { key: 't', className: 'gc-h', style: { margin: 0 } }, '实时水位'),
