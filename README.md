@@ -68,6 +68,25 @@ node scripts/verify-bundle.mjs   # 27 项：bundle 声明 / files 白名单 / ES
 
 `cordis.patch.yml` 用**包名**引用（`name: dsh-graft-slice`），不写相对路径——相对路径只在本机成立。
 
+## v0.17.0：宿主噪音过滤（tape 不再携带别人的机器路径）
+
+审计发现：tape 里带着**源会话所在机器**的路径（`C:\Users\<user>\AppData\...`、`/home/...`、`/tmp/...`），
+以及整盘扫描命令的输出。红线告诉模型不要去那里；`stripHostNoise()` 不再把路指给它。
+
+三条规则，全部在 `buildInjectionPlan` 的**单一收口处**执行，所以每个 chunk 都被覆盖：
+
+1. 只含宿主路径的段落 → 整段替换为 `[宿主环境噪音，已过滤]`（**声明式省略**，绝不静默删除——静默删除正是
+   逐轮预算规则存在的理由）；
+2. 同时含宿主路径与项目路径的段落 → 保留项目内容，只把宿主 token 换成 `[宿主路径已过滤]`
+   （丢掉整段会丢掉真实工作）；
+3. 全盘扫描命令的输出（`Get-ChildItem C:\ -Recurse`、`rg /`、`find /`…）若不包含项目内路径 →
+   `[命令输出已折叠]`；工作区内部的搜索原样保留。
+
+`renderWorkspaceState()` 同样过滤：产物索引里出现宿主路径，等于告诉目标"这是你的工作区文件"。
+
+**验收测试**：往日志的 assistant 结论与 tool/result 里塞 `C:\Users\<user>\AppData\...\logs`，
+切片后目标会话里**不再出现该路径**，且省略处有显式标记（6 项测试，含工作区索引那一路）。
+
 ## v0.16.0：Web 控制台（不再手改配置 + 不再重启）
 
 在此之前，改一个开关意味着：找到 `cordis.patch.yml` → 改 YAML → 重启宿主 → 丢掉当前会话。结果是**这些开关
@@ -500,7 +519,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 327 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板 |
+| `test/*.test.mjs` | 333 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板 |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -1167,7 +1186,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 327 个测试
+# 2) 333 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）
