@@ -68,6 +68,37 @@ node scripts/verify-bundle.mjs   # 27 项：bundle 声明 / files 白名单 / ES
 
 `cordis.patch.yml` 用**包名**引用（`name: dsh-graft-slice`），不写相对路径——相对路径只在本机成立。
 
+## v0.16.0：Web 控制台（不再手改配置 + 不再重启）
+
+在此之前，改一个开关意味着：找到 `cordis.patch.yml` → 改 YAML → 重启宿主 → 丢掉当前会话。结果是**这些开关
+在实战里等于冻结**。现在有两个面板（本插件一个、`dsh-memory` 一个），从侧栏进入：
+
+| 面板 | 内容 |
+|---|---|
+| **转生控制台** | `modelDrivenGraft` / `autoGraft` 开关；`modelDrivenGraftAtRatio` / `autoGraftAtRatio` 滑条+输入框；护栏开关（`workspaceRedline` / `commandGuard`）；**实时水位表**（每个活动会话的 token 用量、百分比、距 70% 与 75% 还差多少 token、第几代迁移、是否在 grace 保护期内） |
+| **记忆控制台** | 由 `dsh-memory` 提供：`retrieval` / `workspaceIsolation` / `semanticFilter` 开关、按 scene 过滤的技能清单、一键清空当前工作区记忆 |
+
+### 为什么这需要一个新的写入路径
+
+面板不能把值写进插件内存里——那样重启就丢，等于换个地方手改。所以两个面板都走宿主的
+**`configEditor.edit(entry, change)`**：找到自己那一行（`patchId: 'dsh-graft-slice'`），在 `current` 之上
+spread 一个键，宿主完成校验、落盘与 Loader 调和。**值写进的就是 profile 配置本身**，因此既无需重启、
+也能活过重启。
+
+同样的操作还注册成**命令**（`/graft-console`、`/graft-console-set modelDrivenGraftAtRatio 0.70`）。
+UI 与命令共用一份实现，而且在客户端 bundle 尚未加载时，命令是立刻可用的退路。
+
+### 已验证 / 未验证（如实标注）
+
+- ✅ **宿主侧逻辑**：6 项新测试覆盖取值白名单（拒绝 `0` 与 `≥1` 的水位，而不是静默 clamp）、
+  patch 合并保留未管理键、写入目标是**自己那一行**、`configEditor` 缺失时**报错而不是假装保存**。
+- ✅ **面板与命令同源**：命令 handler 直接调用与面板相同的函数。
+- ⚠️ **页面内的按钮点击**：客户端→宿主调用的**客户端侧参数形状**无法从 bundle 里确证（各宿主版本不同）。
+  因此桥接层按顺序尝试若干形状，并把**实际生效的通道名**显示在面板顶部；全都失败时它给出确切要输入的命令，
+  而不是一个永远转圈的按钮。
+- ⚠️ **需要一次宿主重启 + 一次页面刷新**：`dsh.client` 是宿主动态扫描的字段，而客户端半边是**新加**的，
+  宿主要重新扫描才会把它放进 boot graph（之后改面板代码只需刷新页面，改配置则完全不用重启）。
+
 ## 已验证能力（v0.15.0 实战验收，2026-11-03）
 
 > 上一版本致命问题的取证与修复全过程见 **[POSTMORTEM-2026-11-03.md](POSTMORTEM-2026-11-03.md)**
@@ -469,7 +500,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 321 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板 |
+| `test/*.test.mjs` | 327 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板 |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -1136,7 +1167,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 321 个测试
+# 2) 327 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）

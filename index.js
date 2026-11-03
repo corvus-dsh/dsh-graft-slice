@@ -9359,6 +9359,99 @@ export function collectMemoryStoreStatus(
   }
 }
 
+// ===========================================================================
+// v0.16 CONSOLE — live configuration and status for the Web panel
+// ===========================================================================
+
+/**
+ * The keys the console may write. A whitelist, not "any key": the console's job
+ * is to make the common knobs reachable without hand-editing, not to become a
+ * general config editor that can silently produce an invalid patch.
+ */
+export const CONSOLE_BOOLEAN_KEYS = ['modelDrivenGraft', 'autoGraft', 'workspaceRedline', 'commandGuard']         
+export const CONSOLE_RATIO_KEYS = ['modelDrivenGraftAtRatio', 'autoGraftAtRatio']         
+
+                                 
+             
+                         
+ 
+
+/**
+ * Parse one `key value` line from the console or a slash command.
+ *
+ * Returns a reason instead of throwing: the caller is a UI button, and "why did
+ * nothing happen" has to be printable.
+ */
+export function parseConsoleSetting(rawInput        )                                                                                  {
+  const parts = String(rawInput ?? '').trim().split(/\s+/u).filter((part) => part.length > 0)
+  if (parts.length < 2) {
+    return { error: `需要两个参数：<key> <value>；可写键：${[...CONSOLE_BOOLEAN_KEYS, ...CONSOLE_RATIO_KEYS].join(', ')}` }
+  }
+  const key = parts[0]
+  const raw = parts[1].toLowerCase()
+  if ((CONSOLE_BOOLEAN_KEYS                     ).includes(key)) {
+    if (raw !== 'true' && raw !== 'false') return { error: `${key} 只接受 true / false（收到 ${parts[1]}）` }
+    return { setting: { key, value: raw === 'true' } }
+  }
+  if ((CONSOLE_RATIO_KEYS                     ).includes(key)) {
+    const value = Number(raw)
+    // The ratio is a fraction of the window. Above the hard cutoff nothing would
+    // ever migrate; at zero every request would, which is indistinguishable from
+    // a crash loop. Both ends are refused rather than "clamped silently".
+    if (!Number.isFinite(value) || value <= 0 || value >= 1) return { error: `${key} 必须是 0 与 1 之间的小数（例如 0.70）` }
+    return { setting: { key, value: Math.round(value * 100) / 100 } }
+  }
+  return { error: `未知的配置键 ${key}；可写键：${[...CONSOLE_BOOLEAN_KEYS, ...CONSOLE_RATIO_KEYS].join(', ')}` }
+}
+
+/**
+ * Pure patch builder for `configEditor.edit`: the `current` object is the row's
+ * raw override and a matching override REPLACES the whole config, so spreading it
+ * is what keeps the keys the console does not manage.
+ */
+export function withConsoleSetting(
+  current                         ,
+  setting                ,
+)                          {
+  return { ...current, [setting.key]: setting.value }
+}
+
+/**
+ * The plugin id used to find our own Loader row. The override must be written to
+ * the SAME row the profile patch declares, or the console would create a second
+ * row and the value would fight the patch layer.
+ */
+export const CONSOLE_PATCH_ID = 'dsh-graft-slice'
+
+                             
+                   
+             
+                
+                       
+                 
+                
+                                                                           
+                      
+                      
+               
+                    
+                             
+ 
+
+                                    
+           
+                             
+                      
+                                   
+                            
+                             
+                         
+                                 
+   
+                    
+                     
+ 
+
 export function apply(ctx                   , config              = {})       {
   const settings = normalizeConfig(config)
   configureRetiredStore(ctx, settings)
@@ -10537,6 +10630,146 @@ async function appendTransitionCard(
     })
   }
   registerCommandGuard()
+
+  /**
+   * v0.16 CONSOLE: the Host half of the Web panel.
+   *
+   * The problem this removes is not "the config is hard to find" — it is that
+   * changing it meant editing a YAML file and restarting the host, so the knobs
+   * were effectively frozen during a session. The panel needs two things from the
+   * Host: a live status read, and a config WRITE that does not restart anything.
+   *
+   * Both are exposed as COMMANDS, for three reasons:
+   *   1. it is the Client-callable Host entry point the UI rules name
+   *      (`ctx.remote.commands.execute`), so the panel and the slash command use
+   *      one implementation rather than two;
+   *   2. the write goes through `configEditor.edit`, which persists the override
+   *      into the profile patch and reconciles the Loader — the value survives a
+   *      restart because it IS the config, not a shadow copy in plugin memory;
+   *   3. `/graft-console` is usable from the composer immediately, before any
+   *      panel is open, which is the honest fallback if a client bundle is stale.
+   */
+  const consoleState = async ()                             => {
+    const rows               = []
+    const sessions = (() => {
+      try {
+        return (stableCtx       ).get('sessions')       
+      } catch {
+        return undefined
+      }
+    })()
+    if (isRecord(sessions) && typeof sessions.list === 'function') {
+      for (const agent of sessions.list()         ) {
+        const sessionId = typeof agent?.id === 'string' ? agent.id : ''
+        if (sessionId.length === 0) continue
+        const watermark = await readTokenWatermark(stableCtx, sessionId, settings)
+        if (watermark === undefined) continue
+        const mark = graftTargets.get(sessionId)
+        const completed = (() => {
+          const live = (stableCtx       ).sessions?.get?.(sessionId)       
+          if (live === undefined || typeof live.snapshotEvents !== 'function') return undefined
+          return (live.snapshotEvents(0)                      ).filter((event) => event.type === 'turn/end').length
+        })()
+        rows.push({
+          sessionId,
+          cwd: workspaceOfAgent(stableCtx, sessionId),
+          tokens: watermark.tokens,
+          contextWindow: watermark.contextWindow,
+          percent: Number((watermark.ratio * 100).toFixed(2)),
+          source: watermark.source,
+          toWarnTokens: Math.max(0, Math.round(watermark.contextWindow * (settings.modelDrivenGraftAtRatio - watermark.ratio))),
+          toHardTokens: Math.max(0, Math.round(watermark.contextWindow * (settings.autoGraftAtRatio - watermark.ratio))),
+          state:
+            watermark.ratio >= settings.autoGraftAtRatio
+              ? 'over-hard-cutoff'
+              : watermark.ratio >= settings.modelDrivenGraftAtRatio
+                ? 'over-warn-line'
+                : 'below-warn-line',
+          generation: mark?.generation ?? 0,
+          graceTurnsRemaining:
+            completed === undefined || mark === undefined ? 0 : Math.max(0, settings.graftTargetGraceTurns - completed),
+        })
+      }
+    }
+    rows.sort((left, right) => right.percent - left.percent)
+    return {
+      config: {
+        modelDrivenGraft: settings.modelDrivenGraft,
+        autoGraft: settings.autoGraft,
+        modelDrivenGraftAtRatio: settings.modelDrivenGraftAtRatio,
+        autoGraftAtRatio: settings.autoGraftAtRatio,
+        workspaceRedline: settings.workspaceRedline,
+        commandGuard: settings.commandGuard,
+        graftTargetGraceTurns: settings.graftTargetGraceTurns,
+      },
+      rows,
+      generatedAt: new Date().toISOString(),
+    }
+  }
+
+  const writeConsoleSetting = async (rawInput        )                                         => {
+    const parsed = parseConsoleSetting(rawInput)
+    if (parsed.setting === undefined) return { ok: false, text: parsed.error }
+    const editor = (() => {
+      try {
+        return (stableCtx       ).get('configEditor')       
+      } catch {
+        return undefined
+      }
+    })()
+    if (!isRecord(editor) || typeof editor.edit !== 'function' || typeof editor.entries !== 'function') {
+      return {
+        ok: false,
+        text: 'configEditor 服务不可用：本次改动没有落盘。请手动修改 profile 的 cordis.patch.yml（这是本轮之前唯一的办法）。',
+      }
+    }
+    const entry = (editor.entries()         ).find(
+      (row) => row?.patchId === CONSOLE_PATCH_ID || row?.id === CONSOLE_PATCH_ID,
+    )
+    if (entry === undefined) {
+      return { ok: false, text: `找不到 ${CONSOLE_PATCH_ID} 的配置行；profile 里可能尚未声明该行。` }
+    }
+    try {
+      await editor.edit(entry, (current                         ) => withConsoleSetting(current ?? {}, parsed.setting))
+    } catch (error) {
+      return { ok: false, text: `写入失败：${String((error       )?.message ?? error)}` }
+    }
+    return {
+      ok: true,
+      text: `已保存 ${parsed.setting.key}=${parsed.setting.value}（无需重启：下一次 pre-step 就按新值判断）`,
+    }
+  }
+
+  const registerConsole = ()       => {
+    const commands = (() => {
+      try {
+        return (stableCtx       ).get('commands')       
+      } catch {
+        return undefined
+      }
+    })()
+    if (!isRecord(commands) || typeof commands.register !== 'function') {
+      ctx.logger?.warn?.('[dsh-graft-slice] ctx.commands unavailable; the console is only reachable through its tools')
+      return
+    }
+    commands.register({
+      name: 'graft-console',
+      description: '读取转生控制台状态（开关、水位、距 70%/75% 还差多少 token）。Read the graft console state.',
+      handler: async () => ({ kind: 'success'         , text: JSON.stringify(await consoleState()) }),
+    })
+    commands.register({
+      name: 'graft-console-set',
+      description:
+        '修改转生开关/水位并存盘（无需重启）：<key> <value>，例如 modelDrivenGraftAtRatio 0.70。' +
+        'Set a graft knob live, e.g. `/graft-console-set autoGraft false`.',
+      input: { hint: '<modelDrivenGraft|autoGraft|modelDrivenGraftAtRatio|autoGraftAtRatio> <value>' },
+      handler: async (invocation     ) => {
+        const result = await writeConsoleSetting(String(invocation?.rawInput ?? ''))
+        return { kind: result.ok ? ('success'         ) : ('error'         ), text: result.text }
+      },
+    })
+  }
+  registerConsole()
 
   ctx.tools.register({
     name: 'graft_slice_and_inject',

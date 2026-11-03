@@ -405,9 +405,11 @@ export function makeCtx({ sourceLog, persistence = new FakePersistence(), paths,
       // rather than a captured copy.
       if (name === 'tokenMeter') return ctx.tokenMeter
       if (name === 'tools') return ctx.tools
-      // v0.14: the two services the guard rails resolve at activation.
+      // v0.14/v0.16: the two services the guard rails and the console resolve.
       if (name === 'systemPrompt') return ctx.systemPrompt
       if (name === 'workingDirectory') return ctx.workingDirectory
+      if (name === 'commands') return ctx.commands
+      if (name === 'configEditor') return ctx.configEditor
       return undefined
     },
     on(name, listener) {

@@ -1,4 +1,4 @@
-# dsh-graft-slice
+﻿# dsh-graft-slice
 
 Log slicing and minimal injection for DeepSeek Harness. It cuts a finished source session at its last `turn/end`, then creates a zero-inheritance, cold-resumable handoff session. No fork, no SQLite, no standalone `tool/result` injection.
 
@@ -154,7 +154,7 @@ about a different act. The regex path and the model prompt carry the same exclus
 ```powershell
 cd '<plugin-dir>'
 node scripts/build.mjs                 # requires Node >= 22.6 (type stripping); runtime needs >= 20
-node --test test/*.test.mjs            # 321 tests
+node --test test/*.test.mjs            # 327 tests
 node scripts/check-docs.mjs            # docs vs code: version, build freshness, tool list, test count, feature status
 node scripts/demo.mjs                  # real persisted log + fake host, never writes the real store
 node scripts/scan-real-logs.mjs        # read-only scan of every local persisted log

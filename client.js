@@ -1,0 +1,334 @@
+/**
+ * dsh-graft-slice — the Web console (Client half).
+ *
+ * WHAT THIS REMOVES
+ *
+ * Changing a graft knob used to mean: find cordis.patch.yml, edit YAML, restart
+ * the host, lose the session. So in practice the knobs were frozen. The panel
+ * reads the live state and writes knobs through the Host's `configEditor`, so a
+ * toggle takes effect on the next pre-step and survives a restart because it IS
+ * the config — not a shadow copy in plugin memory.
+ *
+ * THE BRIDGE IS DELIBERATELY DEFENSIVE
+ *
+ * The UI rules name `ctx.remote.commands.execute` as the Client-callable Host
+ * entry point, but the client-side arity differs between host builds and cannot
+ * be verified from the bundle. So the bridge tries the plausible shapes in order
+ * and DISPLAYS which one worked (or the reason none did). A panel that silently
+ * does nothing is worse than one that says what failed — and `/graft-console` is
+ * the same implementation, usable from the composer meanwhile.
+ */
+window.__ModuleLoader__.load({
+  id: 'dsh-graft-slice',
+  factory(require) {
+    const React = require('react')
+    const h = React.createElement
+    const PANEL_KEY = 'graft-console'
+
+    const CSS = `
+.gc-root{display:flex;flex-direction:column;gap:16px;padding:20px 24px;height:100%;overflow:auto;color:var(--dsw-alias-text-primary,inherit);font:13px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+.gc-card{border:1px solid var(--dsw-alias-border-secondary,rgba(128,128,128,.25));border-radius:10px;padding:14px 16px;background:var(--dsw-alias-bg-layer-1,transparent)}
+.gc-h{font-size:14px;font-weight:600;margin:0 0 10px}
+.gc-sub{opacity:.65;font-size:12px;margin:0 0 12px}
+.gc-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:7px 0;border-top:1px solid var(--dsw-alias-border-tertiary,rgba(128,128,128,.14))}
+.gc-row:first-of-type{border-top:0}
+.gc-label{display:flex;flex-direction:column;gap:2px}
+.gc-hint{opacity:.6;font-size:11.5px}
+.gc-sw{position:relative;width:40px;height:22px;border-radius:11px;border:1px solid var(--dsw-alias-border-secondary,rgba(128,128,128,.35));background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.18));cursor:pointer;padding:0;flex:0 0 auto}
+.gc-sw[aria-checked="true"]{background:var(--dsw-alias-brand-primary,#3b82f6);border-color:transparent}
+.gc-sw i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .14s ease}
+.gc-sw[aria-checked="true"] i{left:20px}
+.gc-num{width:84px;text-align:right;font-variant-numeric:tabular-nums}
+.gc-range{flex:1;min-width:120px}
+.gc-bar{position:relative;height:8px;border-radius:5px;background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.2));overflow:hidden;margin-top:6px}
+.gc-bar>span{position:absolute;inset:0 auto 0 0;border-radius:5px}
+.gc-badge{font-size:11px;padding:2px 7px;border-radius:999px;border:1px solid var(--dsw-alias-border-secondary,rgba(128,128,128,.3))}
+.gc-warn{color:#b45309}.gc-over{color:#b91c1c}.gc-ok{opacity:.7}
+.gc-table{width:100%;border-collapse:collapse}
+.gc-table th,.gc-table td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--dsw-alias-border-tertiary,rgba(128,128,128,.14));font-weight:400}
+.gc-btn{border:1px solid var(--dsw-alias-border-secondary,rgba(128,128,128,.3));background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.1));border-radius:7px;padding:5px 11px;cursor:pointer;color:inherit;font:inherit}
+.gc-btn:disabled{opacity:.5;cursor:default}
+.gc-err{color:#b91c1c;white-space:pre-wrap}
+.gc-mono{font-family:ui-monospace,Consolas,monospace;font-size:11.5px;opacity:.75}
+`
+
+    /** Try the plausible Client→Host command shapes; report which one worked. */
+    function makeBridge(ctx) {
+      const tryCall = async (line) => {
+        const candidates = []
+        const remote = ctx.get && ctx.get('remote')
+        if (remote && remote.commands && typeof remote.commands.execute === 'function') {
+          candidates.push(['remote.commands.execute(line)', () => remote.commands.execute(line, [], undefined)])
+          candidates.push(['remote.commands.execute(null,line)', () => remote.commands.execute(null, line, [], undefined)])
+        }
+        if (remote && remote.session && remote.session.commands && typeof remote.session.commands.execute === 'function') {
+          candidates.push(['remote.session.commands.execute(line)', () => remote.session.commands.execute(line, [], undefined)])
+        }
+        if (remote && typeof remote.execute === 'function') candidates.push(['remote.execute(line)', () => remote.execute(line)])
+        const failures = []
+        for (const [label, run] of candidates) {
+          try {
+            const settled = await run()
+            const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
+            if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: label }
+            if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: label }
+          } catch (error) {
+            failures.push(`${label}: ${String((error && error.message) || error)}`)
+          }
+        }
+        // The Host half is also reachable as a tool; telling the user the exact
+        // command to type beats a spinner that never resolves.
+        return {
+          ok: false,
+          via: 'none',
+          text:
+            `无法从页面调用宿主命令（尝试：${failures.length === 0 ? candidates.map(([label]) => label).join(', ') || '无可用通道' : failures.join(' | ')}）。` +
+            `\n请先在输入框直接执行：/${line.replace(/^\//u, '')}`,
+        }
+      }
+      return {
+        state: () => tryCall('graft-console'),
+        set: (key, value) => tryCall(`graft-console-set ${key} ${value}`),
+      }
+    }
+
+    function Toggle({ label, hint, checked, onChange }) {
+      return h('div', { className: 'gc-row' }, [
+        h('span', { key: 'l', className: 'gc-label' }, [
+          h('span', { key: 'a' }, label),
+          hint ? h('span', { key: 'b', className: 'gc-hint' }, hint) : null,
+        ]),
+        h('button', {
+          key: 's',
+          type: 'button',
+          role: 'switch',
+          'aria-checked': checked ? 'true' : 'false',
+          'aria-label': label,
+          className: 'gc-sw',
+          onClick: () => onChange(!checked),
+        }, h('i', null)),
+      ])
+    }
+
+    function Ratio({ label, hint, value, onChange }) {
+      const [draft, setDraft] = React.useState(String(value))
+      React.useEffect(() => setDraft(String(value)), [value])
+      const commit = (next) => {
+        const num = Number(next)
+        if (Number.isFinite(num) && num > 0 && num < 1) onChange(Math.round(num * 100) / 100)
+        else setDraft(String(value))
+      }
+      return h('div', { className: 'gc-row' }, [
+        h('span', { key: 'l', className: 'gc-label' }, [
+          h('span', { key: 'a' }, label),
+          hint ? h('span', { key: 'b', className: 'gc-hint' }, hint) : null,
+        ]),
+        h('input', {
+          key: 'r',
+          className: 'gc-range',
+          type: 'range',
+          min: '0.30',
+          max: '0.95',
+          step: '0.01',
+          value: String(value),
+          'aria-label': label,
+          onChange: (event) => onChange(Number(event.target.value)),
+        }),
+        h('input', {
+          key: 'n',
+          className: 'gc-num',
+          type: 'number',
+          min: '0.05',
+          max: '0.99',
+          step: '0.01',
+          value: draft,
+          'aria-label': `${label} 数值`,
+          onChange: (event) => setDraft(event.target.value),
+          onBlur: () => commit(draft),
+          onKeyDown: (event) => { if (event.key === 'Enter') commit(draft) },
+        }),
+        h('span', { key: 'p', className: 'gc-hint' }, `${Math.round(value * 100)}%`),
+      ])
+    }
+
+    function SessionRow({ row, warnAt, hardAt }) {
+      const color = row.state === 'over-hard-cutoff' ? '#b91c1c' : row.state === 'over-warn-line' ? '#b45309' : '#10b981'
+      const cls = row.state === 'over-hard-cutoff' ? 'gc-over' : row.state === 'over-warn-line' ? 'gc-warn' : 'gc-ok'
+      return h('tr', null, [
+        h('td', { key: 'id' }, [
+          h('div', { key: 'a', className: 'gc-mono' }, row.sessionId),
+          h('div', { key: 'b', className: 'gc-hint' }, row.cwd || '(未记录工作目录)'),
+        ]),
+        h('td', { key: 'w' }, [
+          h('div', { key: 'a' }, `${row.percent}% · ${row.tokens.toLocaleString()} / ${row.contextWindow.toLocaleString()}`),
+          h('div', { key: 'b', className: 'gc-bar' }, h('span', { style: { width: `${Math.min(100, row.percent)}%`, background: color } })),
+          h('div', { key: 'c', className: 'gc-hint' }, `数据来源 ${row.source}`),
+        ]),
+        h('td', { key: 'd' }, [
+          h('div', { key: 'a' }, `→70% 还差 ${row.toWarnTokens.toLocaleString()} tok`),
+          h('div', { key: 'b', className: 'gc-hint' }, `→75% 还差 ${row.toHardTokens.toLocaleString()} tok`),
+        ]),
+        h('td', { key: 's' }, [
+          h('span', { key: 'a', className: `gc-badge ${cls}` }, row.state),
+          row.generation > 0
+            ? h('div', { key: 'b', className: 'gc-hint' }, `第 ${row.generation} 代${row.graceTurnsRemaining > 0 ? ` · 保护中 ${row.graceTurnsRemaining} 轮` : ''}`)
+            : h('div', { key: 'b', className: 'gc-hint' }, '原始会话'),
+        ]),
+      ])
+    }
+
+    function GraftConsole({ bridge }) {
+      const [state, setState] = React.useState(null)
+      const [error, setError] = React.useState('')
+      const [via, setVia] = React.useState('')
+      const [busy, setBusy] = React.useState(false)
+
+      const refresh = React.useCallback(async () => {
+        if (bridge === undefined) { setError('桥接未注入（slot inject 缺失）'); return }
+        setBusy(true)
+        try {
+          const reply = await bridge.state()
+          setVia(reply.via)
+          if (!reply.ok) { setError(reply.text); return }
+          setError('')
+          setState(JSON.parse(reply.text))
+        } catch (caught) {
+          setError(String((caught && caught.message) || caught))
+        } finally {
+          setBusy(false)
+        }
+      }, [bridge])
+
+      const write = React.useCallback(async (key, value) => {
+        const reply = await bridge.set(key, value)
+        setVia(reply.via)
+        if (!reply.ok) { setError(reply.text); return }
+        // Optimistic: the panel shows the new value immediately and the refetch
+        // confirms it, so a slow Loader reconciliation does not read as a failure.
+        setState((prev) => (prev === null ? prev : { ...prev, config: { ...prev.config, [key]: value } }))
+        setError('')
+        setTimeout(refresh, 400)
+      }, [bridge, refresh])
+
+      React.useEffect(() => { void refresh() }, [refresh])
+      React.useEffect(() => {
+        const timer = setInterval(() => { void refresh() }, 5000)
+        return () => clearInterval(timer)
+      }, [refresh])
+
+      const config = state === null ? null : state.config
+
+      return h('div', { className: 'gc-root' }, [
+        h('style', { key: 'css' }, CSS),
+        h('div', { key: 'head' }, [
+          h('h2', { key: 't', className: 'gc-h', style: { fontSize: '16px' } }, '转生控制台 · dsh-graft-slice'),
+          h('p', { key: 's', className: 'gc-sub' },
+            '改动直接写入 profile 配置（configEditor），下一次 pre-step 生效，无需重启。'),
+        ]),
+        error ? h('div', { key: 'e', className: 'gc-card gc-err' }, error) : null,
+        h('div', { key: 'sw', className: 'gc-card' }, [
+          h('h3', { key: 'h', className: 'gc-h' }, '核心开关'),
+          h(Toggle, {
+            key: 'mdg',
+            label: '主动转生（modelDrivenGraft）',
+            hint: '到 70% 提醒模型自己收尾并 graft_prepare；关掉后模型不会被提示',
+            checked: config ? config.modelDrivenGraft === true : false,
+            onChange: (next) => write('modelDrivenGraft', next),
+          }),
+          h(Toggle, {
+            key: 'ag',
+            label: '强制兜底（autoGraft）',
+            hint: '到 75% 由系统强制迁移，模型忽略提示也不会无限硬扛',
+            checked: config ? config.autoGraft === true : false,
+            onChange: (next) => write('autoGraft', next),
+          }),
+        ]),
+        h('div', { key: 'ratio', className: 'gc-card' }, [
+          h('h3', { key: 'h', className: 'gc-h' }, '水位阈值'),
+          h(Ratio, {
+            key: 'w',
+            label: '提示线（modelDrivenGraftAtRatio）',
+            hint: '默认 0.70；必须低于强制线，否则提示没有余地',
+            value: config ? config.modelDrivenGraftAtRatio : 0.7,
+            onChange: (next) => write('modelDrivenGraftAtRatio', next),
+          }),
+          h(Ratio, {
+            key: 'h',
+            label: '强制线（autoGraftAtRatio）',
+            hint: '默认 0.75；系统兜底强切的水位',
+            value: config ? config.autoGraftAtRatio : 0.75,
+            onChange: (next) => write('autoGraftAtRatio', next),
+          }),
+        ]),
+        h('div', { key: 'guard', className: 'gc-card' }, [
+          h('h3', { key: 'h', className: 'gc-h' }, '护栏'),
+          h(Toggle, {
+            key: 'wr',
+            label: '工作目录红线（workspaceRedline）',
+            hint: '注入「工作目录严格限定为 <cwd>」；建议保持开启',
+            checked: config ? config.workspaceRedline === true : false,
+            onChange: (next) => write('workspaceRedline', next),
+          }),
+          h(Toggle, {
+            key: 'cg',
+            label: '命令层拦截（commandGuard）',
+            hint: '在工具层拒绝越界搜索与逃出工作区的递归删除',
+            checked: config ? config.commandGuard === true : false,
+            onChange: (next) => write('commandGuard', next),
+          }),
+        ]),
+        h('div', { key: 'live', className: 'gc-card' }, [
+          h('div', { key: 'h', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, [
+            h('h3', { key: 't', className: 'gc-h', style: { margin: 0 } }, '实时水位'),
+            h('button', { key: 'b', type: 'button', className: 'gc-btn', disabled: busy, onClick: refresh }, busy ? '读取中…' : '刷新'),
+          ]),
+          h('p', { key: 's', className: 'gc-sub' },
+            via ? `桥接通道：${via}` : '每 5 秒自动刷新；水位来自宿主 tokenMeter / provider usage'),
+          state === null
+            ? h('div', { key: 'n', className: 'gc-hint' }, '正在读取…')
+            : state.rows.length === 0
+              ? h('div', { key: 'n', className: 'gc-hint' }, '当前没有可测量的活动会话。')
+              : h('table', { key: 'tb', className: 'gc-table' }, [
+                  h('thead', { key: 'th' }, h('tr', null, [
+                    h('th', { key: 'a' }, '会话'),
+                    h('th', { key: 'b' }, '水位'),
+                    h('th', { key: 'c' }, '距下一次转生'),
+                    h('th', { key: 'd' }, '状态'),
+                  ])),
+                  h('tbody', { key: 'tb' }, state.rows.map((row) => h(SessionRow, {
+                    key: row.sessionId,
+                    row,
+                    warnAt: config ? config.modelDrivenGraftAtRatio : 0.7,
+                    hardAt: config ? config.autoGraftAtRatio : 0.75,
+                  }))),
+                ]),
+        ]),
+      ])
+    }
+
+    function SidebarEntry() {
+      return h('span', { 'aria-hidden': true, style: { display: 'inline-flex', alignItems: 'center', gap: 6 } }, [
+        h('svg', { key: 'i', width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6 }, [
+          h('path', { key: 'p', d: 'M4 17c3-9 7-9 10-2s5 5 6 1' }),
+          h('circle', { key: 'c', cx: 4, cy: 17, r: 1.6, fill: 'currentColor', stroke: 'none' }),
+        ]),
+        h('span', { key: 'l' }, '转生'),
+      ])
+    }
+
+    return {
+      inject: ['slots'],
+      apply(ctx) {
+        const bridge = makeBridge(ctx)
+        ctx.slots.inject('main', () =>
+          ctx.slots.register({ name: 'main', key: PANEL_KEY, inject: () => ({ bridge }) }, GraftConsole),
+        )
+        ctx.slots.inject('sidebar.panellist', () =>
+          ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_KEY, order: 60, label: () => '转生' }, SidebarEntry),
+        )
+      },
+      // Kept on the module so a wiring fix needs no rebuild of the panel body.
+      __bridgeFactory: makeBridge,
+    }
+  },
+})
