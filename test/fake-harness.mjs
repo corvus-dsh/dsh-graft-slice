@@ -672,8 +672,7 @@ export function registeredTools(ctx) {
   return new Map(ctx._tools)
 }
 
-/** Deliver one agent/pre-step event through the registered listeners. */
-export async function dispatchPreStep(ctx, payload) {
+/** Deliver one agent/pre-step event through the registered listeners. */export async function dispatchPreStep(ctx, payload) {
   const listeners = ctx._listeners.get('agent/pre-step') ?? []
   let index = -1
   const next = async () => {
@@ -702,7 +701,27 @@ export async function dispatchRequestError(ctx, payload) {
   return next()
 }
 
-/** Deliver one agent/turn-stopping event through the registered listeners. */export async function dispatchTurnStopping(ctx, payload) {
+/**
+ * Deliver one `tools/pre-execute` waterfall entry (v0.19).
+ *
+ * Mirrors the host contract: the waterfall is `(exec, next) => Promise<PreToolDecision>`
+ * and the terminal `next()` is `{ kind: 'allow' }`. A listener that returns
+ * `{ kind: 'ask' }` short-circuits — which is how the plugin asks the user without
+ * going through the guard.
+ */
+export async function dispatchPreExecute(ctx, exec) {
+  const listeners = ctx._listeners.get('tools/pre-execute') ?? []
+  let index = -1
+  const next = async () => {
+    index += 1
+    if (index >= listeners.length) return { kind: 'allow' }
+    return listeners[index](exec, next)
+  }
+  return next()
+}
+
+/** Deliver one agent/turn-stopping event through the registered listeners. */
+export async function dispatchTurnStopping(ctx, payload) {
   const listeners = ctx._listeners.get('agent/turn-stopping') ?? []
   for (const listener of listeners) await listener(payload)
 }

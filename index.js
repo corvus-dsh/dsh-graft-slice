@@ -10378,13 +10378,18 @@ export function scanAgentCommand(command        , workspace = '')               
 /**
  * v0.18: classify, then decide — the two jobs the string matcher used to do at once.
  *
- * `ask` deserves one paragraph, because the tool guard has no prompt channel:
- * `tools.guard()` is synchronous and its only return value is a denial string.
- * So `ask` is expressed as a REFUSAL THAT NAMES THE CONFIRMATION STEP: the call
- * does not run, and the agent is told to obtain the user's explicit agreement for
- * the exact command first. That is deliberately not the same as `allow` — in
- * `autonomous` mode a destructive command stops being auto-refused, but it never
- * becomes silent.
+ * v0.19: `ask` is no longer expressed as a refusal.
+ *
+ * The live contract settles what v0.18 could only work around: `tools/pre-execute`
+ * is a waterfall whose decision is
+ * `{kind:'allow'} | {kind:'deny', reason} | {kind:'cancel'} | {kind:'ask', reason?, displayReason?}`,
+ * and "missing approval support turns `ask` into denial" — fail-closed for free.
+ * `tools.guard()`, by contrast, can only return a denial string.
+ *
+ * So the two decisions use the two channels they belong to: `deny` goes to the
+ * guard (monotonic: no later guard can force-allow it), and `ask` goes to the
+ * waterfall as a real approval prompt. Collapsing the two into "deny with an
+ * instruction to ask the user" made the user do the plugin's job.
  */
 export function evaluateCommandPolicy(
   command        ,
@@ -10415,9 +10420,8 @@ export function evaluateCommandPolicy(
     decision,
     ...(assessment.code === undefined ? {} : { code: assessment.code }),
     reason:
-      `ASK（safetyMode=${mode}）：${assessment.reason ?? `该命令风险等级为 ${assessment.risk}。`}` +
-      'autonomous 模式不会为它做决定，也不会静默执行：请把要执行的确切命令、目标和影响清楚地告诉用户，' +
-      '得到用户明确同意后，再由用户确认执行。',
+      `${assessment.reason ?? `该命令风险等级为 ${assessment.risk}。`}` +
+      `（safetyMode=${mode}：此类命令不会被自动放行，需要用户当场确认。）`,
   }
 }
 
@@ -12098,33 +12102,21 @@ async function appendTransitionCard(
   registerGuardSection()
 
   /**
-   * v0.14 D1/D6: the tool-layer enforcement.
+   * v0.14 D1/D6: the tool-layer enforcement — and, since v0.19, the ASK channel.
    *
-   * `ctx.tools.guard()` is monotonic and runs after the `tools/pre-execute`
-   * waterfall: a returned string DENIES the call before dispatch, and no other
-   * guard can force-allow it. That is what makes this a refusal rather than a
-   * request, and it is why the same scanner backs both the search ban (D1) and
-   * the destructive-command ban (D6).
+   * Two extension points, two jobs, both taken from the live contract rather than
+   * guessed:
    *
-   * v0.18: WHY THE POLICY TABLE IS WIRED HERE AND NOT INTO `tools/pre-execute`.
+   *   `tools/pre-execute` (waterfall) — `{kind:'deny'} | {kind:'ask', reason}`
+   *   `tools.guard()`                  — a denial string, and "NO guard can
+   *                                       force-allow a call another guard denied"
    *
-   * The audit asked for a Deny -> Allow -> Ask decision "before tools.guard runs".
-   * Read against the live contract, that ordering is already what this does — the
-   * classifier and the table run FIRST, and only a non-`allow` verdict is handed to
-   * the guard. What must NOT happen is a second registration on the pre-execute
-   * waterfall, because the two extension points are not equivalent:
-   *
-   *   `tools.execute(...)` — "Execute through pre-policy, guards, around-dispatch,
-   *   post-policy, ..."; `guard(...)` — "Register a monotonic guard AFTER the
-   *   extensible `tools/pre-execute` waterfall ... Any matching guard may deny by
-   *   returning a reason, while NO guard can force-allow a call another guard
-   *   denied."
-   *
-   * A waterfall is overridable by construction; a guard is not. A ban that can be
-   * overridden downstream is a suggestion, so the denial lives in the only channel
-   * that cannot be undone — and the evidence (classification + mode) is computed
-   * before that channel is entered. A second listener on the waterfall would add no
-   * capability, only a second place to forget.
+   * A waterfall is overridable by construction and a guard is not, so anything that
+   * must HOLD goes to the guard. But the guard cannot ask, so anything that must ask
+   * the user goes to the waterfall — where the host still fails closed ("missing
+   * approval support turns `ask` into denial"). An ordering note: the guard runs
+   * after the waterfall, so a denial wins over an ask, which is the right precedence
+   * (the stricter verdict is the one that survives).
    */
   const registerCommandGuard = ()       => {
     if (!settings.commandGuard) return
@@ -12149,11 +12141,13 @@ async function appendTransitionCard(
       // v0.18: classify (evidence) and decide (policy). The table lives in
       // `policyDecision`; this call site only reports what the operator chose.
       const verdict = evaluateCommandPolicy(command, workspace, settings.safetyMode)
-      if (verdict.decision === 'allow' || verdict.reason === undefined) return undefined
+      // v0.19: `ask` is NOT the guard's verdict — the waterfall owns it (see
+      // registerCommandAsk). The guard only enforces the decisions that must HOLD.
+      if (verdict.decision !== 'deny' || verdict.reason === undefined) return undefined
       try {
         appendGraftAudit({
           at: new Date().toISOString(),
-          kind: verdict.decision === 'ask' ? 'command-asked' : 'command-blocked',
+          kind: 'command-blocked',
           ...(agentId.length === 0 ? {} : { sessionId: agentId }),
           detail:
             `${verdict.code ?? verdict.risk}/safetyMode=${settings.safetyMode}: ` +
@@ -12166,6 +12160,50 @@ async function appendTransitionCard(
     })
   }
   registerCommandGuard()
+
+  /**
+   * v0.19: the ASK channel.
+   *
+   * `tools.guard()` can only deny, so v0.18 encoded "ask" as a refusal that told the
+   * agent to go get confirmation — which made the user do the plugin's job. The
+   * waterfall can return `{kind:'ask', reason, displayReason}` and the host turns
+   * that into a real approval prompt; if the deployment has no approval support it
+   * degrades to denial, which is exactly the fail-closed behaviour wanted.
+   *
+   * Precedence note: the guard runs AFTER this waterfall, so a `deny` still beats an
+   * `ask`. The stricter verdict is the one that survives.
+   */
+  const registerCommandAsk = ()       => {
+    if (!settings.commandGuard) return
+    ctx.on('tools/pre-execute', async (exec     , next                    ) => {
+      const name = typeof exec?.name === 'string' ? exec.name : ''
+      if (!COMMAND_TOOL_NAMES.has(name)) return next()
+      const command = commandTextOf(exec?.arguments)
+      if (command.length === 0) return next()
+      // Only `autonomous` can produce an `ask`; in strict/balanced this is a no-op
+      // pass-through and the guard denies.
+      if (settings.safetyMode !== 'autonomous') return next()
+      const agentId = typeof exec?.agent?.id === 'string' ? exec.agent.id : ''
+      const workspace = workspaceOfAgent(ctx, agentId)
+      const verdict = evaluateCommandPolicy(command, workspace, settings.safetyMode)
+      if (verdict.decision !== 'ask') return next()
+      try {
+        appendGraftAudit({
+          at: new Date().toISOString(),
+          kind: 'command-asked',
+          ...(agentId.length === 0 ? {} : { sessionId: agentId }),
+          detail:
+            `${verdict.code ?? verdict.risk}/safetyMode=${settings.safetyMode}: ` +
+            command.replace(/\s+/gu, ' ').slice(0, 200),
+        })
+      } catch {
+        // Evidence only; the prompt must not depend on it.
+      }
+      const reason = verdict.reason ?? '这类命令需要你当场确认后才会执行。'
+      return { kind: 'ask', reason, displayReason: { en: reason, 'zh-CN': reason } }
+    })
+  }
+  registerCommandAsk()
 
   /**
    * v0.16 CONSOLE: the Host half of the Web panel.

@@ -131,6 +131,18 @@ resuming its Session」。它正是 Web 输入框走的那条路，会**从持�
 审计线记 `ignite` / `ignite-failed` / `ignite-skipped`。控制台新增「物理点火」卡片：开关、投递方式
 （`queue` / `steer`）、以及**未点火会话列表**（含重试次数）。
 
+### 3. 补正：`ask` 走真正的审批通道（v0.18 的权宜之计被替换）
+
+v0.18 把 `autonomous` 下的 ask 写成「拒绝 + 让 agent 自己去要确认」。核对宿主契约后这不该由模型代劳：
+
+| 通道 | 能表达 | 性质 |
+|---|---|---|
+| `tools.guard()` | 只能返回拒绝字符串 | **单调**：没有 guard 能推翻另一个 guard 的拒绝 |
+| `tools/pre-execute`（瀑布） | `allow / deny / cancel / ask(reason, displayReason)` | 可被下游覆盖，但**缺少审批支持时 `ask` 自动降级为拒绝**（天然 fail-closed） |
+
+所以两个决策各走各的通道：**`deny` 走 guard**（要它无法被撤销），**`ask` 走瀑布**（要真的弹给用户）。
+顺序上 guard 在瀑布之后，因此 `deny` 仍然压过 `ask`——更严的判定存活。
+
 ## v0.18.0：风险与策略分离、动态水位、硬约束零丢失、台账 epoch
 
 审计的判词是「字符串防御」：`scanAgentCommand` 同时干了两件事——判定命令**是什么**（证据，正则擅长）
@@ -634,7 +646,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 374 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch |
+| `test/*.test.mjs` | 376 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -1301,7 +1313,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 374 个测试
+# 2) 376 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）

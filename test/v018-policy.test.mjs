@@ -23,7 +23,7 @@ import {
   policyDecision,
   resetRetiredSessions,
 } from '../index.js'
-import { makeCtx, makeSourceLog } from './fake-harness.mjs'
+import { dispatchPreExecute, makeCtx, makeSourceLog } from './fake-harness.mjs'
 
 const WORKSPACE = 'D:\\持久层能力架构'
 const GLOBAL_SEARCH = `rg pattern ${'/'}`
@@ -60,12 +60,12 @@ test('v0.18: the decision table is exactly what the modes promise', () => {
   assert.equal(policyDecision('destructive', 'autonomous'), 'ask')
 })
 
-test('v0.18: an `ask` is a refusal that names the confirmation step', () => {
+test('v0.18: an `ask` names the operator mode and never reads as an auto-allow', () => {
   const verdict = evaluateCommandPolicy(GLOBAL_SEARCH, WORKSPACE, 'autonomous')
   assert.equal(verdict.decision, 'ask')
   assert.equal(verdict.risk, 'destructive')
-  assert.match(String(verdict.reason), /ASK（safetyMode=autonomous）/u)
-  assert.match(String(verdict.reason), /用户/u)
+  assert.match(String(verdict.reason), /safetyMode=autonomous/u)
+  assert.match(String(verdict.reason), /确认/u)
   assert.match(String(verdict.reason), /GLOBAL_SEARCH/u)
 
   const allowed = evaluateCommandPolicy('git status', WORKSPACE, 'strict')
@@ -82,8 +82,9 @@ test('v0.18: safetyMode defaults to balanced and refuses a value outside the tab
   assert.equal(normalizeConfig({ safetyMode: 'yolo' }).safetyMode, 'balanced')
 })
 
-test('v0.18: the tool guard obeys the CONFIGURED mode (strict denies, autonomous asks)', () => {
+test('v0.18/v0.19: autonomous ASKS through the waterfall; the guard still only denies', () => {
   const log = makeSourceLog({ turns: 3 })
+
   const strictCtx = makeCtx({ sourceLog: log })
   resetRetiredSessions()
   apply(strictCtx, { safetyMode: 'strict' })
@@ -97,12 +98,12 @@ test('v0.18: the tool guard obeys the CONFIGURED mode (strict denies, autonomous
   const freeCtx = makeCtx({ sourceLog: log })
   resetRetiredSessions()
   apply(freeCtx, { safetyMode: 'autonomous' })
-  const askVerdict = freeCtx.tools._runGuards({
-    name: 'pwsh',
-    arguments: { command: GLOBAL_SEARCH },
-    agent: { id: log.session.id },
-  })
-  assert.match(String(askVerdict), /ASK（safetyMode=autonomous）/u)
+  // v0.19: the guard stays silent — `ask` is not a denial.
+  assert.equal(
+    freeCtx.tools._runGuards({ name: 'pwsh', arguments: { command: GLOBAL_SEARCH }, agent: { id: log.session.id } }),
+    undefined,
+    'the guard does not encode an ask as a refusal',
+  )
   // ...and ordinary work still runs in every mode.
   assert.equal(
     freeCtx.tools._runGuards({ name: 'pwsh', arguments: { command: 'npm test' }, agent: { id: log.session.id } }),
@@ -110,32 +111,98 @@ test('v0.18: the tool guard obeys the CONFIGURED mode (strict denies, autonomous
   )
 })
 
+test('v0.19: autonomous raises a REAL ask through tools/pre-execute', async () => {
+  const log = makeSourceLog({ turns: 3 })
+  const ctx = makeCtx({ sourceLog: log })
+  resetRetiredSessions()
+  apply(ctx, { safetyMode: 'autonomous' })
+  const decision = await dispatchPreExecute(ctx, {
+    name: 'pwsh',
+    arguments: { command: GLOBAL_SEARCH },
+    agent: { id: log.session.id },
+  })
+  assert.equal(decision.kind, 'ask')
+  assert.match(String(decision.reason), /GLOBAL_SEARCH/u)
+  assert.equal(typeof decision.displayReason.en, 'string', 'the prompt is localizable')
+  assert.equal(typeof decision.displayReason['zh-CN'], 'string')
+  resetRetiredSessions()
+})
+
+test('v0.19: the other modes pass the waterfall through, and ordinary work is never asked', async () => {
+  const log = makeSourceLog({ turns: 3 })
+  for (const mode of ['strict', 'balanced']) {
+    const ctx = makeCtx({ sourceLog: log })
+    resetRetiredSessions()
+    apply(ctx, { safetyMode: mode })
+    const decision = await dispatchPreExecute(ctx, {
+      name: 'pwsh',
+      arguments: { command: GLOBAL_SEARCH },
+      agent: { id: log.session.id },
+    })
+    assert.equal(decision.kind, 'allow', `${mode} leaves the ask to the guard's deny`)
+  }
+
+  const ctx = makeCtx({ sourceLog: log })
+  resetRetiredSessions()
+  apply(ctx, { safetyMode: 'autonomous' })
+  assert.equal(
+    (await dispatchPreExecute(ctx, { name: 'pwsh', arguments: { command: 'npm test' }, agent: { id: log.session.id } })).kind,
+    'allow',
+  )
+  assert.equal(
+    (await dispatchPreExecute(ctx, { name: 'read', arguments: { file_path: 'x' }, agent: { id: log.session.id } })).kind,
+    'allow',
+    'a non-command tool is never scanned',
+  )
+  resetRetiredSessions()
+})
+
 test('v0.18: the denial is MONOTONIC — a later permissive guard cannot undo it', () => {
-  // Why this is the enforcement point and `tools/pre-execute` is not: the live
+  // Why the DENY lives in `tools.guard` and the ASK lives in the waterfall: the live
   // contract says a guard runs after that waterfall and "no guard can force-allow a
   // call another guard denied", while a waterfall is overridable by construction.
   // This test holds that property against the fake host's guard chain.
   const log = makeSourceLog({ turns: 3 })
   const ctx = makeCtx({ sourceLog: log })
   resetRetiredSessions()
-  apply(ctx, { safetyMode: 'autonomous' })
+  apply(ctx, { safetyMode: 'strict' })
   ctx.tools.guard(() => undefined)
   const verdict = ctx.tools._runGuards({
     name: 'pwsh',
     arguments: { command: GLOBAL_SEARCH },
     agent: { id: log.session.id },
   })
-  assert.match(String(verdict), /ASK（safetyMode=autonomous）/u)
+  assert.match(String(verdict), /GLOBAL_SEARCH/u)
 })
 
-test('v0.18: the audit line distinguishes what was blocked from what was asked', () => {
+test('v0.18: the waterfall records the ask; the guard records the block', async () => {
   const log = makeSourceLog({ turns: 3 })
-  const ctx = makeCtx({ sourceLog: log })
+
+  const asked = makeCtx({ sourceLog: log })
   resetRetiredSessions()
-  apply(ctx, { safetyMode: 'autonomous' })
-  ctx.tools._runGuards({ name: 'pwsh', arguments: { command: GLOBAL_SEARCH }, agent: { id: log.session.id } })
-  const audit = readFileSync(join(ctx.pathsData, '.graft-audit.jsonl'), 'utf8')
-  assert.match(audit, /"kind":"command-asked"/u)
-  assert.match(audit, /safetyMode=autonomous/u)
-  assert.doesNotMatch(audit, /"kind":"command-blocked"/u, 'an ask is not recorded as a block')
+  apply(asked, { safetyMode: 'autonomous' })
+  // v0.19: the guard does not encode an ask — the waterfall raises it.
+  assert.equal(
+    asked.tools._runGuards({ name: 'pwsh', arguments: { command: GLOBAL_SEARCH }, agent: { id: log.session.id } }),
+    undefined,
+  )
+  const decision = await dispatchPreExecute(asked, {
+    name: 'pwsh',
+    arguments: { command: GLOBAL_SEARCH },
+    agent: { id: log.session.id },
+  })
+  assert.equal(decision.kind, 'ask')
+  const askedAudit = readFileSync(join(asked.pathsData, '.graft-audit.jsonl'), 'utf8')
+  assert.match(askedAudit, /"kind":"command-asked"/u)
+  assert.match(askedAudit, /safetyMode=autonomous/u)
+  assert.doesNotMatch(askedAudit, /"kind":"command-blocked"/u, 'an ask is not recorded as a block')
+
+  const blocked = makeCtx({ sourceLog: log })
+  resetRetiredSessions()
+  apply(blocked, { safetyMode: 'balanced' })
+  blocked.tools._runGuards({ name: 'pwsh', arguments: { command: GLOBAL_SEARCH }, agent: { id: log.session.id } })
+  const blockedAudit = readFileSync(join(blocked.pathsData, '.graft-audit.jsonl'), 'utf8')
+  assert.match(blockedAudit, /"kind":"command-blocked"/u)
+  assert.doesNotMatch(blockedAudit, /"kind":"command-asked"/u, 'a deny is not recorded as an ask')
+  resetRetiredSessions()
 })
