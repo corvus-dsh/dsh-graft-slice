@@ -119,14 +119,25 @@ window.__ModuleLoader__.load({
        * and that case is reported as "no session" instead of being sent as an invalid
        * argument.
        */
+      /**
+       * v0.26: the hook is ATTACHED by the component, because it arrives as a prop.
+       *
+       * The `inject` callback for a root-scoped slot receives NO arguments, so the
+       * previous attempt to read `useSessions` from it always saw `undefined`. The hook
+       * is a standard selector passed to the COMPONENT, which forwards it here.
+       */
+      let sessionsHook = (() => {
+        if (slotProps === undefined || slotProps === null) return undefined
+        return typeof slotProps.useSessions === 'function' ? slotProps.useSessions : undefined
+      })()
+
       const sessionIdsFromProps = () => {
         try {
-          if (slotProps === undefined || slotProps === null) return []
-          const useSessions = slotProps.useSessions
+          const useSessions = sessionsHook
           if (typeof useSessions !== 'function') return []
-          // `useSessions(selector)` is a SnapshotSelectorHook. A selector that returns
-          // the whole snapshot is the only thing safe to call from a non-render context,
-          // and we only need the id list, so ask for exactly that.
+          // `useSessions(selector)` is a SnapshotSelectorHook. A selector returning the
+          // whole snapshot is the only thing safe to call here, and only the id list is
+          // needed, so ask for exactly that.
           const snapshot = useSessions((value) => value)
           if (snapshot === undefined || snapshot === null) return []
           const list = Array.isArray(snapshot)
@@ -275,6 +286,16 @@ window.__ModuleLoader__.load({
       }
       return {
         /** v0.25: the session surface, so the panel can offer an explicit choice. */
+        /**
+         * v0.26: the component hands over the `useSessions` hook it received.
+         *
+         * Called from the component body during render. Until it is called, `sessions()`
+         * is empty and `canWrite()` is false — which means NO request is attempted, which
+         * is exactly the reported fix.
+         */
+        attach: (hook) => {
+          if (typeof hook === 'function') sessionsHook = hook
+        },
         sessions: () => listSessions(),
         /** Is there an agent right now? Decides read-only mode vs. interactive. */
         canWrite: () => agentOf() !== undefined,
@@ -503,7 +524,19 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function GraftConsole({ bridge }) {
+    function GraftConsole({ bridge, useSessions }) {
+      /**
+       * v0.26: hand the selector to the bridge BEFORE anything can request.
+       *
+       * This runs during render, above every effect and every callback, so by the time
+       * `refresh` can fire the bridge already knows how to list sessions. If the hook is
+       * absent the bridge stays empty and no request is made — the reported fix.
+       */
+      try {
+        if (bridge !== undefined && typeof bridge.attach === 'function') bridge.attach(useSessions)
+      } catch {
+        // A bridge that cannot attach is a bridge that will report "no session".
+      }
       const [state, setState] = React.useState(null)
       const [error, setError] = React.useState('')
       const [via, setVia] = React.useState('')
@@ -578,6 +611,34 @@ window.__ModuleLoader__.load({
         const run = async () => {
           if (bridge === undefined) {
             if (alive) { setError('桥接未注入（slot inject 缺失）'); setBusy(false) }
+            return
+          }
+          /**
+           * v0.26 P0 — THE AGENT GUARD, BEFORE ANY REQUEST.
+           *
+           * The reported bug: the panel correctly rendered its read-only UI, and then the
+           * background fetch still went out with an undefined agent, so the gateway
+           * rejected it and a red `remote.commands.execute` card appeared on top of a
+           * panel that was already correctly saying "read only".
+           *
+           * The UI state was right; the TRAFFIC was not. So the guard lives here, at the
+           * one choke point every request passes through, rather than in the renderer:
+           *
+           *   if no agent -> send nothing, keep existing data, raise no error.
+           *
+           * "Nobody has picked a session yet" is a NORMAL state for a root-scoped panel,
+           * not a failure. Printing it in red would teach the user to ignore red.
+           */
+          const agentReady = (() => {
+            try {
+              if (picked.length > 0) return true
+              return bridge !== undefined && typeof bridge.canWrite === 'function' && bridge.canWrite() === true
+            } catch {
+              return false
+            }
+          })()
+          if (!agentReady) {
+            if (alive) { setBusy(false); setError('') }
             return
           }
           if (alive) setBusy(true)
@@ -915,20 +976,30 @@ window.__ModuleLoader__.load({
       inject: ['slots', 'remote', 'remote.commands'],
       apply(ctx) {
         /**
-         * v0.24: build the bridge PER SLOT INSTANCE, from the props the owner supplies.
+         * v0.26 — WHERE `useSessions` ACTUALLY COMES FROM.
          *
-         * `inject` is called with the slot props, and `main` is root-scoped — it gets the
-         * standard selector hooks including `useSessions`, which is the supported way to
-         * learn the live session list from a root panel. Building the bridge once in
-         * `apply` would freeze it before any session existed, which is how the panel
-         * ended up with no agent and therefore no data.
+         * v0.24 assumed the `inject` callback receives the slot props. It does not: the
+         * root-scoped `InjectParams` tuple is EMPTY (`[]`), so `inject: (props) => ...`
+         * was handed `undefined` and the bridge's `sessionIdsFromProps()` always returned
+         * `[]`. That is why the panel kept reporting "no session" even after the
+         * useSessions fix — the hook never reached the bridge at all.
+         *
+         * The standard selector hooks are delivered as COMPONENT PROPS (`useSessions` et
+         * al.), not through inject. So the bridge is built with `ctx` only, and the
+         * component hands it the hook it received:
+         *
+         *     function GraftConsole({ bridge, useSessions }) { ... }
+         *
+         * `bridge.attach(useSessions)` is called from the component body so the bridge can
+         * resolve sessions from then on. Until that happens (or when the hook is absent)
+         * `sessions()` returns `[]` and NO request is made — which is the reported fix.
          */
         ctx.slots.inject('main', () =>
           ctx.slots.register(
             {
               name: 'main',
               key: PANEL_KEY,
-              inject: (props) => ({ bridge: makeBridge(ctx, host, props) }),
+              inject: () => ({ bridge: makeBridge(ctx, host) }),
             },
             withBoundary(GraftConsole),
           ),
