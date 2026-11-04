@@ -39,7 +39,11 @@ const LOCAL_BRACKETED = /^import[ \t]*\{\n(?:[ \t]+[^\n]*\n){0,10}?\}[ \t]*from[
 const LOCAL_SINGLE_BRACKETED = /^import[ \t]*\{(?:[^}\n]*)\}[ \t]*from[ \t]+'\.[^'\n]+';?[ \t]*\n/gmu
 
 export function removeLocalImports(source) {
-  return source
+  // Normalise CRLF first: the source files are CRLF on Windows, and a regex anchored on
+  // `{\n` silently matched nothing there — which is how three local imports survived into
+  // the bundle and produced "Identifier 'asFiniteInteger' has already been declared".
+  const normalized = source.replace(/\r\n/gu, '\n').replace(/\r/gu, '\n')
+  return normalized
     .replace(LOCAL_SINGLE_LINE, '')
     .replace(LOCAL_SINGLE_BRACKETED, '')
     .replace(LOCAL_BRACKETED, '')
