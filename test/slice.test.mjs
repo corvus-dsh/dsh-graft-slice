@@ -147,9 +147,17 @@ test('v7.0 P1: an over-budget turn is dropped whole and declared, never cut mid-
 
   const omitted = plan.chunks.find((chunk) => chunk.kind === 'omitted-turns')
   assert.ok(omitted, 'dropped turns must be declared')
-  assert.match(omitted.text, /\[已省略 Turn \d+/)
+  // v0.23: the declaration is an XML element, not a bracket sentence. The old
+  // `[已省略 Turn N…]` form put the cut INSIDE the tape text, where a strict consumer
+  // (a JSON body, a fenced block) reads it as payload. The facts are the same; they
+  // now live in attributes, which are inert to a parser.
+  assert.match(omitted.text, /<omitted_turns\b/)
+  assert.match(omitted.text, /span="Turn \d+-?\d*"/)
+  assert.match(omitted.text, /recoverable="true"/)
   assert.match(omitted.text, /graft_read_result/)
   assert.match(omitted.text, /seq=\d+-\d+/)
+  // ...and the element is balanced, so nothing after it can be mistaken for payload.
+  assert.equal(omitted.text.includes('</omitted_turns>'), true, 'the element must close')
   // The declaration is placed before the surviving turns, not appended.
   assert.equal(plan.chunks[0].kind, 'omitted-turns')
   assert.equal(plan.warnings.some((warning) => warning.includes('dropped whole')), true)

@@ -108,7 +108,7 @@ test('v4.3: filters short, long, question-like and non-action sentences', () => 
   assert.equal(constraints.some((item) => item.includes('Write every number')), true)
 })
 
-test('v0.18: capacity, not a count, decides how many constraints survive', () => {
+test('v0.23: the PROMPT is capped by count, the HANDOFF by capacity', () => {
   const seeds = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel', 'india', 'juliet', 'kilo', 'lima']
   const events = [
     {
@@ -124,18 +124,29 @@ test('v0.18: capacity, not a count, decides how many constraints survive', () =>
       },
     },
   ]
-  // v0.18: the old rule kept the best EIGHT and said nothing about the other four.
-  // Now every qualifying rule fits the declared capacity, and the ones that do not
-  // fit are REPORTED — which is what lets `buildInjectionPlan` abort instead of
-  // shipping a shortened list.
+  // v0.18 asserted `constraints.length === 12`: every rule entered the prompt because
+  // the capacity allowed it. That is what grew the block to 27 items in real use.
+  //
+  // v0.23: the prompt gets at most five red lines no matter how much capacity is
+  // declared, and the other seven are ARCHIVED onto the handoff. Nothing is lost —
+  // `constraints + archived` still equals the twelve candidates.
   const selection = extractConstraintsDetailed(events)
-  assert.equal(selection.constraints.length, 12)
-  assert.deepEqual(selection.dropped, [])
+  assert.equal(selection.constraints.length <= 5, true, 'the prompt never grows past the cap')
+  assert.equal(selection.dropped.length, 0, 'archiving is not dropping')
+  assert.equal(
+    selection.constraints.length + selection.archived.length,
+    12,
+    'every rule is in the prompt or in the archive — the v0.18 no-loss promise',
+  )
 
   const tight = extractConstraintsDetailed(events, 120)
-  assert.ok(tight.constraints.length < 12, 'a small budget cannot hold all twelve')
-  assert.equal(tight.constraints.length + tight.dropped.length, 12, 'every rule is kept or reported')
-  assert.ok(tight.dropped.every((item) => item.reason === 'budget'))
+  assert.equal(tight.constraints.length <= 5, true)
+  assert.equal(
+    tight.constraints.length + tight.archived.length,
+    12,
+    'a small budget archives rather than loses',
+  )
+  assert.equal(tight.dropped.length, 0, 'nothing is dropped even under a tight budget')
 })
 
 test('v7.0 A3: older turns become a metadata index, not squeezed prose', () => {

@@ -25,6 +25,7 @@
  */
 
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -427,6 +428,13 @@ export interface GraftPlan {
     kept: number
     candidateCount: number
     dropped: number
+    /**
+     * v0.23: rules preserved on the handoff but NOT spent in the prompt.
+     *
+     * Reported separately so "the prompt got smaller" can never be confused with "a
+     * rule was thrown away". `dropped` remains the only field that means loss.
+     */
+    archived: number
   }
   /**
    * v0.14: how many migrations deep this target is (1 = a direct child of a
@@ -683,11 +691,35 @@ interface Truncation {
   originalLength: number
 }
 
+/**
+ * v0.23 — NO MORE FREE-TEXT TRUNCATION MARKERS.
+ *
+ * The old shape appended `…[graft truncated N chars]…` INTO the body. That is a
+ * sentence placed inside a value, and it breaks three things at once:
+ *
+ *   1. STRUCTURE. Anything that treats the value as data — a JSON body, a code block,
+ *      a file excerpt — is now corrupt. A `...[已省略 N 行]` line inserted into JSON is
+ *      precisely what makes a downstream `JSON.parse` fail, and the failure is
+ *      attributed to the reader rather than to the writer that inserted it.
+ *   2. FIDELITY. The marker is indistinguishable from content a model might have
+ *      written. A reader cannot tell "the tool cut this" from "the document says this".
+ *   3. REVERSIBILITY. Once the count is inline, nothing can recover the boundary.
+ *
+ * So truncation is now expressed as an XML ATTRIBUTE on a wrapper, which is inert:
+ * a parser skips an unknown attribute, a human sees an honest boundary, and no
+ * character of the marker is ever mistaken for payload.
+ *
+ *   <file_content truncated_lines="120" original_lines="480">…kept text…</file_content>
+ *
+ * The `Truncation.truncated` / `originalLength` fields stay, because callers already
+ * branch on them and the STRUCTURED facts are what a caller should be using.
+ */
 function truncateEnd(text: string, limit: number): Truncation {
   if (limit <= 0 || text.length <= limit) return { text, truncated: false, originalLength: text.length }
-  const marker = `\n…[graft truncated ${text.length - limit} chars]…`
+  // A bare slice: no marker injected into the value. The caller that needs to declare
+  // the cut has the structured fields and `wrapTruncated()` below.
   return {
-    text: text.slice(0, Math.max(0, limit - marker.length)) + marker,
+    text: text.slice(0, Math.max(0, limit)),
     truncated: true,
     originalLength: text.length,
   }
@@ -696,13 +728,28 @@ function truncateEnd(text: string, limit: number): Truncation {
 function truncateMiddle(text: string, limit: number): Truncation {
   if (limit <= 0 || text.length <= limit) return { text, truncated: false, originalLength: text.length }
   const head = Math.max(1, Math.floor(limit * 0.6))
-  const tail = Math.max(0, limit - head - 48)
-  const marker = `\n…[graft truncated ${text.length - limit} chars]…\n`
+  const tail = Math.max(0, limit - head)
+  // Head and tail are joined WITHOUT a separator in the middle: the absent region is
+  // declared by `wrapTruncated()`, not by a fake line inside the text.
   return {
-    text: text.slice(0, head) + marker + (tail > 0 ? text.slice(-tail) : ''),
+    text: text.slice(0, head) + (tail > 0 ? text.slice(-tail) : ''),
     truncated: true,
     originalLength: text.length,
   }
+}
+
+/**
+ * Wrap a truncated body so the CUT is declared outside the payload.
+ *
+ * `<file_content truncated_lines="N" original_chars="M">` is inert to every parser
+ * that does not know the element, and unambiguous to the ones that do. `countLines`
+ * is overridable because different callers truncate by chars, turns, or records.
+ */
+function wrapTruncated(text: string, original: number, originalLines?: number): string {
+  const kept = text.split('\n').length
+  const dropped = Math.max(0, (originalLines ?? original) - kept)
+  const attr = originalLines === undefined ? `original_chars="${original}"` : `original_lines="${originalLines}"`
+  return `<file_content truncated_lines="${dropped}" ${attr}>\n${text}\n</file_content>`
 }
 
 /** Strip Markdown enough to make an older-turn first paragraph readable as prose. */
@@ -949,6 +996,15 @@ export interface ConstraintCandidate {
   text: string
   index: number
   score: number
+  /**
+   * v0.23: RED LINE vs STANDING RULE.
+   *
+   * A red line is a prohibition that survives everything: it is short, absolute, and
+   * losing it risks damage. A standing rule is durable but contextual ("when writing
+   * SKILL.md, always include when_to_use"). Both must be preserved; only the red lines
+   * belong in the PROMPT, because the prompt is a budget spent on every turn.
+   */
+  tier?: 'redline' | 'standing'
 }
 
 export interface ConstraintDrop {
@@ -964,6 +1020,50 @@ export interface ConstraintSelection {
   budgetChars: number
   totalChars: number
   candidateCount: number
+  /**
+   * v0.23: the rules that are preserved but do NOT go in the prompt.
+   *
+   * The 27-item constraint list the user objected to was not wrong INFORMATION — it
+   * was wrong PLACEMENT. Every rule was carried into the prompt, so the prompt grew
+   * with the project and the model had to read a changelog to find its boundaries.
+   *
+   * The fix is not deletion. These rules still ride the handoff (the ledger and the
+   * task board), where they are read when someone actually needs them. Only the
+   * `constraints` array — the red lines — enters the prompt.
+   */
+  archived: string[]
+  /** How many red lines survived the cap. Equals `constraints.length` after selection. */
+  redlineCount: number
+}
+
+/**
+ * v0.23 — HOW MANY RED LINES MAY ENTER THE PROMPT.
+ *
+ * Five, because that is roughly as many absolute prohibitions as a reader can hold in
+ * working memory while also doing the task. Past that, rules stop being read and start
+ * being scrolled: a prompt with 27 constraints is a prompt whose constraints are
+ * decoration.
+ *
+ * This is a PROMPT budget, not a preservation budget. Nothing is deleted — see
+ * `ConstraintSelection.archived`. The distinction matters: the earlier design refused
+ * to ship at all when a rule did not fit, which kept every rule but made a long-lived
+ * project unsliceable; this design keeps every rule and ships the most load-bearing
+ * ones in the slot that is actually read.
+ */
+export const CONSTRAINT_PROMPT_MAX = 5
+
+/** Absolute, unqualified prohibitions: the ones that belong in the prompt. */
+const REDLINE_PATTERN =
+  /(绝对|严禁|绝不允许|绝不得|永远不要|一律|红线|never|under no circumstances|must not|do not ever)/iu
+
+/**
+ * A red line is SHORT and ABSOLUTE. Length matters because a red line that needs a
+ * paragraph to explain is a policy, not a line, and the prompt is the wrong home for
+ * a policy.
+ */
+function isRedline(text: string): boolean {
+  if (text.length > 160) return false
+  return REDLINE_PATTERN.test(text)
 }
 
 /** Pack ranked constraints into the declared capacity. Pure, so it is testable. */
@@ -973,23 +1073,56 @@ export function selectConstraints(
 ): ConstraintSelection {
   const budget = Number.isFinite(budgetChars) && budgetChars > 0 ? Math.trunc(budgetChars) : CONSTRAINT_BUDGET_CHARS
   const ranked = [...candidates].sort((left, right) => right.score - left.score || left.index - right.index)
-  const kept: ConstraintCandidate[] = []
+
+  /**
+   * v0.23: two passes, because the two budgets answer different questions.
+   *
+   * PASS 1 picks the prompt's red lines: absolute prohibitions first, capped at
+   * CONSTRAINT_PROMPT_MAX, and still inside the character budget. If there are not
+   * enough absolute prohibitions to fill the cap, the highest-scoring remaining rules
+   * fill it — a project with three red lines should still see its most load-bearing
+   * standing rule, or the prompt would be emptier than it needs to be.
+   *
+   * PASS 2 preserves EVERYTHING ELSE into `archived`, which rides the handoff but not
+   * the prompt. `dropped` now means only what could not be preserved even there,
+   * which is the only thing that should abort a handoff.
+   */
+  const redlines: ConstraintCandidate[] = []
+  const archived: ConstraintCandidate[] = []
   const dropped: ConstraintDrop[] = []
   let total = 0
-  for (const candidate of ranked) {
+
+  const explicit = ranked.filter((candidate) => candidate.tier === 'redline' || isRedline(candidate.text))
+  const rest = ranked.filter((candidate) => !(candidate.tier === 'redline' || isRedline(candidate.text)))
+  const promptOrder = [...explicit, ...rest]
+
+  const chosen = new Set<ConstraintCandidate>()
+  for (const candidate of promptOrder) {
+    if (redlines.length >= CONSTRAINT_PROMPT_MAX) break
     // No per-item truncation: a rule cut mid-sentence is a rule nobody can obey.
     if (total + candidate.text.length > budget) {
-      dropped.push({ text: candidate.text, chars: candidate.text.length, reason: 'budget' })
+      // It cannot go in the PROMPT, but it is still preserved below.
       continue
     }
-    kept.push(candidate)
+    redlines.push(candidate)
+    chosen.add(candidate)
     total += candidate.text.length
   }
+
+  // Everything not chosen for the prompt: preserved, not discarded.
+  for (const candidate of ranked) {
+    if (chosen.has(candidate)) continue
+    archived.push(candidate)
+  }
+
   // Kept rules are re-ordered to their original position, so the target reads them
   // in the order the user wrote them rather than by score.
-  kept.sort((left, right) => left.index - right.index)
+  redlines.sort((left, right) => left.index - right.index)
+  archived.sort((left, right) => left.index - right.index)
   return {
-    constraints: kept.map((candidate) => candidate.text),
+    constraints: redlines.map((candidate) => candidate.text),
+    archived: archived.map((candidate) => candidate.text),
+    redlineCount: redlines.length,
     dropped,
     budgetChars: budget,
     totalChars: total,
@@ -3302,6 +3435,39 @@ export interface TaskBoardInput {
   discarded: SemanticDiscard
   /** Pre-rendered extra prose (exclusion notes, artifact reuse, …). */
   notes?: readonly string[]
+  /**
+   * v0.23 P2: what the filesystem ACTUALLY says, measured at handoff time.
+   *
+   * The ✅ column is assembled from the source conversation — which means it reports
+   * what the model SAID it did. "git commit e8da8f6 成功" is a claim; the board
+   * presented it as a fact, and a target that trusts it builds on a commit that may
+   * not exist, on a branch that may be three edits behind, or on a repo that was never
+   * initialised.
+   *
+   * So the handoff now runs a cheap, read-only probe (`git status`, `git log -1`, a
+   * directory listing) and prints the result as its OWN section, labelled as measured.
+   * The board's claims stay claims; this section is the referee. When the two
+   * disagree, a target can see the disagreement without being told to look for it.
+   */
+  verification?: BoardVerification
+}
+
+/** The measured facts. Absent = not probed (no cwd, no git, probe failed). */
+export interface BoardVerification {
+  /** Absolute directory the probe ran in. */
+  cwd: string
+  /** `git rev-parse --short HEAD`, or undefined when not a repo. */
+  head?: string
+  /** `git log -1 --pretty=%s`, the subject of HEAD. */
+  subject?: string
+  /** Whether the working tree is dirty, and how many paths. */
+  dirty?: { tracked: number; untracked: number }
+  /** Number of entries in the working directory root. */
+  entries?: number
+  /** Why the probe could not run, when it could not. */
+  unavailable?: string
+  /** Unix ms when the probe ran. */
+  at: number
 }
 
 /**
@@ -3312,6 +3478,86 @@ export interface TaskBoardInput {
  * folding it into 已完成 makes the target assume it landed. The open turn's own
  * instruction is the only honest source, so it becomes this column verbatim.
  */
+/**
+ * v0.23 P2 — MEASURE WHAT THE FILESYSTEM SAYS, AT HANDOFF TIME.
+ *
+ * Read-only, bounded, and failure-tolerant by construction: the handoff must never
+ * fail because a `git` binary is missing. A probe that cannot answer records WHY in
+ * `unavailable`, because "could not check" and "checked, clean" are different facts
+ * and the board must not present them the same way.
+ *
+ * Why these three probes and no more:
+ *   - `rev-parse HEAD` + `log -1` establish WHICH commit the directory is on. That is
+ *     the exact claim a board makes ("commit e8da8f6 成功") and the exact thing that
+ *     can be a hallucination.
+ *   - `status --porcelain` answers "is the work on disk actually committed". A board
+ *     that says "done" while 12 files are uncommitted is the common real failure.
+ *   - a root listing size is the cheap sanity check that the directory the target will
+ *     open is the one the source was working in.
+ *
+ * Each runs with a short timeout: this happens inside a migrate call, and a hung git
+ * process would hold the handoff hostage. Any error is data, not a throw.
+ */
+export function verifyWorkspace(cwd: string, now: number = Date.now()): BoardVerification {
+  const run = (args: string[]): string | undefined => {
+    try {
+      const out = execFileSync('git', args, {
+        cwd,
+        encoding: 'utf8',
+        timeout: 4000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+      })
+      return String(out).trim()
+    } catch {
+      // Not a repo, git absent, timed out, permission denied: all the same to us.
+      return undefined
+    }
+  }
+
+  let entries: number | undefined
+  try {
+    entries = readdirSync(cwd).length
+  } catch {
+    entries = undefined
+  }
+
+  if (typeof cwd !== 'string' || cwd.trim().length === 0) {
+    return { cwd: '(未记录)', unavailable: '源会话没有可用的工作目录', at: now, ...(entries === undefined ? {} : { entries }) }
+  }
+
+  const head = run(['rev-parse', '--short', 'HEAD'])
+  if (head === undefined) {
+    return {
+      cwd,
+      ...(entries === undefined ? {} : { entries }),
+      unavailable: '不是 git 仓库，或没有任何提交',
+      at: now,
+    }
+  }
+
+  const subject = run(['log', '-1', '--pretty=%s'])
+  let dirty: { tracked: number; untracked: number } | undefined
+  const status = run(['status', '--porcelain'])
+  if (status !== undefined) {
+    const lines = status.split('\n').filter((line) => line.trim().length > 0)
+    // `??` is the porcelain prefix for untracked; everything else is a tracked change.
+    dirty = {
+      tracked: lines.filter((line) => !line.startsWith('??')).length,
+      untracked: lines.filter((line) => line.startsWith('??')).length,
+    }
+  }
+
+  return {
+    cwd,
+    head,
+    ...(subject === undefined || subject.length === 0 ? {} : { subject }),
+    ...(dirty === undefined ? {} : { dirty }),
+    ...(entries === undefined ? {} : { entries }),
+    at: now,
+  }
+}
+
 const BOARD_COLUMNS = {
   request: '原始用户要求',
   done: '✅ 已完成',
@@ -3370,6 +3616,39 @@ export function renderTaskBoard(input: TaskBoardInput): string {
     if (trimmed.length > 0) lines.push('', trimmed)
   }
 
+  /**
+   * v0.23 P2 — THE REFEREE.
+   *
+   * Everything above is a CLAIM assembled from the conversation. This section is
+   * what the filesystem said when asked, and it is labelled as such so the two are
+   * never read as the same kind of statement.
+   *
+   * Rendered even when the probe failed, because "we could not check" is information
+   * a target must have: it changes whether the ✅ column may be trusted.
+   */
+  const v = input.verification
+  if (v !== undefined) {
+    lines.push('', `**🔍 物理验证（${v.cwd}）**`)
+    if (v.unavailable !== undefined) {
+      lines.push(`- 未能验证：${v.unavailable}。上面「已完成」是会话里的陈述，未经文件系统确认。`)
+    } else {
+      if (v.head !== undefined) {
+        lines.push(`- git HEAD：\`${v.head}\`${v.subject === undefined ? '' : ` — ${truncateEnd(v.subject, 80).text}`}`)
+      } else {
+        lines.push('- git：当前目录不是仓库，或没有提交。')
+      }
+      if (v.dirty !== undefined) {
+        const total = v.dirty.tracked + v.dirty.untracked
+        lines.push(
+          total === 0
+            ? '- 工作区：干净（无未提交改动）。'
+            : `- 工作区：**有未提交改动**（已跟踪 ${v.dirty.tracked}，未跟踪 ${v.dirty.untracked}）。上面的结论可能基于磁盘上尚未提交的内容。`,
+        )
+      }
+      if (v.entries !== undefined) lines.push(`- 目录根：${v.entries} 个条目。`)
+    }
+  }
+
   const stop: string[] = []
   if (input.stopPoint.turn !== undefined) stop.push(`Turn ${input.stopPoint.turn} 已完成`)
   if (input.stopPoint.boundarySeq !== undefined && input.stopPoint.boundarySeq > 0) {
@@ -3408,9 +3687,13 @@ export function renderTaskBoard(input: TaskBoardInput): string {
   lines.push('', BOARD_TRAILER)
 
   const text = lines.join('\n')
+  // v0.23: the cut is declared in an ATTRIBUTE on a wrapper, never as a bracket line
+  // inside the board. `…[看板已到上限]` was a sentence in the middle of the
+  // instruction card — indistinguishable from the model's own text, and enough to
+  // corrupt any consumer that treated the card as structured data.
   return text.length <= INSTRUCTION_CARD_MAX_CHARS
     ? text
-    : `${truncateEnd(text, INSTRUCTION_CARD_MAX_CHARS).text}\n…[看板已到上限，细节按 seq 回读]`
+    : wrapTruncated(truncateEnd(text, INSTRUCTION_CARD_MAX_CHARS).text, text.length)
 }
 
 /**
@@ -3437,6 +3720,14 @@ export interface InstructionCardInput {
   inProgress?: string
   /** v0.20: further next actions (openTodos), after the prose body. */
   pending?: readonly string[]
+  /**
+   * v0.23 P2: the measured workspace facts, or the reason they could not be measured.
+   *
+   * Supplied by the caller rather than probed here, so the card stays a pure renderer
+   * (testable without a filesystem) and the probe runs ONCE per handoff rather than
+   * once per card render.
+   */
+  verification?: BoardVerification
 }
 
 /**
@@ -3494,6 +3785,7 @@ export function renderInstructionCard(input: InstructionCardInput): string {
     pointerCount: input.pointerCount,
     ...(unresolved === undefined ? {} : { unresolvedError: unresolved }),
     discarded: input.semantic.discarded,
+    ...(input.verification === undefined ? {} : { verification: input.verification }),
     notes,
   })
 }
@@ -4197,6 +4489,16 @@ export function buildTape(
   sourceSessionId?: string,
   openTodos: readonly string[] = [],
   availableTools?: ReadonlySet<string>,
+  /**
+   * v0.23 P2: the workspace the card's physical-verification section describes.
+   *
+   * Optional and injected rather than read from `process.cwd()`: `buildTape` is a
+   * pure function over a log, and a renderer that silently probed whatever directory
+   * the HOST happened to be in would report the truth about the WRONG project — worse
+   * than reporting nothing. Absent = no verification section, which the card states
+   * honestly.
+   */
+  workspaceCwd?: string,
 ): GraftTape {
   const sliced = events.filter((event) => Number(event.seq) <= boundary.boundarySeq)
   const calls = new Map<string, CallRecord>()
@@ -4590,6 +4892,25 @@ export function buildTape(
     },
     ...(sourceSessionId === undefined || sourceSessionId.length === 0 ? {} : { sourceSessionId }),
     pointerCount,
+    /**
+     * v0.23 P2: probe ONCE, here, and hand the result to the renderer.
+     *
+     * The ✅ column is assembled from the conversation, so it reports what the model
+     * said it did. This is the only part of the card that is measured, and it is what
+     * lets a target notice that "commit e8da8f6 成功" and the actual HEAD disagree.
+     *
+     * A probe failure is not a handoff failure: `verifyWorkspace` never throws, and an
+     * unmeasurable workspace is rendered as "could not verify" rather than omitted —
+     * the difference changes how much the rest of the card may be trusted.
+     */
+    ...(() => {
+      if (typeof workspaceCwd !== 'string' || workspaceCwd.trim().length === 0) return {}
+      try {
+        return { verification: verifyWorkspace(workspaceCwd) }
+      } catch {
+        return {}
+      }
+    })(),
   })
   const pendingStateText = [constraintAnchor, instructionCard, forcedCutNote, artifactNote, selfSliceBootstrap]
     .filter((part): part is string => typeof part === 'string' && part.length > 0)
@@ -4896,6 +5217,10 @@ export function buildInjectionPlan(
     tierDecision === undefined
       ? { ...settings, recentTurns: adaptive.depth }
       : { ...settings, recentTurns: tierDecision.depth }
+  // v0.23 P2: resolve the workspace BEFORE building the tape, so the card's
+  // verification section describes the project the source was working in. Reading it
+  // after the fact is what would let the probe report on the wrong directory.
+  const cwd = log.session?.cwd
   const tape = buildTape(
     events,
     boundary,
@@ -4903,8 +5228,8 @@ export function buildInjectionPlan(
     typeof log.session?.id === 'string' ? log.session.id : undefined,
     taskStateForPending.openTodos,
     availableTools,
+    typeof cwd === 'string' ? cwd : undefined,
   )
-  const cwd = log.session?.cwd
   if (typeof cwd !== 'string' || cwd.length === 0 || !isAbsolutePath(cwd)) {
     throw graftError(
       'MISSING_CWD',
@@ -5418,9 +5743,19 @@ export function buildInjectionPlan(
           : '总预算'
     chunks.unshift({
       kind: 'omitted-turns',
+      /**
+       * v0.23: the declaration is an XML element, not a bracket sentence.
+       *
+       * `[已省略 Turn X-Y：N 轮因…整段丢弃]` read as CONTENT — a line inside the tape
+       * that a reader could mistake for the conversation itself, and a bracket phrase
+       * any strict consumer (a JSON body, a fenced block) would treat as payload.
+       * `<omitted_turns span="…" count="…" recoverable="true">` puts the same facts in
+       * attributes, where they are inert to a parser and unambiguous to a human.
+       */
       text:
-        `[已省略 ${span}：${uniqueOmitted.length} 轮因${reason}整段丢弃，未做截断；` +
-        `需要时用 graft_read_result 按 seq=${first.firstSeq}-${last.lastSeq} 回查]`,
+        `<omitted_turns span="${span}" count="${uniqueOmitted.length}" reason="${reason}" recoverable="true">\n` +
+        `需回查时用 graft_read_result 按 seq=${first.firstSeq}-${last.lastSeq} 读取原文。\n` +
+        `</omitted_turns>`,
       truncated: false,
     })
   }
@@ -5471,6 +5806,8 @@ export function buildInjectionPlan(
       kept: constraints.length,
       candidateCount: constraintSelection.candidateCount,
       dropped: constraintSelection.dropped.length,
+      // v0.23: preserved on the handoff, deliberately kept OUT of the prompt.
+      archived: constraintSelection.archived.length,
     },
     // v0.14: injected (see goalMessage) and used by the chain guard.
     generation,
