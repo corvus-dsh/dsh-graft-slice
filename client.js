@@ -62,6 +62,8 @@ window.__ModuleLoader__.load({
 .gc-seg{display:inline-flex;border:1px solid var(--dsw-alias-border-secondary,rgba(128,128,128,.3));border-radius:8px;overflow:hidden;flex:0 0 auto}
 .gc-seg button{border:0;background:transparent;color:inherit;font:inherit;padding:4px 10px;cursor:pointer;opacity:.65}
 .gc-seg button[aria-pressed="true"]{background:var(--dsw-alias-brand-primary,#3b82f6);color:#fff;opacity:1}
+.gc-select{border:1px solid var(--dsw-alias-border-secondary,rgba(128,128,128,.3));background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.1));border-radius:7px;padding:5px 9px;color:inherit;font:inherit;max-width:340px}
+.gc-sw[disabled],.gc-num[disabled],.gc-range[disabled],.gc-seg button[disabled]{opacity:.45;cursor:not-allowed}
 .gc-crash{margin:24px;padding:16px 18px;border:1px solid #b91c1c;border-radius:10px;background:rgba(185,28,28,.08);color:#b91c1c;font:13px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
 .gc-crash h3{margin:0 0 8px;font-size:14px}
 .gc-crash pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;opacity:.9}
@@ -153,8 +155,16 @@ window.__ModuleLoader__.load({
        * recently active one — which is what a user is looking at when they open a
        * console panel.
        */
-      const agentOf = () => {
+      const agentOf = (preferredId) => {
+        // v0.25: an EXPLICIT choice always wins. A human picking a session is the
+        // unambiguous source of truth and must not be second-guessed by "newest".
         const ids = sessionIdsFromProps()
+        if (typeof preferredId === 'string' && preferredId.length > 0) {
+          // An id the user chose is a real id even when the snapshot does not list it:
+          // the Host validates it and reports if it is gone. Refusing it here would stop
+          // the selector recovering from a stale snapshot.
+          return { id: preferredId }
+        }
         if (ids.length > 0) return { id: ids[ids.length - 1] }
         try {
           const sessions = ctx.get ? ctx.get('sessions') : undefined
@@ -176,9 +186,35 @@ window.__ModuleLoader__.load({
         return undefined
       }
 
-      const callHost = async (line) => {
+      /**
+       * v0.25: the session list, for the panel's selector.
+       *
+       * A root-scoped panel can legitimately see ZERO sessions — a fresh window with no
+       * conversation. Reporting that as a dead end made the whole console useless in
+       * exactly the situation a user opens it. The ids are published so a human can pick.
+       */
+      const listSessions = () => {
+        const ids = [...sessionIdsFromProps()]
+        try {
+          const sessions = ctx.get ? ctx.get('sessions') : undefined
+          if (sessions && typeof sessions.list === 'function') {
+            const list = sessions.list()
+            if (Array.isArray(list)) {
+              for (const entry of list) {
+                const id = typeof entry === 'string' ? entry : entry && typeof entry.id === 'string' ? entry.id : ''
+                if (id.length > 0 && !ids.includes(id)) ids.push(id)
+              }
+            }
+          }
+        } catch {
+          // An unavailable service simply means no extra ids.
+        }
+        return ids
+      }
+
+      const callHost = async (line, preferredId) => {
         const failures = []
-        const agent = agentOf()
+        const agent = agentOf(preferredId)
 
         /**
          * `remote.commands.execute(agent, line, attachments, signal)`.
@@ -238,8 +274,12 @@ window.__ModuleLoader__.load({
         }
       }
       return {
-        state: () => callHost('/graft-console'),
-        set: (key, value) => callHost(`/graft-console-set ${key} ${value}`),
+        /** v0.25: the session surface, so the panel can offer an explicit choice. */
+        sessions: () => listSessions(),
+        /** Is there an agent right now? Decides read-only mode vs. interactive. */
+        canWrite: () => agentOf() !== undefined,
+        state: (sessionId) => callHost('/graft-console', sessionId),
+        set: (key, value, sessionId) => callHost(`/graft-console-set ${key} ${value}`, sessionId),
         // The panel must render even when the bridge is dead: every method resolves
         // to an error RESULT, never a thrown exception, so one failed call cannot
         // blank the slot entry.
@@ -253,7 +293,7 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function Toggle({ label, hint, checked, onChange }) {
+    function Toggle({ label, hint, checked, onChange, disabled }) {
       return h('div', { className: 'gc-row' }, [
         h('span', { key: 'l', className: 'gc-label' }, [
           h('span', { key: 'a' }, label),
@@ -266,12 +306,15 @@ window.__ModuleLoader__.load({
           'aria-checked': checked ? 'true' : 'false',
           'aria-label': label,
           className: 'gc-sw',
-          onClick: () => onChange(!checked),
+          // v0.25: read-only mode DISABLES the control instead of hiding it — a hidden
+          // switch leaves the user wondering whether the feature exists.
+          ...(disabled === true ? { disabled: true, title: '只读：没有确定的活动会话' } : {}),
+          onClick: () => { if (disabled !== true) onChange(!checked) },
         }, h('i', null)),
       ])
     }
 
-    function Ratio({ label, hint, value, onChange }) {
+    function Ratio({ label, hint, value, onChange, disabled }) {
       const [draft, setDraft] = React.useState(String(value))
       React.useEffect(() => setDraft(String(value)), [value])
       const commit = (next) => {
@@ -293,7 +336,8 @@ window.__ModuleLoader__.load({
           step: '0.01',
           value: String(value),
           'aria-label': label,
-          onChange: (event) => onChange(Number(event.target.value)),
+          ...(disabled === true ? { disabled: true } : {}),
+          onChange: (event) => { if (disabled !== true) onChange(Number(event.target.value)) },
         }),
         h('input', {
           key: 'n',
@@ -304,6 +348,8 @@ window.__ModuleLoader__.load({
           step: '0.01',
           value: draft,
           'aria-label': `${label} 数值`,
+          ...(disabled === true ? { disabled: true } : {}),
+          ...(disabled === true ? { disabled: true } : {}),
           onChange: (event) => setDraft(event.target.value),
           onBlur: () => commit(draft),
           onKeyDown: (event) => { if (event.key === 'Enter') commit(draft) },
@@ -312,7 +358,7 @@ window.__ModuleLoader__.load({
       ])
     }
 
-    function Segmented({ label, hint, value, options, onChange }) {
+    function Segmented({ label, hint, value, options, onChange, disabled }) {
       return h('div', { className: 'gc-row' }, [
         h('span', { key: 'l', className: 'gc-label' }, [
           h('span', { key: 'a' }, label),
@@ -324,13 +370,14 @@ window.__ModuleLoader__.load({
             type: 'button',
             'aria-pressed': String(option.value === value),
             title: option.title || option.value,
-            onClick: () => onChange(option.value),
+            ...(disabled === true ? { disabled: true } : {}),
+            onClick: () => { if (disabled !== true) onChange(option.value) },
           }, option.label))),
       ])
     }
 
     /** A bounded integer knob (v0.18 capacity/rate settings). */
-    function NumberRow({ label, hint, value, min, max, onChange }) {
+    function NumberRow({ label, hint, value, min, max, onChange, disabled }) {
       const [draft, setDraft] = React.useState(String(value))
       React.useEffect(() => { setDraft(String(value)) }, [value])
       const commit = (raw) => {
@@ -481,6 +528,16 @@ window.__ModuleLoader__.load({
        * by construction — bumping it re-runs the effect with no memo entry to get
        * wrong. Fewer moving parts AND a smaller API dependency.
        */
+      /**
+       * v0.25 — THE SESSION THE PANEL ACTS ON.
+       *
+       * Empty means "let the bridge pick the most recent live session". A root-scoped
+       * panel has no inherent session binding, and useSessions can legitimately return
+       * nothing (a fresh window with no conversation open). Rather than dead-end on
+       * "没有可用的活动会话", the panel offers an explicit choice, and an explicit choice
+       * is authoritative.
+       */
+      const [picked, setPicked] = React.useState('')
       const [tick, setTick] = React.useState(0)
       const refresh = () => setTick((value) => value + 1)
 
@@ -525,7 +582,7 @@ window.__ModuleLoader__.load({
           }
           if (alive) setBusy(true)
           try {
-            const reply = await withTimeout(bridge.state(), 12_000, '读取转生控制台')
+            const reply = await withTimeout(bridge.state(picked), 12_000, '读取转生控制台')
             if (!alive) return
             setVia(String((reply && reply.via) || ''))
             if (!reply || !reply.ok) {
@@ -552,7 +609,7 @@ window.__ModuleLoader__.load({
         void run()
         const timer = setInterval(() => { void run() }, 5000)
         return () => { alive = false; clearInterval(timer) }
-      }, [bridge, tick])
+      }, [bridge, tick, picked])
 
       /**
        * `write` is a plain closure, recreated each render. That is fine: it is never a
@@ -561,7 +618,7 @@ window.__ModuleLoader__.load({
        */
       const write = async (key, value) => {
         try {
-          const reply = await bridge.set(key, value)
+          const reply = await bridge.set(key, value, picked)
           setVia(String((reply && reply.via) || ''))
           if (!reply || !reply.ok) { setError(String((reply && reply.text) || '写入失败')); return }
           // Optimistic: the panel shows the new value immediately and the refetch
@@ -583,6 +640,29 @@ window.__ModuleLoader__.load({
       const pending = state !== null && state !== undefined && Array.isArray(state.pendingIgnitions) ? state.pendingIgnitions : []
       const num = (value, fallback) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback)
 
+      /**
+       * v0.25: the session surface, read synchronously from the injected snapshot.
+       *
+       * sessions() is a pure read, so it is safe on every render. canWrite is false when
+       * there is no resolvable agent AND no explicit choice: the panel then shows the
+       * live watermark it can and disables the knobs, instead of reporting a dead end.
+       */
+      const sessions = (() => {
+        try {
+          return bridge !== undefined && typeof bridge.sessions === 'function' ? bridge.sessions() : []
+        } catch {
+          return []
+        }
+      })()
+      const canWrite = (() => {
+        try {
+          if (picked.length > 0) return true
+          return bridge !== undefined && typeof bridge.canWrite === 'function' ? bridge.canWrite() === true : false
+        } catch {
+          return false
+        }
+      })()
+
       return h('div', { className: 'gc-root' }, [
         h('style', { key: 'css' }, CSS),
         h('div', { key: 'head' }, [
@@ -591,6 +671,41 @@ window.__ModuleLoader__.load({
             '改动直接写入 profile 配置（configEditor），下一次 pre-step 生效，无需重启。'),
         ]),
         error ? h('div', { key: 'e', className: 'gc-card gc-err' }, error) : null,
+        /**
+         * v0.25 — THE SESSION SELECTOR.
+         *
+         * A root-scoped panel may see zero sessions. Reporting that as a dead end made
+         * the console useless in exactly the situation a user opens it (a fresh window,
+         * nothing running). The choices are:
+         *
+         *   - sessions available -> default to the newest, allow switching
+         *   - none available     -> say so ONCE, and keep the READ-ONLY view alive so the
+         *                           live watermark is still visible
+         */
+        h('div', { key: 'session', className: 'gc-card' }, [
+          h('h3', { key: 'h', className: 'gc-h' }, '目标会话'),
+          h('p', { key: 's', className: 'gc-sub' },
+            sessions.length === 0
+              ? '当前没有活动会话。面板处于只读模式：可以查看实时水位，但开关不可调节。'
+              : canWrite
+                ? '命令会以选中的会话身份执行。默认使用最新一个。'
+                : '未能确定活动会话，面板为只读。请从下拉框中选择一个会话。'),
+          sessions.length === 0
+            ? null
+            : h('div', { key: 'r', className: 'gc-row' }, [
+                h('span', { key: 'l', className: 'gc-label' }, '会话'),
+                h('select', {
+                  key: 'sel',
+                  className: 'gc-select',
+                  value: picked,
+                  'aria-label': '目标会话',
+                  onChange: (event) => setPicked(String(event.target.value || '')),
+                }, [
+                  h('option', { key: '', value: '' }, '（最新一个）'),
+                  ...sessions.map((id) => h('option', { key: id, value: id }, id)),
+                ]),
+              ]),
+        ]),
         h('div', { key: 'sw', className: 'gc-card' }, [
           h('h3', { key: 'h', className: 'gc-h' }, '核心开关'),
           h(Toggle, {
@@ -599,6 +714,7 @@ window.__ModuleLoader__.load({
             hint: '到提示线提醒模型自己收尾并 graft_prepare；关掉后模型不会被提示',
             checked: config ? config.modelDrivenGraft === true : false,
             onChange: (next) => write('modelDrivenGraft', next),
+            disabled: !canWrite,
           }),
           h(Toggle, {
             key: 'ag',
@@ -606,6 +722,7 @@ window.__ModuleLoader__.load({
             hint: '到强制线由系统强制迁移，模型忽略提示也不会无限硬扛',
             checked: config ? config.autoGraft === true : false,
             onChange: (next) => write('autoGraft', next),
+            disabled: !canWrite,
           }),
         ]),
         h('div', { key: 'ratio', className: 'gc-card' }, [
@@ -616,6 +733,7 @@ window.__ModuleLoader__.load({
             hint: '默认 0.70；固定模式下生效，动态模式下是提示线的下限来源',
             value: config ? config.modelDrivenGraftAtRatio : 0.7,
             onChange: (next) => write('modelDrivenGraftAtRatio', next),
+            disabled: !canWrite,
           }),
           h(Ratio, {
             key: 'h',
@@ -623,6 +741,7 @@ window.__ModuleLoader__.load({
             hint: '默认 0.75；固定模式下的兜底水位，动态模式下是最晚可切的天花板',
             value: config ? config.autoGraftAtRatio : 0.75,
             onChange: (next) => write('autoGraftAtRatio', next),
+            disabled: !canWrite,
           }),
         ]),
         h('div', { key: 'modes', className: 'gc-card' }, [
@@ -637,6 +756,7 @@ window.__ModuleLoader__.load({
               { value: 'fixed', label: '固定', title: '原样使用两个常量（差分测试用）' },
             ],
             onChange: (next) => write('watermarkMode', next),
+            disabled: !canWrite,
           }),
           h(Segmented, {
             key: 'sm',
@@ -649,6 +769,7 @@ window.__ModuleLoader__.load({
               { value: 'autonomous', label: 'autonomous' },
             ],
             onChange: (next) => write('safetyMode', next),
+            disabled: !canWrite,
           }),
           h(NumberRow, {
             key: 'cb',
@@ -658,6 +779,7 @@ window.__ModuleLoader__.load({
             min: 500,
             max: 200000,
             onChange: (next) => write('constraintBudgetChars', next),
+            disabled: !canWrite,
           }),
           h(NumberRow, {
             key: 'gt',
@@ -667,6 +789,7 @@ window.__ModuleLoader__.load({
             min: 0,
             max: 100000,
             onChange: (next) => write('growthTokensPerTurn', next),
+            disabled: !canWrite,
           }),
           h('p', { key: 'derived', className: 'gc-sub', style: { margin: '10px 0 0' } },
             thresholds
@@ -685,6 +808,7 @@ window.__ModuleLoader__.load({
             hint: '注入「工作目录严格限定为 <cwd>」；建议保持开启',
             checked: config ? config.workspaceRedline === true : false,
             onChange: (next) => write('workspaceRedline', next),
+            disabled: !canWrite,
           }),
           h(Toggle, {
             key: 'cg',
@@ -692,6 +816,7 @@ window.__ModuleLoader__.load({
             hint: '在工具层拒绝越界搜索与逃出工作区的递归删除',
             checked: config ? config.commandGuard === true : false,
             onChange: (next) => write('commandGuard', next),
+            disabled: !canWrite,
           }),
         ]),
         h('div', { key: 'ignite', className: 'gc-card' }, [
@@ -702,6 +827,7 @@ window.__ModuleLoader__.load({
             hint: '目标会话 flush 成功后由宿主 sessionController.prompt 直接开跑，无需人工点击',
             checked: config ? config.igniteTarget === true : false,
             onChange: (next) => write('igniteTarget', next),
+            disabled: !canWrite,
           }),
           h(Segmented, {
             key: 'im',
@@ -713,6 +839,7 @@ window.__ModuleLoader__.load({
               { value: 'steer', label: 'steer' },
             ],
             onChange: (next) => write('ignitionMode', next),
+            disabled: !canWrite,
           }),
           pending.length > 0
             ? h('p', { key: 'p', className: 'gc-sub', style: { color: '#b45309', margin: '8px 0 0' } },
