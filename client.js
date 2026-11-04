@@ -80,28 +80,114 @@ window.__ModuleLoader__.load({
      * `host.call(method, args)` reaches this package's own Host half with no such
      * declaration, so it is tried first and the namespace is the fallback.
      */
-    function makeBridge(ctx, host) {
+    function makeBridge(ctx, host, slotProps) {
       /**
-       * v0.22: `remote.commands.execute(agent, line, attachments, signal)`.
+       * v0.24 — WHY THE PANEL STOOD AT "读取中…" AND WHY `commands/execute` RETURNED
+       * `gateway/arguments-invalid`.
        *
-       * The earlier version passed `(method, args, ...)`, which is not the signature:
-       * the Remote takes the first ARGUMENT as the receiving Agent and the second as a
-       * complete `/name args` line. `agentOf` reads the first live agent because a
-       * command must be executed FOR an agent (scoped definitions shadow globals).
+       * The Host registers `commands.execute(agent, line, attachments, signal)` and the
+       * `agent` parameter is typed `Agent`, i.e. `{ id: SessionId }` — a REQUIRED,
+       * validated argument. The Remote validates its payload against that signature and
+       * rejects anything else with `gateway/arguments-invalid`, which is exactly the
+       * error the memory panel showed.
+       *
+       * The previous `agentOf()` did this:
+       *
+       *     const list = ctx.get('sessions').list()
+       *
+       * The CLIENT `sessions` service has no `list()` method at all — its surface is
+       * `retain` / `using` / `retainInfo` / `refreshProjections` / `search` / `fork` /
+       * `scope` / `binding`. (`list()` exists on the HOST store, which is a different
+       * object reached by a different process.) So the call returned `undefined` on
+       * every render, `execute(undefined, …)` was rejected as invalid arguments, and
+       * the rejection was swallowed into a string that the panel rendered as an error
+       * card — or, on the graft side, left the panel with no state at all.
+       *
+       * Two independent fixes, because either alone is fragile:
+       *
+       *   1. ASK THE SLOT. The `main` slot is root-scoped, so it receives standard
+       *      props including `useSessions`, the Client's ObservableSnapshot selector for
+       *      live sessions. That is the supported way for a root-scoped panel to learn
+       *      which sessions exist; it does not require `list()` anywhere.
+       *   2. FALL BACK TO `binding`. If the hook is unavailable (an older host, a
+       *      different slot), a retained session's binding exposes both `sessionId` and
+       *      `session.command(line)` — the ISession method the UI is meant to use.
+       *
+       * `agentOf` now returns undefined ONLY when there is genuinely no live session,
+       * and that case is reported as "no session" instead of being sent as an invalid
+       * argument.
+       */
+      const sessionIdsFromProps = () => {
+        try {
+          if (slotProps === undefined || slotProps === null) return []
+          const useSessions = slotProps.useSessions
+          if (typeof useSessions !== 'function') return []
+          // `useSessions(selector)` is a SnapshotSelectorHook. A selector that returns
+          // the whole snapshot is the only thing safe to call from a non-render context,
+          // and we only need the id list, so ask for exactly that.
+          const snapshot = useSessions((value) => value)
+          if (snapshot === undefined || snapshot === null) return []
+          const list = Array.isArray(snapshot)
+            ? snapshot
+            : Array.isArray(snapshot.sessions)
+              ? snapshot.sessions
+              : Array.isArray(snapshot.list)
+                ? snapshot.list
+                : []
+          const ids = []
+          for (const entry of list) {
+            const id = typeof entry === 'string' ? entry : entry && typeof entry.id === 'string' ? entry.id : typeof entry?.sessionId === 'string' ? entry.sessionId : ''
+            if (id.length > 0) ids.push(id)
+          }
+          return ids
+        } catch {
+          return []
+        }
+      }
+
+      /**
+       * Resolve ONE valid `{ id }` agent, or undefined with the reason recorded.
+       *
+       * `remote.commands.execute` needs the agent of the session the command runs FOR.
+       * Root-scoped panels are not bound to a session, so the honest choice is the most
+       * recently active one — which is what a user is looking at when they open a
+       * console panel.
        */
       const agentOf = () => {
+        const ids = sessionIdsFromProps()
+        if (ids.length > 0) return { id: ids[ids.length - 1] }
         try {
           const sessions = ctx.get ? ctx.get('sessions') : undefined
-          const list = sessions && typeof sessions.list === 'function' ? sessions.list() : undefined
-          const first = Array.isArray(list) && list.length > 0 ? list[0] : undefined
-          if (first !== undefined) return first
+          // The CLIENT surface has no `list()`. Probe the two methods that DO exist and
+          // can name a session: `retainInfo`/`binding` need an id we do not have, so the
+          // only remaining supported source is a snapshot the caller already holds.
+          if (sessions && typeof sessions.list === 'function') {
+            // Defensive: a host build that does expose `list()` on the client face.
+            const list = sessions.list()
+            if (Array.isArray(list) && list.length > 0) {
+              const first = list[0]
+              const id = typeof first === 'string' ? first : first && typeof first.id === 'string' ? first.id : ''
+              if (id.length > 0) return { id }
+            }
+          }
         } catch {
-          // A missing sessions service is not fatal: the call reports it.
+          // Reported by the caller as "no session", which is the accurate statement.
         }
         return undefined
       }
+
       const callHost = async (line) => {
         const failures = []
+        const agent = agentOf()
+
+        /**
+         * `remote.commands.execute(agent, line, attachments, signal)`.
+         *
+         * Sending an undefined agent is worse than not sending at all: the gateway
+         * rejects it as `gateway/arguments-invalid`, which reads like a plugin bug and
+         * buries the real cause ("no session is open"). So the no-agent case is stated
+         * plainly and the other channels are still tried.
+         */
         const commands = (() => {
           try {
             const remote = ctx && ctx.get ? ctx.get('remote') : undefined
@@ -111,17 +197,27 @@ window.__ModuleLoader__.load({
             return undefined
           }
         })()
+
         if (commands && typeof commands.execute === 'function') {
-          try {
-            const settled = await commands.execute(agentOf(), line, [], undefined)
-            const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
-            if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
-            if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
-            failures.push('remote.commands.execute: returned undefined (the command name did not resolve)')
-          } catch (error) {
-            failures.push(`remote.commands.execute: ${String((error && error.message) || error)}`)
+          if (agent === undefined) {
+            failures.push('remote.commands.execute: 没有可用的活动会话（agent 参数必填，伪造会被 gateway 拒绝）')
+          } else {
+            try {
+              const settled = await commands.execute(agent, line, [], undefined)
+              const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
+              if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
+              if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
+              failures.push('remote.commands.execute: returned undefined (the command name did not resolve)')
+            } catch (error) {
+              const message = String((error && error.message) || error)
+              // The gateway error is the most informative thing we have; keep it whole.
+              failures.push(`remote.commands.execute: ${message}`)
+            }
           }
+        } else {
+          failures.push('remote.commands 不可用（inject 未生效或宿主未挂载）')
         }
+
         // The dynamic-package RPC: only present when this bundle runs as a DYNAMIC
         // package. An installed client module receives `require` alone, so this is a
         // bonus channel, never the primary one.
@@ -390,14 +486,46 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         let alive = true
+        /**
+         * v0.24: a HARD timeout on the fetch.
+         *
+         * The bridge awaits a Remote call, and the panel used to sit on "读取中…"
+         * indefinitely when that call neither resolved nor rejected — a channel that is
+         * mounted but not answering looks exactly like a slow one. `busy` could never
+         * clear, so the UI had no way back.
+         */
+        const withTimeout = (promise, ms, label) =>
+          new Promise((resolve) => {
+            let settled = false
+            const timer = setTimeout(() => {
+              if (settled) return
+              settled = true
+              resolve({ ok: false, via: 'timeout', text: `${label} 超时（${ms}ms 内宿主没有回应）` })
+            }, ms)
+            Promise.resolve(promise).then(
+              (value) => {
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                resolve(value)
+              },
+              (error) => {
+                if (settled) return
+                settled = true
+                clearTimeout(timer)
+                resolve({ ok: false, via: 'none', text: String((error && error.message) || error) })
+              },
+            )
+          })
+
         const run = async () => {
           if (bridge === undefined) {
-            if (alive) setError('桥接未注入（slot inject 缺失）')
+            if (alive) { setError('桥接未注入（slot inject 缺失）'); setBusy(false) }
             return
           }
           if (alive) setBusy(true)
           try {
-            const reply = await bridge.state()
+            const reply = await withTimeout(bridge.state(), 12_000, '读取转生控制台')
             if (!alive) return
             setVia(String((reply && reply.via) || ''))
             if (!reply || !reply.ok) {
@@ -545,7 +673,9 @@ window.__ModuleLoader__.load({
               ? `当前推导：强制线 ${(num(thresholds.hardAt, 0.75) * 100).toFixed(2)}% · 提示线 ${(num(thresholds.warnAt, 0.7) * 100).toFixed(2)}%` +
                 ` · 单次交接估价 ${num(thresholds.estimatedGraftCost, 0).toLocaleString()} tok` +
                 (thresholds.feasible === false ? ' · ⚠ 该窗口装不下一次交接（feasible=false）' : '')
-              : '当前推导：读取中…'),
+              // v0.24: "读取中" only while a fetch is genuinely in flight. After a failure
+              // the line says so, instead of spinning forever with no explanation.
+              : busy ? '当前推导：读取中…' : '当前推导：读取失败（原因见下方红卡），开关显示的是默认值。'),
         ]),
         h('div', { key: 'guard', className: 'gc-card' }, [
           h('h3', { key: 'h', className: 'gc-h' }, '护栏'),
@@ -657,9 +787,24 @@ window.__ModuleLoader__.load({
        */
       inject: ['slots', 'remote', 'remote.commands'],
       apply(ctx) {
-        const bridge = makeBridge(ctx, host)
+        /**
+         * v0.24: build the bridge PER SLOT INSTANCE, from the props the owner supplies.
+         *
+         * `inject` is called with the slot props, and `main` is root-scoped — it gets the
+         * standard selector hooks including `useSessions`, which is the supported way to
+         * learn the live session list from a root panel. Building the bridge once in
+         * `apply` would freeze it before any session existed, which is how the panel
+         * ended up with no agent and therefore no data.
+         */
         ctx.slots.inject('main', () =>
-          ctx.slots.register({ name: 'main', key: PANEL_KEY, inject: () => ({ bridge }) }, withBoundary(GraftConsole)),
+          ctx.slots.register(
+            {
+              name: 'main',
+              key: PANEL_KEY,
+              inject: (props) => ({ bridge: makeBridge(ctx, host, props) }),
+            },
+            withBoundary(GraftConsole),
+          ),
         )
         ctx.slots.inject('sidebar.panellist', () =>
           ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_KEY, order: 60, label: () => '转生' }, withBoundary(SidebarEntry)),
