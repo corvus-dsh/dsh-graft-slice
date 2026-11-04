@@ -62,6 +62,9 @@ window.__ModuleLoader__.load({
 .gc-seg{display:inline-flex;border:1px solid var(--dsw-alias-border-secondary,rgba(128,128,128,.3));border-radius:8px;overflow:hidden;flex:0 0 auto}
 .gc-seg button{border:0;background:transparent;color:inherit;font:inherit;padding:4px 10px;cursor:pointer;opacity:.65}
 .gc-seg button[aria-pressed="true"]{background:var(--dsw-alias-brand-primary,#3b82f6);color:#fff;opacity:1}
+.gc-crash{margin:24px;padding:16px 18px;border:1px solid #b91c1c;border-radius:10px;background:rgba(185,28,28,.08);color:#b91c1c;font:13px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+.gc-crash h3{margin:0 0 8px;font-size:14px}
+.gc-crash pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;opacity:.9}
 `
 
     /**
@@ -262,31 +265,99 @@ window.__ModuleLoader__.load({
     }
 
     function SessionRow({ row }) {
-      const color = row.state === 'over-hard-cutoff' ? '#b91c1c' : row.state === 'over-warn-line' ? '#b45309' : '#10b981'
-      const cls = row.state === 'over-hard-cutoff' ? 'gc-over' : row.state === 'over-warn-line' ? 'gc-warn' : 'gc-ok'
-      const warnAt = typeof row.warnAt === 'number' ? row.warnAt : 0.7
-      const hardAt = typeof row.hardAt === 'number' ? row.hardAt : 0.75
+      // v0.23: a Host payload is DATA, not a contract this file can assume. Each
+      // field is read through a guard because `.toLocaleString()` on undefined is one
+      // of the ways a single bad row used to take the whole panel down with it.
+      const data = row || {}
+      const n = (value, fallback) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback)
+      const state = typeof data.state === 'string' ? data.state : 'unknown'
+      const color = state === 'over-hard-cutoff' ? '#b91c1c' : state === 'over-warn-line' ? '#b45309' : '#10b981'
+      const cls = state === 'over-hard-cutoff' ? 'gc-over' : state === 'over-warn-line' ? 'gc-warn' : 'gc-ok'
+      const warnAt = n(data.warnAt, 0.7)
+      const hardAt = n(data.hardAt, 0.75)
+      const percent = n(data.percent, 0)
+      const generation = n(data.generation, 0)
+      const grace = n(data.graceTurnsRemaining, 0)
       return h('tr', null, [
         h('td', { key: 'id' }, [
-          h('div', { key: 'a', className: 'gc-mono' }, row.sessionId),
-          h('div', { key: 'b', className: 'gc-hint' }, row.cwd || '(未记录工作目录)'),
+          h('div', { key: 'a', className: 'gc-mono' }, String(data.sessionId || '(未知会话)')),
+          h('div', { key: 'b', className: 'gc-hint' }, data.cwd || '(未记录工作目录)'),
         ]),
         h('td', { key: 'w' }, [
-          h('div', { key: 'a' }, `${row.percent}% · ${row.tokens.toLocaleString()} / ${row.contextWindow.toLocaleString()}`),
-          h('div', { key: 'b', className: 'gc-bar' }, h('span', { style: { width: `${Math.min(100, row.percent)}%`, background: color } })),
-          h('div', { key: 'c', className: 'gc-hint' }, `数据来源 ${row.source}`),
+          h('div', { key: 'a' }, `${percent}% · ${n(data.tokens, 0).toLocaleString()} / ${n(data.contextWindow, 0).toLocaleString()}`),
+          h('div', { key: 'b', className: 'gc-bar' }, h('span', { style: { width: `${Math.min(100, percent)}%`, background: color } })),
+          h('div', { key: 'c', className: 'gc-hint' }, `数据来源 ${data.source || '(未知)'}`),
         ]),
         h('td', { key: 'd' }, [
-          h('div', { key: 'a' }, `→提示线 ${Math.round(warnAt * 100)}% 还差 ${row.toWarnTokens.toLocaleString()} tok`),
-          h('div', { key: 'b', className: 'gc-hint' }, `→强制线 ${Math.round(hardAt * 100)}% 还差 ${row.toHardTokens.toLocaleString()} tok`),
+          h('div', { key: 'a' }, `→提示线 ${Math.round(warnAt * 100)}% 还差 ${n(data.toWarnTokens, 0).toLocaleString()} tok`),
+          h('div', { key: 'b', className: 'gc-hint' }, `→强制线 ${Math.round(hardAt * 100)}% 还差 ${n(data.toHardTokens, 0).toLocaleString()} tok`),
         ]),
         h('td', { key: 's' }, [
-          h('span', { key: 'a', className: `gc-badge ${cls}` }, row.state),
-          row.generation > 0
-            ? h('div', { key: 'b', className: 'gc-hint' }, `第 ${row.generation} 代${row.graceTurnsRemaining > 0 ? ` · 保护中 ${row.graceTurnsRemaining} 轮` : ''}`)
+          h('span', { key: 'a', className: `gc-badge ${cls}` }, state),
+          generation > 0
+            ? h('div', { key: 'b', className: 'gc-hint' }, `第 ${generation} 代${grace > 0 ? ` · 保护中 ${grace} 轮` : ''}`)
             : h('div', { key: 'b', className: 'gc-hint' }, '原始会话'),
         ]),
       ])
+    }
+
+    /**
+     * v0.23 — ERROR BOUNDARY. A white panel is the worst failure mode for a diagnostic
+     * surface: it reports nothing, and the user cannot tell "no data" from "this
+     * crashed". The requirement is that a throw becomes a RED CARD.
+     *
+     * WHY THIS IS A CLASS. The first draft of this guard wrapped `h(Component, props)`
+     * in try/catch. That cannot work and the test proved it: `createElement` is LAZY —
+     * it records an element, and React calls the component later, outside our catch.
+     * Only a class boundary participates in the render phase at the right moment.
+     *
+     * The catch: `React.Component` is not on the documented sandbox surface either. So
+     * it is FEATURE-DETECTED. When the class API is present the panel gets a real
+     * boundary; when it is not, the bare component is returned and still renders — a
+     * boundary can only ever add protection, never remove the panel.
+     */
+    function guard(Component) {
+      if (typeof React.Component !== 'function') return Component
+      return class PanelBoundary extends React.Component {
+        constructor(props) {
+          super(props)
+          this.state = { crash: null }
+        }
+
+        static getDerivedStateFromError(error) {
+          return { crash: error }
+        }
+
+        componentDidCatch(error, info) {
+          try {
+            const detail = `${String((error && error.stack) || error)}\n\n组件栈：\n${String((info && info.componentStack) || '(无)')}`
+            console.error(`[${PANEL_KEY}] 面板渲染失败：`, detail)
+          } catch {
+            // Logging must never be the second crash.
+          }
+        }
+
+        render() {
+          if (this.state.crash === null) return this.props.children
+          const error = this.state.crash
+          return h('div', { className: 'gc-crash' }, [
+            h('h3', { key: 't' }, '控制台渲染失败'),
+            h('div', { key: 'a' }, '面板内部抛出了未捕获异常，已被错误边界拦下（不再白屏）。完整堆栈已写入浏览器控制台。'),
+            h('pre', { key: 'p' }, String((error && error.stack) || (error && error.message) || error)),
+            h('div', { key: 'b', style: { marginTop: '10px', opacity: 0.75 } },
+              '宿主侧功能不受影响：可直接在输入框执行 /graft-console 查看同样的数据。'),
+          ])
+        }
+      }
+    }
+
+    /** Wrap the panel so a render throw becomes a card instead of an unmounted tree. */
+    function withBoundary(Component) {
+      const Boundary = guard(Component)
+      if (Boundary === Component) return Component
+      return function GuardedPanel(props) {
+        return h(Boundary, null, h(Component, props))
+      }
     }
 
     function GraftConsole({ bridge }) {
@@ -294,41 +365,95 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState('')
       const [via, setVia] = React.useState('')
       const [busy, setBusy] = React.useState(false)
+      /**
+       * v0.23 — THE BLANK PANEL, and why this is a counter instead of useCallback.
+       *
+       * The symptom was precise: the sidebar ICON drew, the PANEL was pure white. Both
+       * cells are function components in this same bundle; the only difference that
+       * matters is that the icon calls nothing and the panel called
+       * `React.useCallback`.
+       *
+       * The React surface the client sandbox advertises is exactly
+       * `createElement` / `useState` / `useEffect`. `useCallback` is not on it. If the
+       * sandbox hands a narrowed React (rather than the full module), the panel dies
+       * with `TypeError: React.useCallback is not a function` — during render, before
+       * a single node is committed, which is a white page and not a partial one. The
+       * icon, calling no hook, still draws. That is the observed asymmetry.
+       *
+       * So: only the three advertised hooks are used now. The refetch that useCallback
+       * existed to stabilise is driven by `tick`, which is STATE and therefore stable
+       * by construction — bumping it re-runs the effect with no memo entry to get
+       * wrong. Fewer moving parts AND a smaller API dependency.
+       */
+      const [tick, setTick] = React.useState(0)
+      const refresh = () => setTick((value) => value + 1)
 
-      const refresh = React.useCallback(async () => {
-        if (bridge === undefined) { setError('桥接未注入（slot inject 缺失）'); return }
-        setBusy(true)
+      React.useEffect(() => {
+        let alive = true
+        const run = async () => {
+          if (bridge === undefined) {
+            if (alive) setError('桥接未注入（slot inject 缺失）')
+            return
+          }
+          if (alive) setBusy(true)
+          try {
+            const reply = await bridge.state()
+            if (!alive) return
+            setVia(String((reply && reply.via) || ''))
+            if (!reply || !reply.ok) {
+              setError(String((reply && reply.text) || '宿主没有返回内容'))
+              return
+            }
+            // Parsing is the second place a blank panel can come from: a non-JSON
+            // reply threw out of the component and React unmounted the tree.
+            let parsed
+            try {
+              parsed = JSON.parse(reply.text)
+            } catch (parseError) {
+              setError(`宿主返回的不是 JSON：${String((parseError && parseError.message) || parseError)}\n原始内容：${String(reply.text).slice(0, 500)}`)
+              return
+            }
+            setError('')
+            setState(parsed)
+          } catch (caught) {
+            if (alive) setError(String((caught && caught.message) || caught))
+          } finally {
+            if (alive) setBusy(false)
+          }
+        }
+        void run()
+        const timer = setInterval(() => { void run() }, 5000)
+        return () => { alive = false; clearInterval(timer) }
+      }, [bridge, tick])
+
+      /**
+       * `write` is a plain closure, recreated each render. That is fine: it is never a
+       * dependency of an effect, so it needs no identity guarantee — which is the only
+       * thing useCallback would have bought.
+       */
+      const write = async (key, value) => {
         try {
-          const reply = await bridge.state()
-          setVia(reply.via)
-          if (!reply.ok) { setError(reply.text); return }
+          const reply = await bridge.set(key, value)
+          setVia(String((reply && reply.via) || ''))
+          if (!reply || !reply.ok) { setError(String((reply && reply.text) || '写入失败')); return }
+          // Optimistic: the panel shows the new value immediately and the refetch
+          // confirms it, so a slow Loader reconciliation does not read as a failure.
+          setState((prev) => (prev === null ? prev : { ...prev, config: { ...(prev.config || {}), [key]: value } }))
           setError('')
-          setState(JSON.parse(reply.text))
+          setTimeout(refresh, 400)
         } catch (caught) {
           setError(String((caught && caught.message) || caught))
-        } finally {
-          setBusy(false)
         }
-      }, [bridge])
+      }
 
-      const write = React.useCallback(async (key, value) => {
-        const reply = await bridge.set(key, value)
-        setVia(reply.via)
-        if (!reply.ok) { setError(reply.text); return }
-        // Optimistic: the panel shows the new value immediately and the refetch
-        // confirms it, so a slow Loader reconciliation does not read as a failure.
-        setState((prev) => (prev === null ? prev : { ...prev, config: { ...prev.config, [key]: value } }))
-        setError('')
-        setTimeout(refresh, 400)
-      }, [bridge, refresh])
-
-      React.useEffect(() => { void refresh() }, [refresh])
-      React.useEffect(() => {
-        const timer = setInterval(() => { void refresh() }, 5000)
-        return () => clearInterval(timer)
-      }, [refresh])
-
-      const config = state === null ? null : state.config
+      // v0.23: every field is read defensively. The Host returning a shape that is
+      // merely INCOMPLETE (an older bundle, a half-mounted service) must cost a
+      // section, never the whole panel.
+      const config = state === null || state === undefined ? null : state.config || null
+      const rows = state !== null && state !== undefined && Array.isArray(state.rows) ? state.rows : []
+      const thresholds = state !== null && state !== undefined && state.thresholds ? state.thresholds : null
+      const pending = state !== null && state !== undefined && Array.isArray(state.pendingIgnitions) ? state.pendingIgnitions : []
+      const num = (value, fallback) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback)
 
       return h('div', { className: 'gc-root' }, [
         h('style', { key: 'css' }, CSS),
@@ -416,10 +541,10 @@ window.__ModuleLoader__.load({
             onChange: (next) => write('growthTokensPerTurn', next),
           }),
           h('p', { key: 'derived', className: 'gc-sub', style: { margin: '10px 0 0' } },
-            state && state.thresholds
-              ? `当前推导：强制线 ${(state.thresholds.hardAt * 100).toFixed(2)}% · 提示线 ${(state.thresholds.warnAt * 100).toFixed(2)}%` +
-                ` · 单次交接估价 ${state.thresholds.estimatedGraftCost.toLocaleString()} tok` +
-                (state.thresholds.feasible ? '' : ' · ⚠ 该窗口装不下一次交接（feasible=false）')
+            thresholds
+              ? `当前推导：强制线 ${(num(thresholds.hardAt, 0.75) * 100).toFixed(2)}% · 提示线 ${(num(thresholds.warnAt, 0.7) * 100).toFixed(2)}%` +
+                ` · 单次交接估价 ${num(thresholds.estimatedGraftCost, 0).toLocaleString()} tok` +
+                (thresholds.feasible === false ? ' · ⚠ 该窗口装不下一次交接（feasible=false）' : '')
               : '当前推导：读取中…'),
         ]),
         h('div', { key: 'guard', className: 'gc-card' }, [
@@ -459,9 +584,9 @@ window.__ModuleLoader__.load({
             ],
             onChange: (next) => write('ignitionMode', next),
           }),
-          state && state.pendingIgnitions && state.pendingIgnitions.length > 0
+          pending.length > 0
             ? h('p', { key: 'p', className: 'gc-sub', style: { color: '#b45309', margin: '8px 0 0' } },
-                `未点火（已排队重试）：${state.pendingIgnitions.map((item) => `${item.targetId}（第 ${item.attempts} 次）`).join('、')}`)
+                `未点火（已排队重试）：${pending.map((item) => `${item.targetId}（第 ${item.attempts} 次）`).join('、')}`)
             : h('p', { key: 'p', className: 'gc-hint', style: { margin: '8px 0 0' } },
                 '当前没有待点火的会话。'),
         ]),
@@ -472,9 +597,11 @@ window.__ModuleLoader__.load({
           ]),
           h('p', { key: 's', className: 'gc-sub' },
             via ? `桥接通道：${via}` : '每 5 秒自动刷新；水位来自宿主 tokenMeter / provider usage'),
+          // v0.23: `state.rows.length` used to be read without checking that rows is
+          // an ARRAY at all — an incomplete Host payload blanked the panel here.
           state === null
             ? h('div', { key: 'n', className: 'gc-hint' }, '正在读取…')
-            : state.rows.length === 0
+            : rows.length === 0
               ? h('div', { key: 'n', className: 'gc-hint' }, '当前没有可测量的活动会话。')
               : h('table', { key: 'tb', className: 'gc-table' }, [
                   h('thead', { key: 'th' }, h('tr', null, [
@@ -483,11 +610,19 @@ window.__ModuleLoader__.load({
                     h('th', { key: 'c' }, '距下一次转生'),
                     h('th', { key: 'd' }, '状态'),
                   ])),
-                  h('tbody', { key: 'tb' }, state.rows.map((row) => h(SessionRow, {
-                    key: row.sessionId,
-                    row,
+                  h('tbody', { key: 'tb' }, rows.map((row) => h(SessionRow, {
+                    key: String(row && row.sessionId),
+                    row: row || {},
                   }))),
                 ]),
+        ]),
+        // v0.23: a raw dump, always present and collapsed-looking, so "is the Host
+        // returning data at all" is answerable from the page instead of from devtools.
+        h('details', { key: 'raw', className: 'gc-card' }, [
+          h('summary', { key: 's', style: { cursor: 'pointer', fontSize: '12px', opacity: 0.7 } },
+            '原始状态数据（排查用）'),
+          h('pre', { key: 'p', className: 'gc-mono', style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', marginTop: '8px' } },
+            state === null ? '(尚未读取)' : JSON.stringify(state, null, 2).slice(0, 8000)),
         ]),
       ])
     }
@@ -524,14 +659,23 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         const bridge = makeBridge(ctx, host)
         ctx.slots.inject('main', () =>
-          ctx.slots.register({ name: 'main', key: PANEL_KEY, inject: () => ({ bridge }) }, GraftConsole),
+          ctx.slots.register({ name: 'main', key: PANEL_KEY, inject: () => ({ bridge }) }, withBoundary(GraftConsole)),
         )
         ctx.slots.inject('sidebar.panellist', () =>
-          ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_KEY, order: 60, label: () => '转生' }, SidebarEntry),
+          ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_KEY, order: 60, label: () => '转生' }, withBoundary(SidebarEntry)),
         )
       },
       // Kept on the module so a wiring fix needs no rebuild of the panel body.
       __bridgeFactory: makeBridge,
+      /**
+       * v0.23: test seams. The blank-panel regression was invisible to the unit suite
+       * because nothing ever RENDERED a component — the bundle was only string-matched.
+       * These let `test/v023-panel-render.test.mjs` call each piece against a React that
+       * offers only the documented symbols, which is the environment that broke.
+       */
+      __panelForTest: GraftConsole,
+      __sessionRowForTest: SessionRow,
+      __guardForTest: guard,
     }
   },
 })
