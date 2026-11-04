@@ -88,9 +88,12 @@ test('v0.30 P0: BOTH reads and writes use a shape-valid placeholder, never undef
       false,
       `${file}: refusing an agent-less write is what deadlocked the panel`,
     )
-    // Every execute call must be given a non-optional agent.
-    assert.match(source, /commands\.execute\(\s*(effectiveAgent|target)\s*,/u,
-      `${file} must always pass a resolved agent`)
+    // Every execute call must be given a non-optional, non-empty id. v1.0.2: the FIRST
+    // ARGUMENT is now probed over three shapes (agent object / bare id / agentId object),
+    // so the assertion is on the probed builder rather than on a literal call.
+    assert.match(source, /const targetId =/u, `${file} must resolve a non-empty target id`)
+    assert.match(source, /commands\.execute\(\.\.\.shape\.build\(targetId\)\)/u,
+      `${file} must pass a probed, non-optional agent`)
   }
 })
 

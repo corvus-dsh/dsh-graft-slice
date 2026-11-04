@@ -187,6 +187,27 @@ window.__ModuleLoader__.load({
         return decision
       }
 
+      /** Which call shape the host accepted last time, so a working contract costs one call. */
+      let workingShape = undefined
+
+      /**
+       * v1.0.2: a gateway rejection has a code and a field — say them out loud instead of
+       * printing a JSON blob the operator cannot read.
+       */
+      const describeRejection = (value) => {
+        if (value !== null && value !== undefined && typeof value === 'object') {
+          const failure = value.error !== null && typeof value.error === 'object' ? value.error : undefined
+          if (failure !== undefined) {
+            const code = typeof failure.code === 'string' ? failure.code : 'error'
+            const details = failure.details !== null && typeof failure.details === 'object' ? failure.details : undefined
+            const field = details !== undefined && typeof details.field === 'string' ? ` field=${details.field}` : ''
+            return `${code}${field}`
+          }
+          if (value.ok === false) return 'ok:false（无错误码）'
+        }
+        return `无法识别的返回形状：${safeSlice(value, 200)}`
+      }
+
       /**
        * v0.24 — WHY THE PANEL STOOD AT "读取中…" AND WHY `commands/execute` RETURNED
        * `gateway/arguments-invalid`.
@@ -390,47 +411,54 @@ window.__ModuleLoader__.load({
            * writer identifiable as the console itself, and the UI states plainly that the
            * switch is a global setting.
            */
-          const target = agent !== undefined && agent !== null ? agent : { id: GLOBAL_AGENT_ID }
-          try {
-            const settled = await commands.execute(target, line, [], undefined)
-            /**
-             * v1.0.1 P0 — THE COMMAND ENVELOPE IS NOT THE PANEL STATE.
-             *
-             * `commands.execute` resolves to a CommandExecution `{ kind, text }`, NOT to
-             * `{ result: CommandExecution }`. The old code looked only at `.result`, so it
-             * fell through to `JSON.stringify(settled)` and reported `ok: true`. The panel
-             * then set its state to `{ kind: 'success', text: '{"config":…}' }` — an object
-             * with no `config` and no `thresholds`.
-             *
-             * That one mistake produced EVERY reported symptom at once:
-             *   - every toggle rendered OFF (`config` was undefined in the renderer) and
-             *     never flipped, because the optimistic update wrote into an empty object
-             *     that the next read replaced with the same envelope;
-             *   - "当前推导：读取失败" (thresholds === null) plus the gray "these are the
-             *     plugin defaults" line;
-             *   - writes looked successful (toast) because the HOST really did persist
-             *     them — only the read-back was misparsed.
-             *
-             * The unwrap is deliberately tolerant of depth 3 and of a stringified
-             * envelope, because the exact wrapper is a host-build detail. What it will NOT
-             * do is invent an envelope: an unrecognised shape is an error, not state.
-             */
-            const execution = unwrapExecution(settled)
-            if (execution !== undefined) {
-              return {
-                ok: execution.kind !== 'error',
-                text: execution.text,
-                via: 'remote.commands.execute',
-                raw: settled,
+          const targetId =
+            agent !== undefined && agent !== null && typeof agent.id === 'string' && agent.id.length > 0
+              ? agent.id
+              : GLOBAL_AGENT_ID
+          /**
+           * v1.0.2 P0 — THE FIRST ARGUMENT IS PROBED, NOT ASSUMED.
+           *
+           * Live failure (screenshot, 2026-11-04 21:0x):
+           *
+           *   gateway/input-invalid | details.endpoint=commands/execute | field=agentId
+           *
+           * The generated client proxy never says whether it wants the Agent OBJECT or the
+           * bare id string, and the host build is not inspectable from this bundle. Every
+           * shape the panel tried was rejected at validation, which is why NO console read
+           * ever produced data — and why the previous round's stringify fallback turned a
+           * rejection envelope into fake panel state.
+           *
+           * So the bridge now probes the three plausible shapes in order, remembers the one
+           * that worked, and reports every rejection it had to survive. A rejection is
+           * NEVER success.
+           */
+          const shapes = [
+            { name: 'agent-object', build: (id) => [{ id }, line, [], undefined] },
+            { name: 'id-string', build: (id) => [id, line, [], undefined] },
+            { name: 'agentId-object', build: (id) => [{ agentId: id }, line, [], undefined] },
+          ]
+          const ordered =
+            workingShape === undefined
+              ? shapes
+              : [shapes.find((shape) => shape.name === workingShape), ...shapes.filter((shape) => shape.name !== workingShape)]
+          for (const shape of ordered) {
+            if (shape === undefined) continue
+            try {
+              const settled = await commands.execute(...shape.build(targetId))
+              const execution = unwrapExecution(settled)
+              if (execution !== undefined) {
+                workingShape = shape.name
+                return {
+                  ok: execution.kind !== 'error',
+                  text: execution.text,
+                  via: `remote.commands.execute(${shape.name})`,
+                  raw: settled,
+                }
               }
+              failures.push(`${shape.name}: ${describeRejection(settled)}`)
+            } catch (error) {
+              failures.push(`${shape.name}: ${String((error && error.message) || error)}`)
             }
-            failures.push(
-              `remote.commands.execute: 无法识别的返回形状（期望 { kind, text }）：${safeSlice(settled)}`,
-            )
-          } catch (error) {
-            const message = String((error && error.message) || error)
-            // The gateway error is the most informative thing we have; keep it whole.
-            failures.push(`remote.commands.execute: ${message}`)
           }
         } else {
           failures.push('remote.commands 不可用（inject 未生效或宿主未挂载）')
@@ -1042,10 +1070,47 @@ window.__ModuleLoader__.load({
       const canWrite = state !== null && state !== undefined
       const hasSession = effectiveSession.length > 0
 
+      /**
+       * v1.0.2 P2 — HEALTH, STATED AT THE TOP INSTEAD OF DISCOVERED PER CARD.
+       *
+       * Every failure this panel has had in production (dead bridge, rejected agent,
+       * stringified envelope, stale defaults) looked IDENTICAL in the UI: plausible
+       * numbers that never move. One badge answers "is this data real?" before the
+       * operator reads a single switch.
+       *
+       * Red = no host data at all, or the Host itself said it degraded. Amber = data is
+       * there but the derivation is missing. Green = the numbers came from the Host.
+       */
+      const health =
+        state === null || state === undefined
+          ? { level: 'red', text: '宿主通道未连通', hint: `桥接通道：${via || '（无）'}${error ? `；原因：${String(error).slice(0, 200)}` : ''}` }
+          : state.degraded === true
+            ? {
+                level: 'red',
+                text: '宿主通道降级',
+                hint: String(state.degradedReason || '宿主返回了降级状态：上面的数值是插件默认值，不是真实配置。'),
+              }
+            : thresholds === null
+              ? { level: 'amber', text: '已连通 · 推导缺失', hint: '配置读到了，但阈值/代价推导为空，请点「刷新」重试。' }
+              : { level: 'green', text: '宿主通道正常', hint: `桥接通道：${via || '（未知）'}；每 5 秒自动刷新。` }
+      const healthColor = health.level === 'green' ? '#16a34a' : health.level === 'amber' ? '#b45309' : '#b91c1c'
+
       return h('div', { className: 'gc-root' }, [
         h('style', { key: 'css' }, CSS),
         h('div', { key: 'head' }, [
-          h('h2', { key: 't', className: 'gc-h', style: { fontSize: '16px' } }, '转生控制台 · dsh-graft-slice'),
+          h('div', { key: 'row', style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' } }, [
+            h('h2', { key: 't', className: 'gc-h', style: { fontSize: '16px', margin: 0 } }, '转生控制台 · dsh-graft-slice'),
+            h(
+              'span',
+              {
+                key: 'health',
+                className: 'gc-badge',
+                title: health.hint,
+                style: { color: healthColor, borderColor: healthColor, fontWeight: 600 },
+              },
+              `${health.level === 'green' ? '●' : health.level === 'amber' ? '▲' : '●'} ${health.text}`,
+            ),
+          ]),
           h('p', { key: 's', className: 'gc-sub' },
             '改动直接写入 profile 配置（configEditor），下一次 pre-step 生效，无需重启。'),
         ]),

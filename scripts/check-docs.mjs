@@ -83,6 +83,10 @@ function actualTestCount() {
     cwd: root,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    // v1.0.2: the suite's ✔-per-test report crossed execFileSync's default 1 MB cap, so
+    // the checker threw ENOBUFS instead of reporting a count. The buffer is the checker's
+    // problem, not the suite's.
+    maxBuffer: 64 * 1024 * 1024,
   })
   const match = /tests (\d+)/u.exec(list)
   return match === null ? undefined : Number(match[1])

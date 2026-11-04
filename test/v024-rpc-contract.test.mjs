@@ -122,8 +122,9 @@ for (const [label, file] of [
     const reply = await bridge.state()
 
     assert.equal(reply.ok, true, `the call must succeed; got ${JSON.stringify(reply)}`)
-    assert.equal(reply.via, 'remote.commands.execute')
-    assert.equal(remote.calls.length, 1, 'exactly one execute call')
+    // v1.0.2: `via` also names which probed arg shape the host accepted.
+    assert.match(String(reply.via), /^remote\.commands\.execute\(/u)
+    assert.equal(remote.calls.length, 1, 'exactly one execute call — the working shape is remembered')
     const { agent, line } = remote.calls[0]
     assert.deepEqual(agent, { id: 'session-live-2' }, 'the MOST RECENT live session is used, as a plain { id }')
     assert.match(String(line), /^\/[a-z-]+/u, 'the line is a complete slash command')

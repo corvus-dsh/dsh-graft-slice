@@ -101,7 +101,9 @@ test('v0.22: the bridge calls execute(agent, "/line", attachments, signal)', asy
   const bridge = factory(ctx, undefined)
   const result = await bridge.state()
   assert.equal(result.ok, true)
-  assert.equal(result.via, 'remote.commands.execute')
+  // v1.0.2: `via` names the PROBED shape that worked, so an operator can tell a working
+  // contract from a lucky guess.
+  assert.match(result.via, /^remote\.commands\.execute\(agent-object\)$/u)
   assert.equal(seen.length, 1)
   const [callAgent, line, attachments, signal] = seen[0]
   assert.deepEqual(callAgent, agent, 'the first argument is the receiving AGENT')

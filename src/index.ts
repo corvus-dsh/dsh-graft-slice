@@ -3544,6 +3544,10 @@ export interface TaskBoardInput {
   discarded: SemanticDiscard
   /** Pre-rendered extra prose (exclusion notes, artifact reuse, …). */
   notes?: readonly string[]
+  /** v1.0.2: the goal in force NOW — the original ask is kept as the audit trail. */
+  currentGoal?: string
+  /** v1.0.2: how many recorded goal changes exist (0 = the goal never moved). */
+  goalRevisions?: number
   /**
    * v0.23 P2: what the filesystem ACTUALLY says, measured at handoff time.
    *
@@ -3680,6 +3684,26 @@ export function renderTaskBoard(input: TaskBoardInput): string {
   lines.push(
     `**${BOARD_COLUMNS.request}**：${request.length === 0 ? '（未提取到明确要求，见 goal 消息）' : truncateEnd(request, 300).text}`,
   )
+
+  /**
+   * v1.0.2 — THE GOAL IN FORCE, NEXT TO THE GOAL IT STARTED FROM.
+   *
+   * Both lines are kept on purpose: the original ask is the audit trail (what the human
+   * actually wanted), and `currentGoal` is the instruction. Showing only the first is
+   * how a chain dragged a narrowed task back to a goal nobody wanted any more; showing
+   * only the second hides that the work changed direction at all.
+   */
+  const currentGoal = input.currentGoal === undefined ? '' : input.currentGoal.replace(/\s+/gu, ' ').trim()
+  if (currentGoal.length > 0 && currentGoal !== request) {
+    lines.push('', `**当前目标**：${truncateEnd(currentGoal, 300).text}`)
+  }
+  const revisions = typeof input.goalRevisions === 'number' ? input.goalRevisions : 0
+  if (revisions > 0) {
+    lines.push(
+      '',
+      `> ⚠️ 目标曾发生过 ${revisions} 次演进：上面的「原始用户要求」是最初的，**当前目标**才是要做的。演进留痕见 transferred.json 的 goal_evolution。`,
+    )
+  }
 
   // ✅ 已完成 — the verifiable result, WITH its seq. An empty board is stated as
   // empty rather than omitted: a missing column reads as "unknown", an explicit
@@ -3850,6 +3874,10 @@ export interface InstructionCardInput {
    * once per card render.
    */
   verification?: BoardVerification
+  /** v1.0.2: the goal in force NOW (may differ from the original ask). */
+  currentGoal?: string
+  /** v1.0.2: how many recorded goal changes exist (0 = the goal never moved). */
+  goalRevisions?: number
 }
 
 /**
@@ -3916,6 +3944,8 @@ export function renderInstructionCard(input: InstructionCardInput): string {
     ...(unresolved === undefined ? {} : { unresolvedError: unresolved }),
     discarded: input.semantic.discarded,
     ...(input.verification === undefined ? {} : { verification: input.verification }),
+    ...(input.currentGoal === undefined ? {} : { currentGoal: input.currentGoal }),
+    ...(input.goalRevisions === undefined ? {} : { goalRevisions: input.goalRevisions }),
     notes,
   })
 }
@@ -5167,10 +5197,26 @@ export function buildTape(
   // Neither is invented: both were already available, they were just flattened into
   // one prose paragraph where "started but not finished" and "not started yet"
   // became indistinguishable.
+  /**
+   * v1.0.2: a goal that evolved in the SOURCE travels with the handoff.
+   *
+   * Read from the persisted record rather than from the rendered board text, so a
+   * hand-edited board cannot fake an evolution (and a crash between render and write
+   * cannot lose one).
+   */
+  const sourceMark =
+    sourceSessionId === undefined || sourceSessionId.length === 0 ? undefined : graftTargets.get(sourceSessionId)
+  const sourceMarkGoal = {
+    ...(sourceMark?.currentGoal === undefined ? {} : { currentGoal: sourceMark.currentGoal }),
+    revisions: Array.isArray(sourceMark?.goalEvolution) ? sourceMark.goalEvolution.length : 0,
+  }
   const instructionCard = renderInstructionCard({
     semantic,
     body: pendingBody,
     request: goal.goal,
+    // v1.0.2: a source that evolved its goal hands the EVOLVED one down, plus the count.
+    ...(sourceMarkGoal.currentGoal === undefined ? {} : { currentGoal: sourceMarkGoal.currentGoal }),
+    ...(sourceMarkGoal.revisions > 0 ? { goalRevisions: sourceMarkGoal.revisions } : {}),
     ...(openTurnInstruction === undefined ? {} : { inProgress: openTurnInstruction }),
     pending: openTodos,
     ...(hasWrittenPlan ? { hasWrittenPlan: true } : {}),
@@ -9805,7 +9851,7 @@ async function graftSliceAndInjectUnlocked(
     // v7.0 C2: remember that this id is OUR target, so the auto path cannot
     // graft it again merely because its seeded tape already sits above the
     // ratio. Marked before retirement so a crash mid-way still leaves the mark.
-    markGraftTarget(newId, sourceId, Array.isArray(snapshot) ? snapshot.length : undefined)
+    markGraftTarget(newId, sourceId, Array.isArray(snapshot) ? snapshot.length : undefined, plan.goal)
     // v7.0 P0-5: register the durable, every-request constraint section for
     // this target. The goal message carries the same list; the section is the
     // copy that compaction cannot reach.
@@ -9815,11 +9861,16 @@ async function graftSliceAndInjectUnlocked(
     }
     if (retired) {
       retiredSessions.add(sourceId)
+      // v1.0.2: the goal in force travels WITH the retirement record, so the audit trail
+      // of an evolved goal survives even if the target's own mark is later cleaned up.
+      const createdTarget = graftTargets.get(newId)
       transferredSessions.set(sourceId, {
         newSessionId: newId,
         at: Date.now(),
         reason: `已转移至新会话 ${newId}`,
-      })
+        ...(createdTarget?.currentGoal === undefined ? {} : { currentGoal: createdTarget.currentGoal }),
+        ...(createdTarget?.goalEvolution === undefined ? {} : { goalEvolution: createdTarget.goalEvolution }),
+      } as any)
       // v7.8: both ledgers or neither. A partial retirement is a second target
       // waiting to happen.
       commitRetirementAtomic(ctx, sourceId, newId)
@@ -11019,6 +11070,24 @@ interface GraftTargetMark {
    * writes to a cold target.
    */
   seedEvents?: number
+  /**
+   * v1.0.2 — THE GOAL IN FORCE FOR THIS TARGET, which is not necessarily the one the
+   * chain started with.
+   *
+   * "Never drift" and "never evolve" are not the same rule. A long handoff chain kept
+   * re-seeding the ORIGINAL ask forever, so a target that had legitimately narrowed or
+   * redirected the work was pulled back to a goal nobody wanted any more. The original
+   * ask stays on the board (it is the audit trail); this field is what the target acts on.
+   */
+  currentGoal?: string
+  /**
+   * v1.0.2 — every recorded goal change, oldest first.
+   *
+   * `{ at, from, to, reason }`, appended by `graft_update_goal`. Written down so a new
+   * target can SEE that the goal moved and why, instead of silently inheriting whatever
+   * the previous generation happened to believe.
+   */
+  goalEvolution?: Array<{ at: number; from: string; to: string; reason: string }>
 }
 
 const graftTargets = new Map<string, GraftTargetMark>()
@@ -11028,12 +11097,17 @@ function graftGenerationOf(sessionId: string): number {
   return graftTargets.get(sessionId)?.generation ?? 0
 }
 
-function markGraftTarget(sessionId: string, sourceSessionId: string, seedEvents?: number): void {
+function markGraftTarget(sessionId: string, sourceSessionId: string, seedEvents?: number, goal?: string): void {
+  // v1.0.2: the goal travels down the chain unless the source already evolved it.
+  const inherited = graftTargets.get(sourceSessionId)?.currentGoal
+  const currentGoal = inherited !== undefined && inherited.length > 0 ? inherited : goal
   graftTargets.set(sessionId, {
     sourceSessionId,
     createdAt: Date.now(),
     generation: graftGenerationOf(sourceSessionId) + 1,
     ...(typeof seedEvents === 'number' && seedEvents > 0 ? { seedEvents } : {}),
+    ...(currentGoal === undefined || currentGoal.length === 0 ? {} : { currentGoal }),
+    ...(inherited === undefined ? {} : { goalEvolution: graftTargets.get(sourceSessionId)?.goalEvolution }),
   })
   // v7.0: persist the mark.
   //
@@ -11084,6 +11158,11 @@ function loadGraftTargetStore(ctx: PluginContextLike): void {
         sourceSessionId: value.sourceSessionId,
         createdAt: typeof value.createdAt === 'number' ? value.createdAt : 0,
         generation: typeof value.generation === 'number' ? value.generation : 1,
+        // v1.0.2: these three used to be DROPPED on load, so a restart forgot both the
+        // wake-evidence watermark (seedEvents) and the goal the chain had evolved to.
+        ...(typeof value.seedEvents === 'number' && value.seedEvents > 0 ? { seedEvents: value.seedEvents } : {}),
+        ...(typeof value.currentGoal === 'string' && value.currentGoal.length > 0 ? { currentGoal: value.currentGoal } : {}),
+        ...(Array.isArray(value.goalEvolution) ? { goalEvolution: value.goalEvolution as GraftTargetMark['goalEvolution'] } : {}),
       })
     }
   } catch (error) {
@@ -14201,6 +14280,72 @@ async function appendTransitionCard(
    * Read-only by construction: the lock sweep runs in `dryRun`, and the memory
    * panel only reads files (`dsh-memory` is never imported, and never written).
    */
+  /**
+   * v1.0.2 — the model may REWRITE the goal it is working toward.
+   *
+   * The board used to anchor a chain to the ask that started it, which punished a
+   * legitimate narrowing: "先修 P0" evolving into "现在做发布" was read as drift and the
+   * next generation was dragged back. The fix is not "forget the original" — it is
+   * "record the change". So this tool only rewrites the CURRENT goal, and every rewrite
+   * appends `{ at, from, to, reason }` to `goal_evolution`, which the next board prints
+   * as "目标曾发生过 N 次演进".
+   *
+   * It writes the record of the CALLING session (`exec.agent.id`), so it can never
+   * rewrite somebody else's goal from a tool call.
+   */
+  ctx.tools.register({
+    name: 'graft_update_goal',
+    description:
+      'Rewrite the goal THIS session acts on, and record why. The original ask is kept; each change is ' +
+      'appended to goal_evolution so the next generation sees that the goal moved. Use it when the work has ' +
+      'legitimately narrowed or redirected — not to escape a constraint.',
+    parameters: {
+      type: 'object',
+      properties: {
+        goal: { type: 'string', description: 'The new goal, one or two sentences, in the user\'s language.' },
+        reason: { type: 'string', description: 'Why the goal changed. Recorded verbatim (trimmed to 300 chars).' },
+      },
+      required: ['goal'],
+      additionalProperties: false,
+    },
+    execute: async (args: { goal?: unknown; reason?: unknown }, exec: any) => {
+      const goal = String(args?.goal ?? '').replace(/\s+/gu, ' ').trim()
+      if (goal.length === 0) return { ok: false, error: 'goal must be a non-empty string' }
+      if (goal.length > 2000) return { ok: false, error: 'goal is too long (max 2000 characters)' }
+      const sessionId = typeof exec?.agent?.id === 'string' ? exec.agent.id : ''
+      if (sessionId.length === 0) {
+        return { ok: false, error: 'no calling session: this tool rewrites the CURRENT session\'s goal record' }
+      }
+      const mark = graftTargets.get(sessionId)
+      if (mark === undefined) {
+        return {
+          ok: false,
+          error:
+            'this session has no graft goal record (it was not created by a slice), so there is nothing to rewrite',
+        }
+      }
+      const from = typeof mark.currentGoal === 'string' ? mark.currentGoal : ''
+      if (from === goal) {
+        return { ok: true, unchanged: true, currentGoal: goal, revisions: (mark.goalEvolution ?? []).length }
+      }
+      const reason = String(args?.reason ?? '').replace(/\s+/gu, ' ').trim()
+      const evolution = [
+        ...(Array.isArray(mark.goalEvolution) ? mark.goalEvolution : []),
+        { at: Date.now(), from, to: goal, reason: reason.length === 0 ? '(未说明原因)' : reason.slice(0, 300) },
+      ]
+      graftTargets.set(sessionId, { ...mark, currentGoal: goal, goalEvolution: evolution })
+      persistGraftTargetStore(ctxForStores())
+      return {
+        ok: true,
+        sessionId,
+        currentGoal: goal,
+        previousGoal: from,
+        revisions: evolution.length,
+        note: '新目标已落盘；下一次切片的看板会显示它，并注明「目标曾发生过 N 次演进」。',
+      }
+    },
+  })
+
   ctx.tools.register({
     name: 'graft_debug_status',
     description:
