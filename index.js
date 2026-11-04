@@ -11922,6 +11922,22 @@ export const CONSOLE_PATCH_ID = 'dsh-graft-slice'
      
                                                                           
                     
+     
+                                                                              
+    
+                                                                                   
+                                                                                      
+                                                                                 
+                                                                                  
+                                                                                  
+                                         
+    
+                                                                                
+                                                                                      
+                                                                                        
+                            
+     
+                                                                            
                      
  
 
@@ -13212,11 +13228,28 @@ async function appendTransitionCard(
         return undefined
       }
     })()
+    /**
+     * v0.28 P0: collect the live sessions FIRST, independently of watermarks.
+     *
+     * Two different questions were being answered by one list:
+     *   "which sessions can I plot?"        -> `rows`, needs a watermark
+     *   "which sessions can I act on?"      -> `sessions`, needs only an id
+     * The panel needs the second one to render its selector, and `rows` was silently
+     * answering it. Any session without a measurable watermark (fresh, no message yet,
+     * provider silent) vanished from the panel entirely.
+     */
+    const liveSessions                                                                   = []
     if (isRecord(sessions) && typeof sessions.list === 'function') {
       for (const agent of sessions.list()         ) {
         const sessionId = typeof agent?.id === 'string' ? agent.id : ''
         if (sessionId.length === 0) continue
         const watermark = await readTokenWatermark(stableCtx, sessionId, settings)
+        liveSessions.push({
+          sessionId,
+          cwd: workspaceOfAgent(stableCtx, sessionId),
+          hasWatermark: watermark !== undefined,
+        })
+        // Only a measurable session gets a ROW; every session gets an ENTRY above.
         if (watermark === undefined) continue
         const rowThresholds = effectiveWatermarks(settings, watermark)
         const mark = graftTargets.get(sessionId)
@@ -13296,6 +13329,8 @@ async function appendTransitionCard(
         attempts: entry.attempts,
         at: entry.at,
       })),
+      // v0.28 P0: the list the panel renders its selector from.
+      sessions: liveSessions,
       generatedAt: new Date().toISOString(),
     }
   }

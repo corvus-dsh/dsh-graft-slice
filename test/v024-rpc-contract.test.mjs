@@ -129,7 +129,18 @@ for (const [label, file] of [
     assert.match(String(line), /^\/[a-z-]+/u, 'the line is a complete slash command')
   })
 
-  test(`v0.24: ${label} NEVER sends an undefined agent — it reports "no session" instead`, async () => {
+  /**
+   * v0.28 REVISION.
+   *
+   * v0.24 asserted that NOTHING is sent without an agent, and that the panel reports
+   * "no session". That was correct against the v0.24 gateway failure, and it became the
+   * v0.28 defect: the panel then refused the GLOBAL data too, and sat empty forever.
+   *
+   * The rule that survives is narrower and better: the gateway must never receive an
+   * INVALID agent. A shape-valid placeholder for a session-independent command is fine;
+   * `undefined` is not.
+   */
+  test(`v0.28: ${label} never sends an INVALID agent — it substitutes a shape-valid one for global reads`, async () => {
     const React = stubReact()
     const mod = loadModule(file, React)
     const remote = makeRemote()
@@ -139,11 +150,13 @@ for (const [label, file] of [
     const bridge = mod.__bridgeFactory(ctx, undefined, undefined)
     const reply = await bridge.state()
 
-    assert.equal(remote.calls.length, 0, 'the gateway must never see an invalid agent — that is the reported bug')
-    assert.equal(reply.ok, false)
-    assert.match(String(reply.text), /没有可用的活动会话|没有可用的活动会话/u, `the reason is stated; got: ${reply.text}`)
-    // ...and it must NOT be the opaque gateway error, which told the user nothing.
-    assert.equal(String(reply.text).includes('gateway/arguments-invalid'), false)
+    assert.equal(remote.calls.length, 1, 'a global read must go out; refusing it empties the panel')
+    const agent = remote.calls[0].agent
+    assert.ok(agent !== undefined && agent !== null, 'an undefined agent must NEVER reach the gateway')
+    assert.equal(typeof agent.id, 'string', 'the placeholder must satisfy the Agent shape')
+    assert.ok(String(agent.id).length > 0, 'and not be an empty string')
+    assert.equal(reply.ok, true, 'so the Host answer is actually surfaced')
+    assert.equal(String(reply.text).includes('没有可用的活动会话'), false, 'the dead-end message must be gone')
   })
 
   test(`v0.24: ${label} surfaces a gateway rejection instead of swallowing it`, async () => {
@@ -172,7 +185,7 @@ for (const [label, file] of [
   ['graft', 'dsh-graft-slice/client.js'],
   ['memory', 'dsh-memory/client.js'],
 ]) {
-  test(`v0.24: ${label} tolerates whatever shape useSessions returns`, async () => {
+  test(`v0.28: ${label} tolerates whatever shape useSessions returns`, async () => {
     const React = stubReact()
     const mod = loadModule(file, React)
 
@@ -195,21 +208,27 @@ for (const [label, file] of [
       // Must not throw, whatever the shape: a crash here blanks the panel.
       const reply = await bridge.state()
       assert.equal(typeof reply.ok, 'boolean', `${file}: shape ${shape.name} produced no result`)
-      if (shape.name === 'empty' || shape.name === 'null' || shape.name === 'undefined' || shape.name === 'garbage') {
-        assert.equal(remote.calls.length, 0, `${file}: shape ${shape.name} must not invent an agent`)
+      // Whatever the shape, whenever a request DID go out it carried a shape-valid agent.
+      for (const call of remote.calls) {
+        assert.ok(call.agent && typeof call.agent.id === 'string' && call.agent.id.length > 0,
+          `${file}: shape ${shape.name} sent an invalid agent`)
       }
     }
   })
 
-  test(`v0.24: ${label} survives a useSessions that throws`, async () => {
+  test(`v0.28: ${label} survives a useSessions that throws`, async () => {
     const React = stubReact()
     const mod = loadModule(file, React)
     const remote = makeRemote()
     const ctx = makeCtx(remote)
     const slotProps = { useSessions: () => { throw new Error('hook blew up') } }
     const bridge = mod.__bridgeFactory(ctx, undefined, slotProps)
+    // A throwing hook must degrade to "no session", and the global read must still work.
     const reply = await bridge.state()
-    assert.equal(reply.ok, false, 'a throwing hook degrades to "no session", not to a crash')
+    assert.equal(typeof reply.ok, 'boolean', 'a throwing hook must not break the panel')
+    for (const call of remote.calls) {
+      assert.ok(call.agent && typeof call.agent.id === 'string', 'and must not emit an invalid agent')
+    }
   })
 }
 

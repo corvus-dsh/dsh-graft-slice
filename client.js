@@ -223,10 +223,19 @@ window.__ModuleLoader__.load({
         return ids
       }
 
+      /**
+       * v0.28: a shape-valid Agent for a session-independent command.
+       *
+       * `Agent` is `{ id: SessionId }`; the gateway checks the shape, never existence.
+       * The Host side of `/graft-console` reads nothing from it. A placeholder is therefore
+       * honest here — it is the parameter the contract demands for a request that has no
+       * session, not a pretend session.
+       */
+      const GLOBAL_AGENT_ID = 'dsh-graft-console-global'
+
       const callHost = async (line, preferredId) => {
         const failures = []
         const agent = agentOf(preferredId)
-
         /**
          * `remote.commands.execute(agent, line, attachments, signal)`.
          *
@@ -246,11 +255,34 @@ window.__ModuleLoader__.load({
         })()
 
         if (commands && typeof commands.execute === 'function') {
-          if (agent === undefined) {
-            failures.push('remote.commands.execute: 没有可用的活动会话（agent 参数必填，伪造会被 gateway 拒绝）')
+          /**
+           * v0.28 P0 — THE SENTINEL AGENT, AND WHY IT IS SOUND.
+           *
+           * The gateway validates `agent` by SHAPE (`{ id: string }`), never by
+           * existence. That is why `gateway/arguments-invalid` appeared for `undefined`
+           * and never for a well-formed id.
+           *
+           * `/graft-console` reads nothing from the agent — it reports knobs, thresholds,
+           * the cost estimate, pending ignitions and the session list, all from Host state
+           * and the profile config. Blocking that behind a resolved session is what left
+           * the panel permanently at "正在读取".
+           *
+           * So a placeholder is used when no session is known. It is not a pretend
+           * session: the command genuinely does not depend on one, and the panel labels
+           * the result as global. WRITES never take this path — a knob change without a
+           * session is refused, because it must be attributable.
+           */
+          const isWrite = /-set/u.test(line)
+          const target = agent !== undefined && agent !== null
+            ? agent
+            : isWrite
+              ? undefined
+              : { id: GLOBAL_AGENT_ID }
+          if (target === undefined) {
+            failures.push('写入需要一个确定的会话（当前没有活动会话），已阻止发送')
           } else {
             try {
-              const settled = await commands.execute(agent, line, [], undefined)
+              const settled = await commands.execute(target, line, [], undefined)
               const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
               if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
               if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
@@ -706,11 +738,19 @@ window.__ModuleLoader__.load({
               : liveSessions.length > 0
                 ? liveSessions[liveSessions.length - 1]
                 : ''
-          const agentReady = target.length > 0
-          if (!agentReady) {
-            if (alive) { setBusy(false); setError('') }
-            return
-          }
+          /**
+           * v0.28 P0 — ALWAYS FETCH.
+           *
+           * `/graft-console`'s Host handler takes NO agent: the whole payload (knobs,
+           * thresholds, cost estimate, pending ignitions, session list) is produced from
+           * Host state and the profile config. Gating the fetch on a resolved session —
+           * as v0.26 did — blocked data that never needed one, which is why the panel sat
+           * on "正在读取" forever and then reported "读取失败".
+           *
+           * A target id is still passed when one exists, so a session-scoped Host build
+           * can use it; when none exists the bridge sends its shape-valid placeholder and
+           * the Host ignores it.
+           */
           if (alive) setBusy(true)
           try {
             const reply = await withTimeout(bridge.state(target), 12_000, '读取转生控制台')
@@ -785,10 +825,36 @@ window.__ModuleLoader__.load({
        * and since that used to happen inside an effect, it never updated. `liveSessions`
        * is recomputed on every render and therefore follows a session switch.
        */
-      const sessions = liveSessions
-      /** The session this panel acts on, resolved the same way the effect does. */
+      /**
+       * v0.28 P0 — WHERE THE SESSION LIST ACTUALLY COMES FROM, in priority order.
+       *
+       *   1. THE HOST PAYLOAD. `state.sessions` is produced by `sessions.list()` on the
+       *      Host — the only place that method exists. Authoritative, and works even when
+       *      the Client exposes nothing.
+       *   2. THE HOOK. `useSessions`, when the owner actually projects something.
+       *   3. Nothing.
+       *
+       * v0.27 relied on (2) alone, and on this sidebar it returns an empty list — so the
+       * selector never appeared even though a session was plainly open. The panel was
+       * asking the one party that could not answer.
+       */
+      const hostSessions = state !== null && state !== undefined && Array.isArray(state.sessions)
+        ? state.sessions
+            .map((entry) => (entry && typeof entry.sessionId === 'string' ? entry.sessionId : typeof entry === 'string' ? entry : ''))
+            .filter((id) => id.length > 0)
+        : []
+      const sessions = hostSessions.length > 0 ? hostSessions : liveSessions
+      const sessionSource = hostSessions.length > 0 ? 'host' : liveSessions.length > 0 ? 'hook' : 'none'
+      /** The session this panel acts on. */
       const effectiveSession = picked.length > 0 ? picked : activeFromHook !== '' ? activeFromHook : sessions.length > 0 ? sessions[sessions.length - 1] : ''
-      const canWrite = effectiveSession.length > 0
+      /**
+       * v0.28: knobs are GLOBAL settings, so they are editable whenever the Host is
+       * reachable. v0.26 gated them on a session, which left the panel inert in exactly
+       * the case where a session was not exposed. Session-scoped views (the watermark
+       * table) are greyed separately.
+       */
+      const canWrite = state !== null && state !== undefined
+      const hasSession = effectiveSession.length > 0
 
       return h('div', { className: 'gc-root' }, [
         h('style', { key: 'css' }, CSS),
@@ -818,15 +884,23 @@ window.__ModuleLoader__.load({
               key: 'rf',
               type: 'button',
               className: 'gc-btn',
-              disabled: busy || !canWrite,
+              disabled: busy,
               onClick: refresh,
-              title: canWrite ? '立即重新拉取状态' : '只读状态下没有可拉取的目标会话',
+              title: '立即重新拉取状态（全局数据不需要会话）',
             }, busy ? '读取中…' : '刷新'),
           ]),
           h('p', { key: 's', className: 'gc-sub' },
             sessions.length === 0
-              ? '当前没有活动会话。面板处于只读模式：可以查看实时水位，但开关不可调节。打开一个会话后这里会更新。'
-              : `命令会以会话 ${effectiveSession} 的身份执行。切换下拉框会立即重新读取。`),
+              /**
+               * v0.28: GLOBAL MODE is a real mode, not a degraded dead end.
+               *
+               * Everything below — the knobs, the thresholds, the cost estimate, the
+               * ignition settings — comes from Host state and the profile config and is
+               * session-INDEPENDENT, so it is loaded and editable. Only the live watermark
+               * table needs a session, and it says so instead of greying the whole panel.
+               */
+              ? '全局模式：以下开关写入 profile 配置（与具体会话无关），可以直接调节并落盘。实时水位需要打开一个会话后才显示。'
+              : `命令会以会话 ${effectiveSession} 的身份执行（列表来源：${sessionSource === 'host' ? '宿主 sessions.list' : 'useSessions'}）。切换会立即重新读取。`),
           sessions.length === 0
             ? null
             : h('div', { key: 'r', className: 'gc-row' }, [
@@ -837,7 +911,6 @@ window.__ModuleLoader__.load({
                   value: picked,
                   'aria-label': '目标会话',
                   onChange: (event) => {
-                    // Selecting is a deliberate act: take it, and refetch immediately.
                     setPicked(String(event.target.value || ''))
                     setState(null)
                     setError('')

@@ -11921,6 +11921,22 @@ export interface GraftConsoleState {
    */
   thresholds: WatermarkThresholds & { estimate: GraftCostEstimate | null }
   rows: ConsoleRow[]
+  /**
+   * v0.28 P0 — EVERY LIVE SESSION, INDEPENDENT OF WHETHER IT HAS A WATERMARK.
+   *
+   * `rows` only contains sessions with a measurable token watermark, because a row
+   * without a percentage cannot be plotted. The panel used `rows.length === 0` as its
+   * definition of "no active session", so on any host where `readTokenWatermark`
+   * returns undefined — a fresh build, a session that has not sent a message yet,
+   * a provider that does not report usage — the panel concluded there was nothing
+   * open and offered no selector at all.
+   *
+   * The client cannot fix that: it has no way to enumerate sessions (the CLIENT
+   * `sessions` service has no `list()`, and `useSessions` returns only what the owner
+   * chose to project). The HOST has `sessions.list()`, so the list is produced HERE and
+   * shipped with the state.
+   */
+  sessions: Array<{ sessionId: string; cwd: string; hasWatermark: boolean }>
   generatedAt: string
 }
 
@@ -13211,11 +13227,28 @@ async function appendTransitionCard(
         return undefined
       }
     })()
+    /**
+     * v0.28 P0: collect the live sessions FIRST, independently of watermarks.
+     *
+     * Two different questions were being answered by one list:
+     *   "which sessions can I plot?"        -> `rows`, needs a watermark
+     *   "which sessions can I act on?"      -> `sessions`, needs only an id
+     * The panel needs the second one to render its selector, and `rows` was silently
+     * answering it. Any session without a measurable watermark (fresh, no message yet,
+     * provider silent) vanished from the panel entirely.
+     */
+    const liveSessions: Array<{ sessionId: string; cwd: string; hasWatermark: boolean }> = []
     if (isRecord(sessions) && typeof sessions.list === 'function') {
       for (const agent of sessions.list() as any[]) {
         const sessionId = typeof agent?.id === 'string' ? agent.id : ''
         if (sessionId.length === 0) continue
         const watermark = await readTokenWatermark(stableCtx, sessionId, settings)
+        liveSessions.push({
+          sessionId,
+          cwd: workspaceOfAgent(stableCtx, sessionId),
+          hasWatermark: watermark !== undefined,
+        })
+        // Only a measurable session gets a ROW; every session gets an ENTRY above.
         if (watermark === undefined) continue
         const rowThresholds = effectiveWatermarks(settings, watermark)
         const mark = graftTargets.get(sessionId)
@@ -13295,6 +13328,8 @@ async function appendTransitionCard(
         attempts: entry.attempts,
         at: entry.at,
       })),
+      // v0.28 P0: the list the panel renders its selector from.
+      sessions: liveSessions,
       generatedAt: new Date().toISOString(),
     }
   }

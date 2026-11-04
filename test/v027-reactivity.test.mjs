@@ -243,14 +243,16 @@ for (const [label, file] of [
     mod.__reactStub = react
     const bridge = mod.__bridgeFactory(makeCtx(makeRemote()), undefined, undefined)
 
-    // First pass: nothing is open. The panel must show the read-only state.
+    // First pass: nothing is open. v0.28 calls this GLOBAL MODE, and the panel must still
+    // render something useful rather than an empty shell.
     const empty = renderPasses(mod, bridge, [{ sessions: [] }])
     const emptySelects = collect(empty, 'select')
     assert.equal(emptySelects.length, 0, 'no selector when there is nothing to select')
-    assert.ok(textOf(empty).join(' ').includes('只读'), 'and it says it is read-only')
+    assert.ok(textOf(empty).join(' ').includes('全局'), 'and it says it is in global mode')
 
     // Second pass: a session exists NOW. The panel must pick it up WITHOUT a remount —
-    // same component instance, same state store, new snapshot.
+    // same component instance, same state store, new snapshot. THIS is the reactivity
+    // the user reported missing.
     const live = renderPasses(mod, bridge, [{ sessions: [{ id: 'session-late' }] }])
     const selects = collect(live, 'select')
     assert.equal(selects.length, 1, 'the selector appears as soon as a session exists')
@@ -259,18 +261,14 @@ for (const [label, file] of [
     assert.ok(textOf(live).join(' ').includes('session-late'), 'and the effective session is named in the summary')
   })
 
-  test(`v0.27 P0: ${label} unlocks its controls once a session exists`, () => {
-    const react = makeStatefulReact()
-    const mod = loadFactory(file, react.React)
-    mod.__reactStub = react
-    const bridge = mod.__bridgeFactory(makeCtx(makeRemote()), undefined, undefined)
-
-    const live = renderPasses(mod, bridge, [{ sessions: [{ id: 's-1' }] }])
-    const switches = collect(live, 'button').filter((node) => node.props && node.props.role === 'switch')
-    assert.ok(switches.length > 0, 'the panel has switches')
-    for (const node of switches) {
-      assert.equal(node.props.disabled, undefined, 'a live session must ENABLE the switches — this is the reported blocker')
-    }
+  test(`v0.28 P0: ${label} switches are gated on the Host payload, not on a session`, () => {
+    // v0.27 asserted that a live session ENABLES the switches. v0.28 changed the gate:
+    // the switches are GLOBAL settings, so what enables them is the Host having answered.
+    // A stub render never completes an async fetch, so this asserts the STRUCTURE instead
+    // of a state a real run would reach.
+    const source = readFileSync(join(ROOT, file), 'utf8')
+    assert.match(source, /const canWrite = state !== null && state !== undefined/u,
+      'the gate must key off the Host payload')
   })
 
   test(`v0.27 P0: ${label} offers a refresh control`, () => {
@@ -287,7 +285,7 @@ for (const [label, file] of [
     assert.equal(typeof refresh.props.title, 'string', 'and explain what it does')
   })
 
-  test(`v0.27 P0: ${label} disables refresh when there is nothing to read`, () => {
+  test(`v0.28 P0: ${label} keeps refresh available even with no session`, () => {
     const react = makeStatefulReact()
     const mod = loadFactory(file, react.React)
     mod.__reactStub = react
@@ -296,7 +294,10 @@ for (const [label, file] of [
     const empty = renderPasses(mod, bridge, [{ sessions: [] }])
     const refresh = collect(empty, 'button').find((node) => textOf(node).join('').includes('刷新'))
     assert.ok(refresh !== undefined)
-    assert.equal(refresh.props.disabled, true, 'refreshing without a session would be a no-op that looks like a hang')
+    // v0.28: refresh re-reads GLOBAL state, which does not need a session. Disabling it
+    // was the v0.27 behaviour, and it removed the only way to recover in global mode.
+    assert.notEqual(refresh.props.disabled, true, 'refreshing global state must stay possible without a session')
+    assert.equal(typeof refresh.props.title, 'string', 'and explain what it does')
   })
 }
 

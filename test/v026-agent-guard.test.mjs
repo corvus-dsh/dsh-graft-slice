@@ -88,36 +88,48 @@ function makeCtx(remote) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. the count is zero — the actual requirement
+// 1. reads go global, writes stay refused
 // ---------------------------------------------------------------------------
 
 for (const [label, file] of [
   ['graft', 'dsh-graft-slice/client.js'],
   ['memory', 'dsh-memory/client.js'],
 ]) {
-  test(`v0.26 P0: ${label} sends NOTHING when no agent is resolvable`, async () => {
+  /**
+   * v0.28 REVISION of the v0.26 contract.
+   *
+   * v0.26 asserted ZERO requests without an agent. That stopped the abandoned gateway
+   * call, but it ALSO stopped the global data — the knobs, totals, scenes and ledger are
+   * session-independent, and refusing them left the panel permanently empty. The user's
+   * report ("一直处于只读…卡在正在读取") is exactly that guard working as specified.
+   *
+   * The refined contract:
+   *   - a READ with no agent IS sent, against the session-independent command, using a
+   *     shape-valid placeholder id (the gateway checks shape, never existence);
+   *   - a WRITE with no agent is still refused, because a knob change records WHO made
+   *     it and an invented id would make that audit a lie.
+   */
+  test(`v0.28 P0: ${label} STILL READS when no agent is resolvable, via a shape-valid id`, async () => {
     const { mod } = loadFactory(file)
     const remote = makeCountingRemote()
     // No hook, no snapshot: the real "root panel with no conversation" state.
     const bridge = mod.__bridgeFactory(makeCtx(remote), undefined, undefined)
     const reply = await bridge.state()
 
-    assert.equal(remote.calls.length, 0, `ZERO requests may leave the panel; got ${remote.calls.length}`)
-    assert.equal(reply.ok, false, 'the reply reports that nothing was sent')
-    // And it must not be the gateway's opaque rejection, which is what the user saw.
-    assert.equal(
-      String(reply.text).includes('gateway/arguments-invalid'),
-      false,
-      'the panel must never surface a gateway rejection it could have avoided',
-    )
+    assert.equal(remote.calls.length, 1, 'the global read must go out — refusing it is what made the panel useless')
+    const agent = remote.calls[0].agent
+    assert.ok(agent && typeof agent.id === 'string' && agent.id.length > 0, 'the placeholder must be SHAPE-valid')
+    assert.equal(reply.ok, true, 'and the Host answer is surfaced')
   })
 
-  test(`v0.26 P0: ${label} sends nothing for a WRITE either`, async () => {
+  test(`v0.28 P0: ${label} refuses a WRITE without an agent`, async () => {
     const { mod } = loadFactory(file)
     const remote = makeCountingRemote()
     const bridge = mod.__bridgeFactory(makeCtx(remote), undefined, undefined)
-    await bridge.set('autoGraft', false)
-    assert.equal(remote.calls.length, 0, 'a write must be blocked by the same guard as a read')
+    const reply = await bridge.set('autoGraft', false)
+    assert.equal(remote.calls.length, 0, 'a write must be attributable, so it needs a real session')
+    assert.equal(reply.ok, false)
+    assert.match(String(reply.text), /写入需要一个确定的会话/u, 'and it says why')
   })
 }
 
@@ -172,57 +184,84 @@ for (const [label, file] of [
 }
 
 // ---------------------------------------------------------------------------
-// 4. the guard lives in the effect, so a mount cannot bypass it
+// 4. the fetch always runs — a mount may never be blocked by a missing session
 // ---------------------------------------------------------------------------
 
 for (const [label, file] of [
   ['graft', 'dsh-graft-slice/client.js'],
   ['memory', 'dsh-memory/client.js'],
 ]) {
-  test(`v0.26 P0: ${label} guards inside the MOUNT effect, not only in the renderer`, () => {
-    // The bug was mount-time traffic, so the assertion is on the source that runs at
-    // mount: there must be an early return keyed on agent readiness BEFORE the fetch.
+  /**
+   * v0.28 REVISION: the v0.26 assertion required an early return before the fetch.
+   *
+   * That early return IS the reported bug in its second form: it stopped the abandoned
+   * gateway call AND the global read, so the panel never left "正在读取" / "只读".
+   *
+   * The guard has moved DOWN into the bridge, where it distinguishes a read (allowed with
+   * a placeholder) from a write (refused). The effect no longer gates anything.
+   */
+  test(`v0.28 P0: ${label} fetches unconditionally, with the session sentinel handled in the bridge`, () => {
     const source = readFileSync(join(ROOT, file), 'utf8')
-    const marker = source.indexOf('agentReady')
-    assert.ok(marker > 0, 'the effect must compute an agent-ready flag')
-    const fetchAt = source.indexOf('bridge.state(', marker)
-    assert.ok(fetchAt > marker, 'the guard must appear BEFORE the fetch in the same effect')
+    const effectStart = source.indexOf('React.useEffect(() => {')
+    assert.ok(effectStart > 0)
+    const effectEnd = source.indexOf('}, [bridge, tick', effectStart)
+    assert.ok(effectEnd > effectStart)
 
-    // The early return must be between them.
-    const between = source.slice(marker, fetchAt)
-    assert.match(between, /if \(!agentReady\)/u, 'and it must return early when not ready')
-    assert.match(between, /return/u, 'the branch must actually return')
+    const codeOnly = source
+      .slice(effectStart, effectEnd)
+      .split(/\r?\n/u)
+      .filter((line) => {
+        const trimmed = line.trim()
+        return !trimmed.startsWith('*') && !trimmed.startsWith('//') && !trimmed.startsWith('/*')
+      })
+      .join('\n')
+
+    // The fetch must be reachable: no early return keyed on a missing session.
+    assert.equal(
+      codeOnly.includes('if (!agentReady)'),
+      false,
+      'an early return on "no session" is what kept the panel permanently empty',
+    )
+    // And the call is still bounded, so a silent channel cannot spin forever.
+    assert.match(codeOnly, /withTimeout\(bridge\.state\(/u, 'the fetch must be bounded and must actually run')
   })
 }
 
 // ---------------------------------------------------------------------------
-// 5. no error card while merely waiting
+// 5. every deadline is visible, so "正在读取" can never be permanent
 // ---------------------------------------------------------------------------
 
 for (const [label, file] of [
   ['graft', 'dsh-graft-slice/client.js'],
   ['memory', 'dsh-memory/client.js'],
 ]) {
-  test(`v0.26 P0: ${label} clears the error instead of showing one while waiting`, () => {
+  test(`v0.28 P0: ${label} renders the deadline failure text, not a silent spinner`, () => {
     const source = readFileSync(join(ROOT, file), 'utf8')
-    const marker = source.indexOf('agentReady')
-    const between = source.slice(marker, source.indexOf('bridge.state(', marker))
-    // setError('') — not setError(<message>). Waiting is a normal state.
-    assert.match(between, /setError\(''\)/u, 'waiting must CLEAR the error, not raise one')
+    // The timeout produces a RESULT (ok:false + text), which the effect turns into an
+    // error card. The label names which call timed out.
+    assert.match(source, /超时（\$\{ms\}ms 内宿主没有回应）/u, 'a timeout must produce a stated result')
+    assert.match(source, /读取转生控制台|读取控制台状态/u, 'and name which read timed out')
   })
 }
 
 // ---------------------------------------------------------------------------
-// 6. the panel renders a skeleton with a waiting line
+// 6. global mode is a real mode, and it is described honestly
 // ---------------------------------------------------------------------------
 
 for (const [label, file] of [
   ['graft', 'dsh-graft-slice/client.js'],
   ['memory', 'dsh-memory/client.js'],
 ]) {
-  test(`v0.26 P0: ${label} shows a "wait for a choice" line, not a failure`, () => {
+  test(`v0.28 P0: ${label} says what STILL WORKS when no session is exposed`, () => {
     const source = readFileSync(join(ROOT, file), 'utf8')
-    assert.match(source, /等待选择会话|当前没有活动会话|未能确定活动会话/u, 'a waiting/read-only line must exist')
-    assert.match(source, /只读/u, 'and it must say the panel is read-only, not broken')
+    // The message must describe the global mode rather than a dead end. The old
+    // "没有可用的活动会话" string was replaced precisely because it told the user nothing
+    // about what the panel could still do.
+    assert.match(source, /全局模式|全局数据/u, 'global mode must be named')
+    assert.equal(
+      source.includes('没有可用的活动会话：agent 参数必填，伪造会被 gateway 拒绝'),
+      false,
+      'the dead-end string must be gone',
+    )
   })
 }
