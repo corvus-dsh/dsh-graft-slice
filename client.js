@@ -556,6 +556,50 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * v0.29 P0 — THE STATE THE PANEL FALLS BACK TO WHEN THE HOST DOES NOT ANSWER.
+     *
+     * The reported failure had several faces and ONE cause: the fetch failed, `state`
+     * stayed null, and everything derived from it looked broken —
+     *
+     *   - every knob was `disabled: !canWrite` with `canWrite = state !== null`;
+     *   - the derivation line rendered its "当前推导：读取中…" branch;
+     *   - the header could report a failure while nothing was drawn, because one path
+     *     returned before setting an error.
+     *
+     * A panel that cannot reach the Host is still useful for READING what the plugin
+     * would use by default. So a failed fetch now yields a REAL state object carrying the
+     * shipped defaults, tagged `degraded` with the reason. The knobs then reflect those
+     * defaults and say so, which beats a dead panel — and a write attempt against them
+     * will still fail loudly, which is correct: a default is not the live config.
+     */
+    function fallbackState(reason) {
+      return {
+        degraded: true,
+        degradedReason: reason,
+        config: {
+          modelDrivenGraft: true,
+          autoGraft: true,
+          modelDrivenGraftAtRatio: 0.7,
+          autoGraftAtRatio: 0.75,
+          workspaceRedline: true,
+          commandGuard: true,
+          graftTargetGraceTurns: 2,
+          safetyMode: 'balanced',
+          watermarkMode: 'dynamic',
+          constraintBudgetChars: 8000,
+          growthTokensPerTurn: 1200,
+          growthReserveTurns: 3,
+          igniteTarget: true,
+          ignitionMode: 'queue',
+        },
+        thresholds: null,
+        rows: [],
+        pendingIgnitions: [],
+        sessions: [],
+      }
+    }
+
     function GraftConsole({ bridge, useSessions }) {
       /**
        * v0.26: hand the selector to the bridge BEFORE anything can request.
@@ -753,11 +797,25 @@ window.__ModuleLoader__.load({
            */
           if (alive) setBusy(true)
           try {
-            const reply = await withTimeout(bridge.state(target), 12_000, '读取转生控制台')
+            /**
+             * v0.29 P0 — A THREE-SECOND BUDGET AND A REAL FALLBACK.
+             *
+             * Twelve seconds is indistinguishable from "hang" to someone watching a
+             * panel. And when it expired the panel was left with no state at all, so every
+             * knob stayed disabled and the derivation line kept saying "读取中…" — several
+             * symptoms, one cause: `state` never became non-null.
+             *
+             * Budget is now 3s, and a failure FALLS BACK to the shipped defaults so the
+             * panel stays readable. The fallback is marked `degraded`, so the UI can say
+             * "these are defaults" instead of pretending they are the live config.
+             */
+            const reply = await withTimeout(bridge.state(target), 3_000, '读取转生控制台')
             if (!alive) return
             setVia(String((reply && reply.via) || ''))
             if (!reply || !reply.ok) {
-              setError(String((reply && reply.text) || '宿主没有返回内容'))
+              const reason = String((reply && reply.text) || '宿主没有返回内容')
+              setError(reason)
+              setState((prev) => (prev !== null && prev !== undefined ? prev : fallbackState(reason)))
               return
             }
             // Parsing is the second place a blank panel can come from: a non-JSON
@@ -766,13 +824,19 @@ window.__ModuleLoader__.load({
             try {
               parsed = JSON.parse(reply.text)
             } catch (parseError) {
-              setError(`宿主返回的不是 JSON：${String((parseError && parseError.message) || parseError)}\n原始内容：${String(reply.text).slice(0, 500)}`)
+              const reason = `宿主返回的不是 JSON：${String((parseError && parseError.message) || parseError)}\n原始内容：${String(reply.text).slice(0, 500)}`
+              setError(reason)
+              setState((prev) => (prev !== null && prev !== undefined ? prev : fallbackState(reason)))
               return
             }
             setError('')
             setState(parsed)
           } catch (caught) {
-            if (alive) setError(String((caught && caught.message) || caught))
+            if (alive) {
+              const reason = String((caught && caught.message) || caught)
+              setError(reason)
+              setState((prev) => (prev !== null && prev !== undefined ? prev : fallbackState(reason)))
+            }
           } finally {
             if (alive) setBusy(false)
           }
@@ -863,7 +927,35 @@ window.__ModuleLoader__.load({
           h('p', { key: 's', className: 'gc-sub' },
             '改动直接写入 profile 配置（configEditor），下一次 pre-step 生效，无需重启。'),
         ]),
-        error ? h('div', { key: 'e', className: 'gc-card gc-err' }, error) : null,
+        /**
+         * v0.29 P0 — AN UNMISSABLE ERROR CARD.
+         *
+         * "显示读取失败但下方没有渲染红卡" is what a conditional `error ? … : null`
+         * produces when a failure path forgets to set `error`. Two fixes: the card is
+         * keyed on BOTH `error` and `state.degraded`, and it is a plain inline-styled
+         * div carrying the raw text — a diagnostic that depends on the styling layer it
+         * is diagnosing is not a diagnostic.
+         */
+        error || (state !== null && state !== undefined && state.degraded === true)
+          ? h('div', {
+              key: 'e',
+              style: {
+                border: '1px solid #b91c1c',
+                borderRadius: '8px',
+                padding: '12px 14px',
+                background: 'rgba(185,28,28,.08)',
+                color: '#b91c1c',
+                font: '13px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              },
+            }, [
+              h('div', { key: 't', style: { fontWeight: 600, marginBottom: '6px' } }, '读取失败'),
+              h('div', { key: 'm' }, String(error || (state && state.degradedReason) || '(宿主没有返回可识别的错误信息)')),
+              h('div', { key: 'h', style: { marginTop: '8px', opacity: 0.8 } },
+                '以上开关显示的是插件默认值，不是宿主的真实配置。点击「刷新」重试。'),
+            ])
+          : null,
         /**
          * v0.25 — THE SESSION SELECTOR.
          *

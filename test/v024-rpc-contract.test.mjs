@@ -245,7 +245,15 @@ for (const [label, file] of [
     // never settles, so a busy flag never clears and the UI has no way back.
     const source = readFileSync(join(ROOT, file), 'utf8')
     assert.match(source, /withTimeout/u, 'the fetch must be wrapped in a timeout')
-    assert.match(source, /12_000|12000/u, 'and the bound must be a concrete number of milliseconds')
+    // v0.29: the budget is 3s. The assertion pins that the bound is CONCRETE and SHORT
+    // enough to read as responsive — 12s was indistinguishable from a hang to anyone
+    // watching the panel.
+    assert.match(source, /withTimeout\(\s*bridge\.state\([^)]*\)\s*,\s*(\d[\d_]*)\s*,/u,
+      'the fetch must be called through withTimeout with an explicit budget')
+    const budget = source.match(/withTimeout\(\s*bridge\.state\([^)]*\)\s*,\s*([\d_]+)\s*,/u)
+    assert.ok(budget !== null, 'the budget must be readable from the source')
+    const ms = Number(String(budget[1]).replace(/_/gu, ''))
+    assert.ok(ms > 0 && ms <= 5_000, `the budget must be short (<= 5s) so it cannot read as a hang; got ${ms}ms`)
   })
 }
 
