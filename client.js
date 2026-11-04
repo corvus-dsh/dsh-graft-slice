@@ -272,26 +272,31 @@ window.__ModuleLoader__.load({
            * the result as global. WRITES never take this path — a knob change without a
            * session is refused, because it must be attributable.
            */
-          const isWrite = /-set/u.test(line)
-          const target = agent !== undefined && agent !== null
-            ? agent
-            : isWrite
-              ? undefined
-              : { id: GLOBAL_AGENT_ID }
-          if (target === undefined) {
-            failures.push('写入需要一个确定的会话（当前没有活动会话），已阻止发送')
-          } else {
-            try {
-              const settled = await commands.execute(target, line, [], undefined)
-              const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
-              if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
-              if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
-              failures.push('remote.commands.execute: returned undefined (the command name did not resolve)')
-            } catch (error) {
-              const message = String((error && error.message) || error)
-              // The gateway error is the most informative thing we have; keep it whole.
-              failures.push(`remote.commands.execute: ${message}`)
-            }
+          /**
+           * v0.30 P0 — WRITES TAKE THE PLACEHOLDER TOO.
+           *
+           * v0.28 refused a write without a real session, reasoning that a knob change
+           * must be attributable. That reasoning does not hold for these knobs: they are
+           * PROFILE settings written by `configEditor.edit` into `cordis.patch.yml`, and
+           * they belong to the workspace, not to a conversation. Requiring a session made
+           * the panel inert in exactly the situation the user hit — global mode with
+           * nothing open — producing the "有数据但无法点击" deadlock.
+           *
+           * Auditability is preserved differently: the constant placeholder makes the
+           * writer identifiable as the console itself, and the UI states plainly that the
+           * switch is a global setting.
+           */
+          const target = agent !== undefined && agent !== null ? agent : { id: GLOBAL_AGENT_ID }
+          try {
+            const settled = await commands.execute(target, line, [], undefined)
+            const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
+            if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
+            if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
+            failures.push('remote.commands.execute: returned undefined (the command name did not resolve)')
+          } catch (error) {
+            const message = String((error && error.message) || error)
+            // The gateway error is the most informative thing we have; keep it whole.
+            failures.push(`remote.commands.execute: ${message}`)
           }
         } else {
           failures.push('remote.commands 不可用（inject 未生效或宿主未挂载）')
@@ -616,6 +621,8 @@ window.__ModuleLoader__.load({
       const [state, setState] = React.useState(null)
       const [error, setError] = React.useState('')
       const [via, setVia] = React.useState('')
+      /** v0.30: a visible write confirmation ("已保存到全局配置"). */
+      const [notice, setNotice] = React.useState('')
       const [busy, setBusy] = React.useState(false)
       /**
        * v0.27 P0 — THE PANEL THAT NEVER WOKE UP.
@@ -860,11 +867,19 @@ window.__ModuleLoader__.load({
        */
       const write = async (key, value) => {
         try {
-          const reply = await bridge.set(key, value, picked)
+          /**
+           * v0.30 P0 — a write is a GLOBAL write, bounded and confirmed.
+           *
+           * The knob lives in the profile patch, not in a conversation, so no session is
+           * consulted. The call is wrapped in the same 3s budget as the read, because a
+           * switch that hangs on click is worse than one that reports failure.
+           */
+          const reply = await withTimeout(bridge.set(key, value), 3_000, '写入配置')
           setVia(String((reply && reply.via) || ''))
           if (!reply || !reply.ok) { setError(String((reply && reply.text) || '写入失败')); return }
-          // Optimistic: the panel shows the new value immediately and the refetch
-          // confirms it, so a slow Loader reconciliation does not read as a failure.
+          // Visible confirmation, named the way the user asked for.
+          setNotice('已保存到全局配置')
+          // Optimistic: show the new value immediately, then let the refetch confirm it.
           setState((prev) => (prev === null ? prev : { ...prev, config: { ...(prev.config || {}), [key]: value } }))
           setError('')
           setTimeout(refresh, 400)
@@ -952,10 +967,33 @@ window.__ModuleLoader__.load({
             }, [
               h('div', { key: 't', style: { fontWeight: 600, marginBottom: '6px' } }, '读取失败'),
               h('div', { key: 'm' }, String(error || (state && state.degradedReason) || '(宿主没有返回可识别的错误信息)')),
+              /**
+               * v0.30: the RAW failure, as JSON. The user's rule is explicit — make the
+               * error visible before trying to make it pretty. A panel that hides why it
+               * failed cannot be debugged from the page.
+               */
+              h('div', { key: 'raw', style: { marginTop: '8px', fontFamily: 'ui-monospace,Consolas,monospace', fontSize: '11.5px', opacity: 0.85 } },
+                '错误详情：' + JSON.stringify({
+                  message: String(error || ''),
+                  degradedReason: state && state.degradedReason ? String(state.degradedReason) : undefined,
+                  via: via || undefined,
+                })),
               h('div', { key: 'h', style: { marginTop: '8px', opacity: 0.8 } },
                 '以上开关显示的是插件默认值，不是宿主的真实配置。点击「刷新」重试。'),
             ])
           : null,
+        /** v0.30: the write confirmation, rendered next to the error card. */
+        notice ? h('div', {
+          key: 'n',
+          style: {
+            border: '1px solid #047857',
+            borderRadius: '8px',
+            padding: '10px 14px',
+            background: 'rgba(4,120,87,.08)',
+            color: '#047857',
+            font: '13px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif',
+          },
+        }, notice) : null,
         /**
          * v0.25 — THE SESSION SELECTOR.
          *

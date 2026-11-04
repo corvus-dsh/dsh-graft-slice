@@ -122,14 +122,24 @@ for (const [label, file] of [
     assert.equal(reply.ok, true, 'and the Host answer is surfaced')
   })
 
-  test(`v0.28 P0: ${label} refuses a WRITE without an agent`, async () => {
+  /**
+   * v0.30 REVISION of the v0.28 rule.
+   *
+   * v0.28 refused an agent-less write so a knob change would be attributable. That rule
+   * was wrong for these knobs: they are PROFILE settings, owned by the workspace rather
+   * than by a conversation, and the refusal is exactly what left the panel's switches
+   * dead in global mode. Now the write goes out with the same constant placeholder the
+   * read uses.
+   */
+  test(`v0.30 P0: ${label} ALLOWS a WRITE without an agent, using the placeholder`, async () => {
     const { mod } = loadFactory(file)
     const remote = makeCountingRemote()
     const bridge = mod.__bridgeFactory(makeCtx(remote), undefined, undefined)
     const reply = await bridge.set('autoGraft', false)
-    assert.equal(remote.calls.length, 0, 'a write must be attributable, so it needs a real session')
-    assert.equal(reply.ok, false)
-    assert.match(String(reply.text), /写入需要一个确定的会话/u, 'and it says why')
+    assert.equal(remote.calls.length, 1, 'the write must actually be attempted')
+    const agent = remote.calls[0].agent
+    assert.ok(agent && typeof agent.id === 'string' && agent.id.length > 0, 'with a shape-valid placeholder')
+    assert.equal(reply.ok, true, 'and the Host answer is surfaced')
   })
 }
 

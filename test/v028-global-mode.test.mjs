@@ -65,13 +65,32 @@ test('v0.28 P0: the memory console state carries a session list too', () => {
 // 2. reads always run; writes still need a real session
 // ---------------------------------------------------------------------------
 
-test('v0.28 P0: an agent-less read is sent with a SHAPE-VALID placeholder', () => {
+/**
+ * v0.30 REVISION.
+ *
+ * v0.28 required the placeholder for reads only, and refused an agent-less WRITE on the
+ * grounds that a knob change must be attributable. That reasoning does not hold for these
+ * knobs: they are PROFILE settings written by `configEditor.edit`, belonging to the
+ * workspace rather than to a conversation. The refusal is what produced the
+ * "有数据但无法点击" deadlock the user reported.
+ *
+ * The invariant that survives is the one that matters: the gateway must never receive an
+ * INVALID agent. Both reads and writes now supply the same constant placeholder, so the
+ * shape check passes and the command runs.
+ */
+test('v0.30 P0: BOTH reads and writes use a shape-valid placeholder, never undefined', () => {
   for (const file of ['dsh-graft-slice/client.js', 'dsh-memory/client.js']) {
     const source = readFileSync(join(ROOT, file), 'utf8')
     assert.match(source, /GLOBAL_AGENT_ID = 'dsh-/u, `${file} must define a global placeholder id`)
-    // The placeholder is only used for reads: the write branch must refuse first.
-    assert.match(source, /const isWrite = /u, `${file} must distinguish a write from a read`)
-    assert.match(source, /if \(target === undefined\)/u, `${file} must refuse when a write has no agent`)
+    // The write path must NOT be blocked on a missing session any more.
+    assert.equal(
+      /if \(target === undefined\)/u.test(source),
+      false,
+      `${file}: refusing an agent-less write is what deadlocked the panel`,
+    )
+    // Every execute call must be given a non-optional agent.
+    assert.match(source, /commands\.execute\(\s*(effectiveAgent|target)\s*,/u,
+      `${file} must always pass a resolved agent`)
   }
 })
 
