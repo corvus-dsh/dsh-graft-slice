@@ -9927,14 +9927,21 @@ async function graftSliceAndInjectUnlocked(
      * retirement transaction that just committed. A failure here is reported, never fatal:
      * a stale pointer is repairable, a blocked main session is not.
      */
-    let observerFollow                                                   = { followed: false, observerSessionId: '' }
+    /**
+     * v1.2 DECOUPLED: dsh-observer owns the follower pointer.
+     *
+     * This plugin only REPORTS that a transfer committed. It must not know whether an
+     * observer exists, where it lives, or how it follows — a listener-less profile is the
+     * normal case, and an absent listener is not an error.
+     */
     try {
-      observerFollow = rebindObserverOnTransfer(ctxForStores(), sourceId, newId)
-      if (observerFollow.followed) {
-        plan.warnings.push(`observer ${observerFollow.observerSessionId} now follows ${newId}`)
-      }
+      ;(ctx       ).emit?.('graft/session-transferred', {
+        sourceSessionId: sourceId,
+        newSessionId: newId,
+        at: Date.now(),
+      })
     } catch (error) {
-      plan.warnings.push(`observer rebind failed: ${String((error       )?.message ?? error)}`)
+      plan.warnings.push(`transfer event failed: ${String((error       )?.message ?? error)}`)
     }
 
     try {

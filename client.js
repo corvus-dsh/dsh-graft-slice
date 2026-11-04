@@ -1784,7 +1784,7 @@ window.__ModuleLoader__.load({
        * (`["sessions", "remote", "remote.commands", ...]`), and the Cordis property
        * guard reads exactly this array.
        */
-      inject: ['slots', 'remote', 'remote.commands'],
+      inject: ['slots', 'remote', 'remote.commands', 'remote.session'],
       apply(ctx) {
         /**
          * v0.26 — WHERE `useSessions` ACTUALLY COMES FROM.

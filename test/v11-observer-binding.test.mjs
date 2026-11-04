@@ -84,9 +84,8 @@ test('v1.1 observer: focus is one-shot — ack consumes it exactly once', async 
 
 test('v1.1 observer: the transfer path owns the rebind, and it cannot block ignition', () => {
   const runtime = readFileSync(join(here, '..', 'index.js'), 'utf8')
-  // The rebind is called AFTER the target is durable, and its failure is a warning.
-  assert.match(runtime, /rebindObserverOnTransfer/u)
-  assert.match(runtime, /observer rebind failed/u, 'a stale pointer is repairable; a blocked main is not')
-  // And the observer is never prompted synchronously on this path.
-  assert.doesNotMatch(runtime, /rebindObserverOnTransfer[\s\S]{0,400}await controller\.prompt/u)
+  // v1.2: the plugin only REPORTS the transfer; the follower pointer belongs to dsh-observer.
+  // What must never appear near the emit is a synchronous prompt to the observer.
+  assert.match(runtime, /graft\/session-transferred/u, 'the transfer is announced')
+  assert.doesNotMatch(runtime, /graft\/session-transferred[\s\S]{0,400}await controller\.prompt/u)
 })
