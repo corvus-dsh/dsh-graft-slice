@@ -260,3 +260,214 @@ export function effectiveWatermarks(
   const thresholds = calculateSafeWatermark(cost.windowLimit, cost.totalTokens)
   return { ...thresholds, growthReserveTokens: cost.growthReserveTokens }
 }
+
+/**
+ * v1.3 batch 2, step 3b ??the service surface this module needs, declared structurally.
+ *
+ * Deliberately NOT imported from index.ts: the dependency must stay one-way, and the
+ * earlier decision (types erased at build time, so an import would be invisible at runtime
+ * but still a design inversion) is the reason this interface exists.
+ */
+export interface WatermarkContext {
+  get?: (name: string) => any
+  sessionQuery: { readSession: (id: string) => Promise<unknown> }
+}
+
+export interface SessionEventLike {
+  type: string
+  seq: number
+  time?: number
+  data?: any
+  surfaceOp?: any
+  sourceEventSeqs?: any
+}
+
+export function textOfMessage(message: unknown): string {
+  if (!isRecord(message)) return ''
+  const content = Array.isArray(message.content) ? message.content : []
+  const parts: string[] = []
+  for (const block of content) {
+    if (isRecord(block) && block.type === 'text' && typeof block.text === 'string') parts.push(block.text)
+  }
+  return parts.join('\n').trim()
+}
+
+export function estimateTokensFromText(text: string): number {
+  const cjk = (text.match(/[\u3000-\u9fff\uff00-\uffef]/gu) ?? []).length
+  return Math.ceil(cjk + (text.length - cjk) / 4)
+}
+
+/**
+ * v7.0: per-session incremental fold state for the watermark.
+ *
+ * `scannedUpTo` is the event count the cached figures were computed at, so a
+ * later call only consumes the tail. Cleared by `resetRetiredSessions()`.
+ */
+export const watermarkCache = new Map<
+  string,
+  { scannedUpTo: number; contextWindow: number; usageTokens: number }
+>()
+
+/**
+ * v4.0 / v7.0 P0-2: token pressure, measured by the HOST first.
+ *
+ * The plugin used to compute this itself: read `contextWindow` from the last
+ * `request/context`, read `usage.inputTokens` from the last `assistant/message`,
+ * and if neither existed, estimate from a character count. That estimate is a
+ * different number from the one the host's compaction engine acts on
+ * (`tokenMeter.measure()` prices per surface node, reuses provider usage only
+ * when the request envelope matches, and re-prices the whole surface
+ * otherwise). Two owners of one session disagreeing about "how full is it" is
+ * how a plugin migrates at 60% while the engine thinks it is at 43%.
+ *
+ * The order below is deliberate:
+ *
+ *   1. `ctx.tokenMeter.measure(session)` — the authoritative measurement. The
+ *      session must be LIVE for this (the meter folds over a Session object, not
+ *      a snapshot), so it is skipped when the session is not in the store.
+ *   2. Provider usage + context window from the log — still real data, just not
+ *      the host's fold. Used when the meter is absent or the session is detached.
+ *   3. Character estimate — last resort, and it says so in the returned source.
+ *
+ * The `source` field is not decoration: a migration log that cannot say which
+ * of the three produced the number is unauditable.
+ */
+export async function readTokenWatermark(
+  ctx: WatermarkContext,
+  sourceSessionId: string,
+  settings: WatermarkSettings,
+): Promise<TokenWatermark | undefined> {
+  // --- 1. the host's own measurement -------------------------------------
+  try {
+    const meter = ctx.get?.('tokenMeter')
+    const live = ctx.get?.('sessions')?.get?.(sourceSessionId)
+    if (meter !== undefined && meter !== null && typeof meter.measure === 'function' && live !== undefined) {
+      const measurement = meter.measure(live)
+      const total = Number(measurement?.totalTokens)
+      const window = Number(
+        live?.requestContext?.()?.contextWindow ?? 0,
+      )
+      const contextWindow = settings.contextWindowTokens > 0 ? settings.contextWindowTokens : window
+      if (Number.isFinite(total) && total > 0 && Number.isFinite(contextWindow) && contextWindow > 0) {
+        return { tokens: total, contextWindow, ratio: total / contextWindow, source: 'tokenMeter' }
+      }
+    }
+  } catch {
+    // Fall through: a meter that throws must not stop the migration check.
+  }
+
+  // --- 2. incremental fold over the LIVE log -----------------------------
+  //
+  // The old path called `ctx.sessionQuery.readSession()` on every pre-step, which
+  // replays and validates the ENTIRE log — O(n) per step, on a session that is
+  // already the largest thing in the process. That is the wrong complexity for a
+  // check that runs before every model request.
+  //
+  // When the session is live we can fold incrementally instead: keep the cached
+  // watermark per session plus the log length it was computed at, and on each
+  // call consume only the events appended since. The two facts that matter
+  // (newest `contextWindow`, newest provider usage) are both "last one wins", so
+  // an incremental fold is exact, not an approximation.
+  //
+  // The full read stays as the fallback for a detached session, where there is
+  // no live log to fold and the snapshot is the only source.
+  const liveForFold = (() => {
+    try {
+      return ctx.get?.('sessions')?.get?.(sourceSessionId)
+    } catch {
+      return undefined
+    }
+  })()
+  if (liveForFold !== undefined && typeof liveForFold.snapshotEvents === 'function') {
+    try {
+      const events = liveForFold.snapshotEvents(0) as readonly SessionEventLike[]
+      const cached = watermarkCache.get(sourceSessionId)
+      let contextWindow = cached?.contextWindow ?? 0
+      let usageTokens = cached?.usageTokens ?? 0
+      let from = cached?.scannedUpTo ?? 0
+      // A shorter log than we remember means the store was replaced (restore,
+      // migration, HMR). Recompute from scratch rather than trusting the fold.
+      if (cached !== undefined && events.length < cached.scannedUpTo) {
+        contextWindow = 0
+        usageTokens = 0
+        from = 0
+      }
+      for (let index = from; index < events.length; index += 1) {
+        const event = events[index]
+        if (event?.type === 'request/context') {
+          const window = Number(event.data?.contextWindow)
+          if (Number.isFinite(window) && window > 0) contextWindow = window
+          continue
+        }
+        if (event?.type === 'assistant/message') {
+          const usage = event.data?.usage
+          const candidate =
+            typeof usage?.inputTokens === 'number'
+              ? usage.inputTokens
+              : typeof usage?.totalTokens === 'number'
+                ? usage.totalTokens
+                : 0
+          if (candidate > 0) usageTokens = candidate
+        }
+      }
+      watermarkCache.set(sourceSessionId, { scannedUpTo: events.length, contextWindow, usageTokens })
+      const effectiveWindow = settings.contextWindowTokens > 0 ? settings.contextWindowTokens : contextWindow
+      if (usageTokens > 0 && Number.isFinite(effectiveWindow) && effectiveWindow > 0) {
+        return {
+          tokens: usageTokens,
+          contextWindow: effectiveWindow,
+          ratio: usageTokens / effectiveWindow,
+          source: 'incremental',
+        }
+      }
+    } catch {
+      // Fall through to the full read.
+    }
+  }
+
+  let snapshot: any
+  try {
+    snapshot = await ctx.sessionQuery.readSession(sourceSessionId)
+  } catch {
+    return undefined
+  }
+  const events: any[] = Array.isArray(snapshot?.events) ? snapshot.events : []
+  if (events.length === 0) return undefined
+  let contextWindow = 0
+  for (const event of events) {
+    if (event.type === 'request/context' && typeof event.data?.contextWindow === 'number' && event.data.contextWindow > 0) {
+      contextWindow = event.data.contextWindow
+    }
+  }
+  if (settings.contextWindowTokens > 0) contextWindow = settings.contextWindowTokens
+  if (!Number.isFinite(contextWindow) || contextWindow <= 0) return undefined
+  let usageTokens = 0
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event.type !== 'assistant/message') continue
+    const usage = event.data?.usage
+    const candidate =
+      typeof usage?.inputTokens === 'number'
+        ? usage.inputTokens
+        : typeof usage?.totalTokens === 'number'
+          ? usage.totalTokens
+          : 0
+    if (candidate > 0) {
+      usageTokens = candidate
+      break
+    }
+  }
+  // --- 2. provider usage, when the log carries one ------------------------
+  if (usageTokens > 0) {
+    return { tokens: usageTokens, contextWindow, ratio: usageTokens / contextWindow, source: 'usage' }
+  }
+  // --- 3. character estimate, last resort --------------------------------
+  const text = events
+    .map((event) => {
+      const message = event.data?.message ?? event.data
+      return textOfMessage(message) || String(event.data?.arguments ?? '')
+    })
+    .join('\n')
+  const tokens = Math.max(usageTokens, estimateTokensFromText(text))
+  return { tokens, contextWindow, ratio: tokens / contextWindow, source: 'estimate' }
+}

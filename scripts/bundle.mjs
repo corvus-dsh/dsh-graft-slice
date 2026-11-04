@@ -35,7 +35,7 @@ const TERMINATES = /['"]\s*;?\s*$/u
  * to a single line or to a bracketed block of at most 10 continuation lines.
  */
 const LOCAL_SINGLE_LINE = /^import[^\n]*from[ \t]+'\.[^'\n]+';?[ \t]*\n/gmu
-const LOCAL_BRACKETED = /^import[ \t]*\{\n(?:[ \t]+[^\n]*\n){0,10}?\}[ \t]*from[ \t]+'\.[^'\n]+';?[ \t]*\n/gmu
+const LOCAL_BRACKETED = /^import[ \t]*\{\n(?:[ \t]+[^\n]*\n){0,40}?\}[ \t]*from[ \t]+'\.[^'\n]+';?[ \t]*\n/gmu
 const LOCAL_SINGLE_BRACKETED = /^import[ \t]*\{(?:[^}\n]*)\}[ \t]*from[ \t]+'\.[^'\n]+';?[ \t]*\n/gmu
 
 export function removeLocalImports(source) {
@@ -166,7 +166,7 @@ export function composeBundle(root) {
    * the offending line.
    */
   for (const [index, line] of output.split('\n').entries()) {
-    if (/^\s*(?:import|export)[^\n]*from\s*'\.\.?\//u.test(line)) {
+    if (/from\s*'\.\.?\//u.test(line)) {
       throw new Error(
         `bundle would ship an unresolved relative import (line ${index + 1}): ${line.trim()}\n` +
           'Hint: inlined modules must be re-exported BARE (`export { a, b }`), not `export ... from`.',
