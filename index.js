@@ -14605,6 +14605,33 @@ async function appendTransitionCard(
       required: ['goal'],
       additionalProperties: false,
     },
+    /**
+     * v1.4 P0 — THE OUTPUT CONTRACT IS MANDATORY on 0.2.2.
+     *
+     * Without it the whole ENTRY fails to activate:
+     * `TypeError: tool "graft_update_goal" must declare output { schema, render, presentationMeta? }`
+     * — and a failed entry takes the Web boot with it, so the app cannot start at all.
+     * The schema is permissive on purpose: the tool's value is a small status object and the
+     * host only needs to know it is an object.
+     */
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          sessionId: { type: 'string' },
+          currentGoal: { type: 'string' },
+          previousGoal: { type: 'string' },
+          revisions: { type: 'number' },
+          unchanged: { type: 'boolean' },
+          note: { type: 'string' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+        additionalProperties: true,
+      },
+      render: (_args         , value     ) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    },
     execute: async (args                                      , exec     ) => {
       const goal = String(args?.goal ?? '').replace(/\s+/gu, ' ').trim()
       if (goal.length === 0) return { ok: false, error: 'goal must be a non-empty string' }
