@@ -227,9 +227,17 @@ for (const [label, file, panelKey] of [
 
 test('v0.25 P0: with a live session the switches are NOT disabled', () => {
   const mod = loadFactory('dsh-memory/client.js')
-  const slotProps = { useSessions: (selector) => selector({ sessions: [{ id: 'live-1' }] }) }
-  const bridge = mod.__bridgeFactory(makeCtx(makeRemote()), undefined, slotProps)
-  const tree = expand(mod.__panelForTest({ bridge }))
+  /**
+   * v0.27 REVISION: the hook is now consumed AT RENDER through component props.
+   *
+   * v0.25 injected it into the bridge (`bridgeFactory(ctx, host, slotProps)`), and v0.27
+   * discovered that path never subscribed — the panel froze at mount. The hook therefore
+   * has to arrive as a prop, and this test follows the new contract. What it ASSERTS is
+   * unchanged: a live session must leave the switches enabled.
+   */
+  const useSessions = (selector) => selector({ sessions: [{ id: 'live-1' }] })
+  const bridge = mod.__bridgeFactory(makeCtx(makeRemote()), undefined, undefined)
+  const tree = expand(mod.__panelForTest({ bridge, useSessions }))
   const switches = collect(tree, 'button').filter((node) => node.props && node.props.role === 'switch')
   assert.ok(switches.length > 0)
   for (const node of switches) {
@@ -247,15 +255,17 @@ for (const [label, file] of [
 ]) {
   test(`v0.25 P0: ${label} renders one option per live session plus a default`, () => {
     const mod = loadFactory(file)
-    const slotProps = { useSessions: (selector) => selector({ sessions: [{ id: 's-1' }, { id: 's-2' }] }) }
-    const bridge = mod.__bridgeFactory(makeCtx(makeRemote()), undefined, slotProps)
-    const tree = expand(mod.__panelForTest({ bridge }))
+    // v0.27: the hook reaches the panel as a PROP, because that is the only path that
+    // subscribes to session changes.
+    const useSessions = (selector) => selector({ sessions: [{ id: 's-1' }, { id: 's-2' }] })
+    const bridge = mod.__bridgeFactory(makeCtx(makeRemote()), undefined, undefined)
+    const tree = expand(mod.__panelForTest({ bridge, useSessions }))
 
     const selects = collect(tree, 'select')
     assert.equal(selects.length, 1, 'exactly one target-session selector')
     const options = collects(selects[0])
     const labels = options.map((node) => textOf(node).join(''))
-    assert.ok(labels.some((text) => text.includes('最新')), 'there is a "newest" default')
+    assert.ok(labels.some((text) => text.includes('默认') || text.includes('最新')), 'there is a default option')
     assert.ok(labels.includes('s-1') && labels.includes('s-2'), `both sessions are offered; got: ${JSON.stringify(labels)}`)
   })
 }

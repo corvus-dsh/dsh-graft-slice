@@ -542,6 +542,68 @@ window.__ModuleLoader__.load({
       const [via, setVia] = React.useState('')
       const [busy, setBusy] = React.useState(false)
       /**
+       * v0.27 P0 — THE PANEL THAT NEVER WOKE UP.
+       *
+       * The report: the panel sat at "只读 / 没有活动会话", and stayed at "正在读取" even
+       * after the user switched sessions. The bridge HAD the hook, so why?
+       *
+       * Because `useSessions` was being CALLED FROM AN EFFECT (via `bridge.canWrite()`).
+       * A hook invoked outside render cannot subscribe, so a session change never
+       * re-rendered this component. The panel was frozen at whatever the snapshot said
+       * when it mounted — and on a fresh window that is nothing.
+       *
+       * The fix is to call it HERE, during render, and let its RESULT drive the element
+       * tree. A SnapshotSelectorHook subscribes internally, so a session appearing
+       * re-renders this component and every derived value below follows.
+       *
+       * Called unconditionally, so hook order is stable across renders.
+       */
+      const readSessions = (hooks) => {
+        try {
+          if (typeof hooks !== 'function') return []
+          const snapshot = hooks((value) => value)
+          if (snapshot === undefined || snapshot === null) return []
+          const list = Array.isArray(snapshot)
+            ? snapshot
+            : Array.isArray(snapshot.sessions)
+              ? snapshot.sessions
+              : Array.isArray(snapshot.all)
+                ? snapshot.all
+                : Array.isArray(snapshot.list)
+                  ? snapshot.list
+                  : []
+          const ids = []
+          for (const entry of list) {
+            const id =
+              typeof entry === 'string'
+                ? entry
+                : entry && typeof entry.id === 'string'
+                  ? entry.id
+                  : entry && typeof entry.sessionId === 'string'
+                    ? entry.sessionId
+                    : ''
+            if (id.length > 0 && !ids.includes(id)) ids.push(id)
+          }
+          return ids
+        } catch {
+          return []
+        }
+      }
+      const liveSessions = readSessions(useSessions)
+      /** Stable identity for "which sessions exist" — the effect dependency. */
+      const sessionKey = liveSessions.join('\u0000')
+      const activeFromHook = (() => {
+        try {
+          if (typeof useSessions !== 'function') return ''
+          const snapshot = useSessions((value) => value)
+          if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) return ''
+          const candidate = snapshot.activeSessionId ?? snapshot.currentSessionId ?? snapshot.active ?? snapshot.current
+          return typeof candidate === 'string' ? candidate : ''
+        } catch {
+          return ''
+        }
+      })()
+      /**
        * v0.23 — THE BLANK PANEL, and why this is a counter instead of useCallback.
        *
        * The symptom was precise: the sidebar ICON drew, the PANEL was pure white. Both
@@ -629,21 +691,29 @@ window.__ModuleLoader__.load({
            * "Nobody has picked a session yet" is a NORMAL state for a root-scoped panel,
            * not a failure. Printing it in red would teach the user to ignore red.
            */
-          const agentReady = (() => {
-            try {
-              if (picked.length > 0) return true
-              return bridge !== undefined && typeof bridge.canWrite === 'function' && bridge.canWrite() === true
-            } catch {
-              return false
-            }
-          })()
+          /**
+           * v0.27: resolve the target from the RENDER-TIME session list.
+           *
+           * `bridge.canWrite()` used to be asked here, and it called `useSessions` from
+           * inside this effect — a hook outside render, which cannot subscribe and so
+           * never saw a session change. The ids are computed during render now, and
+           * `sessionKey` in the dependency array re-runs this effect on a switch.
+           */
+          const target = picked.length > 0
+            ? picked
+            : activeFromHook !== ''
+              ? activeFromHook
+              : liveSessions.length > 0
+                ? liveSessions[liveSessions.length - 1]
+                : ''
+          const agentReady = target.length > 0
           if (!agentReady) {
             if (alive) { setBusy(false); setError('') }
             return
           }
           if (alive) setBusy(true)
           try {
-            const reply = await withTimeout(bridge.state(picked), 12_000, '读取转生控制台')
+            const reply = await withTimeout(bridge.state(target), 12_000, '读取转生控制台')
             if (!alive) return
             setVia(String((reply && reply.via) || ''))
             if (!reply || !reply.ok) {
@@ -670,7 +740,14 @@ window.__ModuleLoader__.load({
         void run()
         const timer = setInterval(() => { void run() }, 5000)
         return () => { alive = false; clearInterval(timer) }
-      }, [bridge, tick, picked])
+        /**
+         * v0.27: `sessionKey` (a plain string) instead of the array.
+         *
+         * A dependency array compares by reference, so passing `liveSessions` would re-run
+         * the fetch on every render whenever the hook mints a fresh array. The joined ids
+         * change only when the SET of sessions changes — exactly when a refetch is due.
+         */
+      }, [bridge, tick, picked, sessionKey])
 
       /**
        * `write` is a plain closure, recreated each render. That is fine: it is never a
@@ -702,27 +779,16 @@ window.__ModuleLoader__.load({
       const num = (value, fallback) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback)
 
       /**
-       * v0.25: the session surface, read synchronously from the injected snapshot.
+       * v0.27: the session list comes from the RENDER-TIME read, not from the bridge.
        *
-       * sessions() is a pure read, so it is safe on every render. canWrite is false when
-       * there is no resolvable agent AND no explicit choice: the panel then shows the
-       * live watermark it can and disables the knobs, instead of reporting a dead end.
+       * The bridge's copy is whatever the hook returned last time somebody asked it —
+       * and since that used to happen inside an effect, it never updated. `liveSessions`
+       * is recomputed on every render and therefore follows a session switch.
        */
-      const sessions = (() => {
-        try {
-          return bridge !== undefined && typeof bridge.sessions === 'function' ? bridge.sessions() : []
-        } catch {
-          return []
-        }
-      })()
-      const canWrite = (() => {
-        try {
-          if (picked.length > 0) return true
-          return bridge !== undefined && typeof bridge.canWrite === 'function' ? bridge.canWrite() === true : false
-        } catch {
-          return false
-        }
-      })()
+      const sessions = liveSessions
+      /** The session this panel acts on, resolved the same way the effect does. */
+      const effectiveSession = picked.length > 0 ? picked : activeFromHook !== '' ? activeFromHook : sessions.length > 0 ? sessions[sessions.length - 1] : ''
+      const canWrite = effectiveSession.length > 0
 
       return h('div', { className: 'gc-root' }, [
         h('style', { key: 'css' }, CSS),
@@ -744,13 +810,23 @@ window.__ModuleLoader__.load({
          *                           live watermark is still visible
          */
         h('div', { key: 'session', className: 'gc-card' }, [
-          h('h3', { key: 'h', className: 'gc-h' }, '目标会话'),
+          h('div', { key: 'hh', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, [
+            h('h3', { key: 'h', className: 'gc-h', style: { margin: 0 } }, '目标会话'),
+            // v0.27: a manual refresh, so an unverifiable "reactivity" assumption is
+            // something the user can override with one click.
+            h('button', {
+              key: 'rf',
+              type: 'button',
+              className: 'gc-btn',
+              disabled: busy || !canWrite,
+              onClick: refresh,
+              title: canWrite ? '立即重新拉取状态' : '只读状态下没有可拉取的目标会话',
+            }, busy ? '读取中…' : '刷新'),
+          ]),
           h('p', { key: 's', className: 'gc-sub' },
             sessions.length === 0
-              ? '当前没有活动会话。面板处于只读模式：可以查看实时水位，但开关不可调节。'
-              : canWrite
-                ? '命令会以选中的会话身份执行。默认使用最新一个。'
-                : '未能确定活动会话，面板为只读。请从下拉框中选择一个会话。'),
+              ? '当前没有活动会话。面板处于只读模式：可以查看实时水位，但开关不可调节。打开一个会话后这里会更新。'
+              : `命令会以会话 ${effectiveSession} 的身份执行。切换下拉框会立即重新读取。`),
           sessions.length === 0
             ? null
             : h('div', { key: 'r', className: 'gc-row' }, [
@@ -760,9 +836,15 @@ window.__ModuleLoader__.load({
                   className: 'gc-select',
                   value: picked,
                   'aria-label': '目标会话',
-                  onChange: (event) => setPicked(String(event.target.value || '')),
+                  onChange: (event) => {
+                    // Selecting is a deliberate act: take it, and refetch immediately.
+                    setPicked(String(event.target.value || ''))
+                    setState(null)
+                    setError('')
+                    setTick((value) => value + 1)
+                  },
                 }, [
-                  h('option', { key: '', value: '' }, '（最新一个）'),
+                  h('option', { key: '', value: '' }, sessions.length > 0 ? `（默认：${effectiveSession}）` : '（最新一个）'),
                   ...sessions.map((id) => h('option', { key: id, value: id }, id)),
                 ]),
               ]),
