@@ -1,6 +1,6 @@
 {
   "name": "dsh-graft-slice",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": false,
   "description": "DSH open-source ecosystem plugin (topic: dsh-plugin): physical handoff for long sessions: slice a closed log at its last turn/end into a zero-inheritance, cold-resumable session. No fork, no lossy compaction, crash-safe transaction journal.",
   "type": "module",

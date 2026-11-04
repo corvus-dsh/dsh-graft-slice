@@ -47,6 +47,14 @@ window.__ModuleLoader__.load({
      * One definition at factory scope is visible to the effect and to every
      * handler, which is the property the original placement silently lacked.
      */
+    /**
+     * v1.0.1 P0 — peeling the command envelope lives INSIDE makeBridge.
+     *
+     * It is only ever used by the bridge, and keeping it there means the bridge can be
+     * lifted out of this bundle and unit-tested on its own (test/v022-console-bridge
+     * does exactly that). `withTimeout` stays at factory scope because the renderer
+     * needs it too.
+     */
     const withTimeout = (promise, ms, label) =>
       new Promise((resolve) => {
         let settled = false
@@ -120,6 +128,65 @@ window.__ModuleLoader__.load({
      * declaration, so it is tried first and the namespace is the fallback.
      */
     function makeBridge(ctx, host, slotProps) {
+      /**
+       * v1.0.1 P0 — PEELING THE COMMAND ENVELOPE.
+       *
+       * `commands.execute` resolves to a CommandExecution `{ kind, text }`, NOT to
+       * `{ result: { kind, text } }`. The old code looked only at `.result`, fell
+       * through to `JSON.stringify(settled)` and reported `ok: true`, so the panel set
+       * its state to the ENVELOPE — an object with no `config` and no `thresholds`.
+       *
+       * One line, every symptom: toggles rendered OFF and never flipped (the optimistic
+       * update wrote into an empty object that the next read replaced), "当前推导：
+       * 读取失败", and the gray "these are the plugin defaults" line — while writes
+       * really did persist at the Host, so the toast appeared and nothing changed.
+       *
+       * The unwrap tolerates depth 3 and a stringified envelope, because the wrapper is
+       * a host-build detail. It never invents one: an unrecognised shape is an error,
+       * not state.
+       */
+      const tryParse = (text) => {
+        try {
+          return JSON.parse(text)
+        } catch {
+          return undefined
+        }
+      }
+
+      const safeSlice = (value, limit) => {
+        const cap = typeof limit === 'number' ? limit : 600
+        try {
+          const text = typeof value === 'string' ? value : JSON.stringify(value)
+          if (typeof text !== 'string') return String(value)
+          return text.length > cap ? `${text.slice(0, cap)}…` : text
+        } catch {
+          return '(无法序列化的返回值)'
+        }
+      }
+
+      const unwrapExecution = (value) => {
+        let node = value
+        let decision = undefined
+        for (let depth = 0; depth < 3 && decision === undefined; depth += 1) {
+          if (node === null || node === undefined) return undefined
+          if (typeof node === 'string') {
+            const parsed = tryParse(node)
+            if (parsed === undefined) return undefined
+            node = parsed
+            continue
+          }
+          if (typeof node !== 'object') return undefined
+          if (typeof node.text === 'string') {
+            decision = { kind: typeof node.kind === 'string' ? node.kind : 'success', text: node.text }
+            break
+          }
+          const inner = node.result !== undefined ? node.result : node.value !== undefined ? node.value : node.execution
+          if (inner === undefined) return undefined
+          node = inner
+        }
+        return decision
+      }
+
       /**
        * v0.24 — WHY THE PANEL STOOD AT "读取中…" AND WHY `commands/execute` RETURNED
        * `gateway/arguments-invalid`.
@@ -326,10 +393,40 @@ window.__ModuleLoader__.load({
           const target = agent !== undefined && agent !== null ? agent : { id: GLOBAL_AGENT_ID }
           try {
             const settled = await commands.execute(target, line, [], undefined)
-            const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
-            if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
-            if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
-            failures.push('remote.commands.execute: returned undefined (the command name did not resolve)')
+            /**
+             * v1.0.1 P0 — THE COMMAND ENVELOPE IS NOT THE PANEL STATE.
+             *
+             * `commands.execute` resolves to a CommandExecution `{ kind, text }`, NOT to
+             * `{ result: CommandExecution }`. The old code looked only at `.result`, so it
+             * fell through to `JSON.stringify(settled)` and reported `ok: true`. The panel
+             * then set its state to `{ kind: 'success', text: '{"config":…}' }` — an object
+             * with no `config` and no `thresholds`.
+             *
+             * That one mistake produced EVERY reported symptom at once:
+             *   - every toggle rendered OFF (`config` was undefined in the renderer) and
+             *     never flipped, because the optimistic update wrote into an empty object
+             *     that the next read replaced with the same envelope;
+             *   - "当前推导：读取失败" (thresholds === null) plus the gray "these are the
+             *     plugin defaults" line;
+             *   - writes looked successful (toast) because the HOST really did persist
+             *     them — only the read-back was misparsed.
+             *
+             * The unwrap is deliberately tolerant of depth 3 and of a stringified
+             * envelope, because the exact wrapper is a host-build detail. What it will NOT
+             * do is invent an envelope: an unrecognised shape is an error, not state.
+             */
+            const execution = unwrapExecution(settled)
+            if (execution !== undefined) {
+              return {
+                ok: execution.kind !== 'error',
+                text: execution.text,
+                via: 'remote.commands.execute',
+                raw: settled,
+              }
+            }
+            failures.push(
+              `remote.commands.execute: 无法识别的返回形状（期望 { kind, text }）：${safeSlice(settled)}`,
+            )
           } catch (error) {
             const message = String((error && error.message) || error)
             // The gateway error is the most informative thing we have; keep it whole.

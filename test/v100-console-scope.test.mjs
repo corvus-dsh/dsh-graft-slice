@@ -45,3 +45,32 @@ test('v1.0.0 console: withTimeout is factory-scoped, so the toggle handlers reso
   const writeBody = bundle.slice(firstWriteAt, firstWriteAt + 4000)
   assert.match(writeBody, /withTimeout\(bridge\.set/u, 'the write path still goes through the bounded helper')
 })
+
+/**
+ * v1.0.1 P0 — the SECOND half of the same story.
+ *
+ * The bridge assumed `commands.execute` resolves to `{ result: { kind, text } }`.
+ * It resolves to a CommandExecution `{ kind, text }`. The fallback that swallowed the
+ * mismatch was literally `return { ok: true, text: JSON.stringify(settled) }`, which
+ * turned the envelope itself into panel state — hence "0 memories", "(未知)" workspace,
+ * and toggles that could never flip while the Host had already persisted the write.
+ */
+test('v1.0.1 console: the command envelope is unwrapped, never stringified as state', () => {
+  assert.match(bundle, /const execution = unwrapExecution\(settled\)/u, 'the reply goes through the unwrapper')
+  assert.doesNotMatch(
+    bundle,
+    /ok: true, text: JSON\.stringify\(settled\)/u,
+    'the old "stringify whatever came back and call it success" fallback must be gone',
+  )
+  assert.match(bundle, /无法识别的返回形状/u, 'an unrecognised shape is an ERROR, not state')
+
+  // The unwrapper lives INSIDE makeBridge (only the bridge uses it, and the bridge is
+  // lifted out of the bundle by test/v022-console-bridge.mjs — a factory-scope copy
+  // would be out of scope in that harness).
+  const bridgeAt = bundle.indexOf('function makeBridge(')
+  const unwrapAt = bundle.indexOf('const unwrapExecution = (value) =>')
+  const callAt = bundle.indexOf('const execution = unwrapExecution(settled)')
+  assert.ok(bridgeAt > 0 && unwrapAt > 0 && callAt > 0, 'bridge, unwrapper and call site all present')
+  assert.ok(unwrapAt > bridgeAt, 'the unwrapper is inside makeBridge')
+  assert.ok(unwrapAt < callAt, 'and is defined before the call that uses it')
+})

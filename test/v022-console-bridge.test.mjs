@@ -188,3 +188,53 @@ test('v0.22: the sidebar cell draws an ICON only — the owner renders the label
     assert.ok(body.includes('<svg') || body.includes("h('svg'"), `${file}: the icon is still there`)
   }
 })
+
+/**
+ * v1.0.1 P0 — THE SHAPE THE MOCKS ABOVE GOT WRONG.
+ *
+ * Every test in this file used to answer `{ result: { kind, text } }`. The Host answers
+ * a bare CommandExecution `{ kind, text }`, and the bridge's fallback turned that
+ * envelope into panel state: toggles OFF and un-flippable, "当前推导：读取失败",
+ * 记忆库 "0 条", 工作区 "(未知)" — while writes really persisted (the toast was honest,
+ * the read-back was not). These two cases pin the real shape and the honest failure.
+ */
+test('v1.0.1: the bare CommandExecution envelope is unwrapped into panel state', async () => {
+  const state = '{"config":{"modelDrivenGraft":true},"thresholds":{"hardAt":0.75,"warnAt":0.7}}'
+  for (const file of ['dsh-graft-slice/client.js', 'dsh-memory/client.js']) {
+    const { factory } = loadBridge(file)
+    const ctx = {
+      get(name) {
+        if (name === 'sessions') return { list: () => [{ id: 'a' }] }
+        if (name === 'remote') {
+          return {
+            commands: {
+              // The REAL shape: no `.result` wrapper.
+              async execute() {
+                return { kind: 'success', text: state }
+              },
+            },
+          }
+        }
+        return undefined
+      },
+    }
+    const result = await factory(ctx, undefined).state()
+    assert.equal(result.ok, true, `${file}: a successful execution is ok`)
+    assert.equal(result.text, state, `${file}: the COMMAND text is the panel payload, not the envelope`)
+    assert.equal(JSON.parse(result.text).config.modelDrivenGraft, true, `${file}: the renderer can read config`)
+  }
+})
+
+test('v1.0.1: an unrecognised reply shape is an error, never panel state', async () => {
+  const { factory } = loadBridge('dsh-graft-slice/client.js')
+  const ctx = {
+    get(name) {
+      if (name === 'sessions') return { list: () => [{ id: 'a' }] }
+      if (name === 'remote') return { commands: { async execute() { return { unexpected: true } } } }
+      return undefined
+    },
+  }
+  const result = await factory(ctx, undefined).state()
+  assert.equal(result.ok, false, 'guessing a state from an unknown shape is how the panel lied before')
+  assert.match(String(result.text), /无法识别的返回形状/u)
+})
