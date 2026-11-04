@@ -32,8 +32,6 @@ test('package and manifest declare the plugin identity and permissions', () => {
     'graft_read_result',
     'graft_resume_session',
     'graft_update_goal',
-    'graft_observer_create',
-    'graft_observer_status',
     'graft_debug_status',
   ])
   assert.deepEqual(manifest.hooks, ['agent/pre-step', 'agent/turn-stopping'])

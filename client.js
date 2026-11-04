@@ -33,11 +33,6 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const h = React.createElement
     const PANEL_KEY = 'graft-console'
-    /**
-     * v1.1: the last focus request already honoured. Module scope on purpose — the panel
-     * may remount, and re-opening the same session on every remount would fight the user.
-     */
-    let lastFocusHandled = ''
 
     /**
      * v1.0.0 P0 — FACTORY SCOPE, NOT EFFECT SCOPE.
@@ -691,12 +686,6 @@ window.__ModuleLoader__.load({
         state: (sessionId) => callHost('/graft-console-global', sessionId),
         set: (key, value, sessionId) => callHost(`/graft-console-set ${key} ${value}`, sessionId),
         /** v1.1 OBSERVER: summon / switch / ack — all through the same command bridge. */
-        observerCreate: (sessionId) =>
-          callHost(
-            typeof sessionId === 'string' && sessionId.length > 0 ? `/graft-observer-create ${sessionId}` : '/graft-observer-create',
-            sessionId,
-          ),
-        observerAck: () => callHost('/graft-observer-focus-ack'),
         // The panel must render even when the bridge is dead: every method resolves
         // to an error RESULT, never a thrown exception, so one failed call cannot
         // blank the slot entry.
@@ -1088,31 +1077,7 @@ window.__ModuleLoader__.load({
         }
       })
       const [sessionDraft, setSessionDraft] = React.useState('')
-
-      /**
-       * v1.1 OBSERVER — P0 强制焦点牵引.
-       *
-       * `uiWorkspace.openSession` is a CLIENT service, so the Host cannot move the window
-       * itself. The transfer writes `observer.focus = { sessionId, at }`; the very next
-       * console read (5s poll, or the user's refresh) pulls the window to the new main
-       * session and acks, so a handoff is followed exactly once and never fights a user
-       * who has since navigated elsewhere.
-       */
-      async function handleFocusPull(snapshot) {
-        try {
-          const focus = snapshot !== null && typeof snapshot === 'object' && snapshot.observer ? snapshot.observer.focus : undefined
-          if (!focus || typeof focus.sessionId !== 'string' || focus.sessionId.length === 0) return
-          if (focus.sessionId === lastFocusHandled) return
-          const ui = ctx !== undefined && typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : undefined
-          if (ui !== undefined && ui !== null && typeof ui.openSession === 'function') {
-            ui.openSession({ kind: 'session', sessionId: focus.sessionId })
-            lastFocusHandled = focus.sessionId
-          }
-          if (bridge !== undefined && typeof bridge.observerAck === 'function') void bridge.observerAck()
-        } catch {
-          // A missing uiWorkspace must not break the panel: the transfer already happened.
-        }
-      }
+      // v1.3 DECOUPLED: the observer UI lives in the separate dsh-observer plugin.
       const refresh = () => setTick((value) => value + 1)
 
       React.useEffect(() => {
@@ -1217,14 +1182,6 @@ window.__ModuleLoader__.load({
             }
             setError('')
             setState(parsed)
-            /**
-             * v1.1 OBSERVER — FOCUS PULL (P0).
-             *
-             * The Host cannot move a Desktop window: `uiWorkspace` is a CLIENT service. So
-             * the transfer writes a one-shot `observer.focus` record, THIS reads it, opens
-             * the new main session, and acks — exactly once per handoff.
-             */
-            void handleFocusPull(parsed)
           } catch (caught) {
             if (alive) {
               const reason = String((caught && caught.message) || caught)
@@ -1329,13 +1286,6 @@ window.__ModuleLoader__.load({
        */
       const canWrite = state !== null && state !== undefined
       const hasSession = effectiveSession.length > 0
-      /** v1.1: the follower bound to the session this panel is acting on. */
-      const observerId = (() => {
-        const bindings = state !== null && state !== undefined && state.observer && state.observer.bindings ? state.observer.bindings : undefined
-        if (bindings === undefined) return ''
-        const id = bindings[effectiveSession]
-        return typeof id === 'string' ? id : ''
-      })()
 
       /**
        * v1.0.2 P2 — HEALTH, STATED AT THE TOP INSTEAD OF DISCOVERED PER CARD.
@@ -1534,64 +1484,6 @@ window.__ModuleLoader__.load({
               }, '使用'),
             ]),
           ]),
-        ]),
-        /**
-         * v1.1 OBSERVER — the summon / switch card.
-         *
-         * Deliberately MANUAL (the user's choice): auto-creating a session on every
-         * `session/created` burns quota for people who only wanted to ask one question.
-         * The card also states the follower rule in one line, so nobody expects the
-         * observer to be retired alongside its main session.
-         */
-        h('div', { key: 'observer', className: 'gc-card' }, [
-          h('div', { key: 'hh', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, [
-            h('h3', { key: 'h', className: 'gc-h', style: { margin: 0 } }, '副脑（观察者）'),
-            h('button', {
-              key: 'sum',
-              type: 'button',
-              className: 'gc-btn',
-              disabled: busy || effectiveSession.length === 0,
-              title: effectiveSession.length === 0 ? '先选定一个会话' : '创建一个跟随该会话的副脑',
-              onClick: async () => {
-                if (bridge === undefined || typeof bridge.observerCreate !== 'function') {
-                  setError('桥接不可用：无法召唤副脑')
-                  return
-                }
-                const reply = await bridge.observerCreate(effectiveSession)
-                if (reply === undefined || reply.ok !== true) {
-                  setError(String((reply && reply.text) || '召唤副脑失败'))
-                  return
-                }
-                setNotice(String(reply.text || '已召唤副脑'))
-                setTick((value) => value + 1)
-              },
-            }, observerId === '' ? '召唤副脑' : '再召唤一个'),
-          ]),
-          h('p', { key: 's', className: 'gc-sub' },
-            observerId === ''
-              ? '尚未召唤。副脑与被观察会话同生：主脑转生时只改指针，副脑不参与切片、不退休。'
-              : `已绑定：${observerId}（跟随者指针）`),
-          observerId === ''
-            ? null
-            : h('div', { key: 'row', className: 'gc-row' }, [
-                h('span', { key: 'l', className: 'gc-label' }, [
-                  '跳转',
-                  h('span', { key: 'b', className: 'gc-hint' }, '切换 = 直接打开副脑会话，这是分屏的替代品'),
-                ]),
-                h('button', {
-                  key: 'go',
-                  type: 'button',
-                  className: 'gc-btn',
-                  onClick: () => {
-                    const ui = ctx !== undefined && typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : undefined
-                    if (ui !== undefined && ui !== null && typeof ui.openSession === 'function') {
-                      ui.openSession({ kind: 'session', sessionId: observerId })
-                      return
-                    }
-                    setError('uiWorkspace.openSession 不可用：请在左侧会话列表里打开副脑会话')
-                  },
-                }, '切换至副脑'),
-              ]),
         ]),
         h('div', { key: 'sw', className: 'gc-card' }, [
           h('h3', { key: 'h', className: 'gc-h' }, '核心开关'),

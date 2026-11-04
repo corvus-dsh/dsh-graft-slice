@@ -7991,10 +7991,6 @@ function configureRetiredStore(ctx                   , settings                 
   preparedStorePath = join(dataDir, '.graft-prepared.json')
   leftoversStorePath = join(dataDir, '.graft-leftovers.json')
   autoGraftSuppressedPath = join(dataDir, '.auto-graft-suppressed.json')
-  // v1.1 OBSERVER: the follower pointer. Same directory, same isolation as the
-  // retirement ledger, because it is the same kind of fact: "which session is this
-  // one's successor".
-  observerBindingsPath = join(dataDir, 'observer-bindings.json')
   // Create the profile-private directory up front: it proves the location is
   // writable at activation time instead of failing mid-migration, and it makes
   // the isolation target observable.
@@ -8433,15 +8429,6 @@ let preparedStorePath = join(PLUGIN_DIR, '.graft-prepared.json')
 const autoGraftSuppressedUntil = new Map                ()
 const AUTO_GRAFT_RESUME_GRACE_MS = 30 * 60_000
 let autoGraftSuppressedPath = join(PLUGIN_DIR, '.auto-graft-suppressed.json')
-/**
- * v1.1 OBSERVER — the follower pointer.
- *
- * The绑定 is deliberately NOT part of the graft target mark: a target mark describes a
- * tape (when it was sliced, how many events it was seeded with), while this describes a
- * RELATIONSHIP that must survive its tape being retired. Keeping them apart is what makes
- * "the observer follows the main session" a pointer update instead of a second migration.
- */
-let observerBindingsPath = join(PLUGIN_DIR, 'observer-bindings.json')
 const constraintsInFlight = new Set        ()
 
 function persistPendingConstraints(ctx                   )       {
@@ -11434,133 +11421,6 @@ function persistGraftTargetStore(ctx                               , remove     
  * half-read logs, recursive ignition. A follower never retires, so none of those cycles
  * exist: the observer's identity is this record, and a transfer only rewrites it.
  */
-                            
-                                           
-                                  
-                                                                                          
-                                 
-     
-                                                                                         
-                                                                                            
-                                                                                  
-     
-                                                 
- 
-
-const observerBindings                   = { bindings: {}, reverse: {}, focus: null }
-
-function loadObserverBindings(ctx                   )       {
-  try {
-    const parsed = JSON.parse(readFileSync(observerBindingsPath, 'utf8'))
-    if (!isRecord(parsed)) return
-    if (isRecord(parsed.bindings)) {
-      for (const [mainId, observerId] of Object.entries(parsed.bindings)) {
-        if (typeof observerId === 'string' && observerId.length > 0) observerBindings.bindings[mainId] = observerId
-      }
-    }
-    if (isRecord(parsed.reverse)) {
-      for (const [observerId, mainId] of Object.entries(parsed.reverse)) {
-        if (typeof mainId === 'string' && mainId.length > 0) observerBindings.reverse[observerId] = mainId
-      }
-    }
-    if (isRecord(parsed.focus) && typeof parsed.focus.sessionId === 'string' && parsed.focus.sessionId.length > 0) {
-      observerBindings.focus = {
-        sessionId: parsed.focus.sessionId,
-        at: typeof parsed.focus.at === 'number' ? parsed.focus.at : 0,
-      }
-    }
-  } catch (error) {
-    if ((error       )?.code !== 'ENOENT') {
-      try {
-        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${observerBindingsPath}: ${String((error       )?.message ?? error)}`)
-      } catch {
-        // Logging must not block activation.
-      }
-    }
-  }
-}
-
-function persistObserverBindings(ctx                               )       {
-  if (ctx === undefined) return
-  try {
-    mkdirSync(dirname(observerBindingsPath), { recursive: true })
-    withFileLock(observerBindingsPath, () => {
-      writeJsonAtomic(observerBindingsPath, JSON.parse(JSON.stringify(observerBindings)))
-    })
-  } catch (error) {
-    try {
-      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${observerBindingsPath}: ${String((error       )?.message ?? error)}`)
-    } catch {
-      // Logging must not change the migration result.
-    }
-  }
-}
-
-/** The observer bound to a main session, if any. */
-function observerOf(mainSessionId        )         {
-  const observerId = observerBindings.bindings[mainSessionId]
-  return typeof observerId === 'string' ? observerId : ''
-}
-
-/** The main session an observer follows, if any. */
-function mainOfObserver(observerSessionId        )         {
-  const mainSessionId = observerBindings.reverse[observerSessionId]
-  return typeof mainSessionId === 'string' ? mainSessionId : ''
-}
-
-/** True when this session is a FOLLOWER, i.e. it must never itself be sliced. */
-function isObserverSession(sessionId        )          {
-  return mainOfObserver(sessionId).length > 0
-}
-
-function bindObserver(ctx                               , mainSessionId        , observerSessionId        )       {
-  observerBindings.bindings[mainSessionId] = observerSessionId
-  observerBindings.reverse[observerSessionId] = mainSessionId
-  persistObserverBindings(ctx)
-}
-
-function unbindObserver(ctx                               , mainSessionId        )         {
-  const observerId = observerOf(mainSessionId)
-  delete observerBindings.bindings[mainSessionId]
-  if (observerId.length > 0) delete observerBindings.reverse[observerId]
-  persistObserverBindings(ctx)
-  return observerId
-}
-
-/**
- * v1.1 — THE TRANSFER FOLLOWS THE POINTER, inside the caller's `source:main` lock.
- *
- * Called after the new target is durable. Three things only:
- *   1. rewrite the binding old-main -> new-main (the observer keeps its own id);
- *   2. file a one-shot focus request so a Desktop window can follow the handoff;
- *   3. drop the old reverse entry, so `mainOfObserver` never answers with a retired id.
- *
- * It NEVER prompts, never waits for the observer and never blocks ignition: a slow
- * observer must not be able to delay the main session's start.
- */
-function rebindObserverOnTransfer(
-  ctx                               ,
-  oldMainSessionId        ,
-  newMainSessionId        ,
-)                                                   {
-  const observerId = observerOf(oldMainSessionId)
-  if (observerId.length === 0) return { followed: false, observerSessionId: '' }
-  delete observerBindings.bindings[oldMainSessionId]
-  observerBindings.bindings[newMainSessionId] = observerId
-  observerBindings.reverse[observerId] = newMainSessionId
-  observerBindings.focus = { sessionId: newMainSessionId, at: Date.now() }
-  persistObserverBindings(ctx)
-  return { followed: true, observerSessionId: observerId }
-}
-
-/** The console consumes the focus request exactly once. */
-function takeObserverFocus(ctx                               )                                           {
-  const focus = observerBindings.focus
-  if (focus === null) return null
-  observerBindings.focus = null
-  persistObserverBindings(ctx)
-  return focus
-}
 
 function loadGraftTargetStore(ctx                   )       {
   try {
@@ -12752,7 +12612,6 @@ export function apply(ctx                   , config              = {})       {
   // v7.0: the chain guard must survive a restart, so its marks are durable.
   loadGraftTargetStore(ctx)
   // v1.1: so must the follower pointer — a restart must not orphan an observer.
-  loadObserverBindings(ctx)
   // v7.2: so must the compaction shield. A section that only exists in memory
   // disappears on restart, leaving the constraints reachable by `/compact`.
   loadConstraintSections(ctx)
@@ -14129,11 +13988,6 @@ async function appendTransitionCard(
        * is the only place that can act on it, because `uiWorkspace.openSession` is a
        * CLIENT service and the Host cannot call it.
        */
-      observer: {
-        bindings: { ...observerBindings.bindings },
-        reverse: { ...observerBindings.reverse },
-        focus: observerBindings.focus === null ? null : { ...observerBindings.focus },
-      },
       generatedAt: new Date().toISOString(),
     }
   }
@@ -14214,85 +14068,6 @@ async function appendTransitionCard(
       handler: async (invocation     ) => {
         const result = await writeConsoleSetting(String(invocation?.rawInput ?? ''))
         return { kind: result.ok ? ('success'         ) : ('error'         ), text: result.text }
-      },
-    })
-    commands.register({
-      name: 'graft-observer-create',
-      description:
-        '为当前（或指定）会话召唤一个跟随它的副脑会话（观察者）。Creates a bound observer session and records the follower pointer.',
-      input: { hint: '[mainSessionId]' },
-      handler: async (invocation     ) => {
-        const requested = String(invocation?.rawInput ?? '').trim()
-        const mainSessionId =
-          requested.length > 0 ? requested : typeof invocation?.agent?.id === 'string' ? invocation.agent.id : ''
-        if (mainSessionId.length === 0) {
-          return { kind: 'error'         , text: '没有可绑定的主会话 id：请在会话里执行，或传入 mainSessionId。' }
-        }
-        const existing = observerOf(mainSessionId)
-        if (existing.length > 0) {
-          return { kind: 'success'         , text: `该会话已有副脑：${existing}（未重复创建）。` }
-        }
-        const controller = (() => {
-          try {
-            return (stableCtx       ).get('sessionController')       
-          } catch {
-            return undefined
-          }
-        })()
-        if (!isRecord(controller) || typeof controller.create !== 'function') {
-          return { kind: 'error'         , text: 'sessionController.create 不可用：当前宿主不支持创建会话。' }
-        }
-        const cwd = workspaceOfAgent(stableCtx, mainSessionId)
-        try {
-          const created = await controller.create(cwd.length > 0 ? { cwd } : {})
-          const observerSessionId = typeof created?.sessionId === 'string' ? created.sessionId : ''
-          if (observerSessionId.length === 0) {
-            return { kind: 'error'         , text: `会话创建返回了空 id：${JSON.stringify(created)}` }
-          }
-          bindObserver(ctxForStores(), mainSessionId, observerSessionId)
-          // The mission is one short queued message: the observer needs its role, not a
-          // context dump. A failure to send it must not lose the binding.
-          try {
-            const abort = new AbortController()
-            await controller.prompt(
-              {
-                requestId: `observer-mission-${Date.now()}`,
-                sessionId: observerSessionId,
-                mode: 'queue',
-                content: [
-                  {
-                    type: 'text',
-                    text:
-                      `[副脑启动] 你被绑定为会话 ${mainSessionId} 的观察者（跟随者）。` +
-                      '职责：读主会话日志、澄清需求、在控制台可见地提出方案；不直接改代码。' +
-                      '主会话转生后你会收到新的绑定目标，身份不变。',
-                  },
-                ],
-              },
-              abort.signal,
-            )
-          } catch (error) {
-            try {
-              ctx.logger?.warn?.(`[dsh-graft-slice] observer mission prompt failed: ${String((error       )?.message ?? error)}`)
-            } catch {
-              // Logging must not lose the binding that was just written.
-            }
-          }
-          return {
-            kind: 'success'         ,
-            text: `已召唤副脑 ${observerSessionId}，绑定到 ${mainSessionId}。`,
-          }
-        } catch (error) {
-          return { kind: 'error'         , text: `创建副脑失败：${String((error       )?.message ?? error)}` }
-        }
-      },
-    })
-    commands.register({
-      name: 'graft-observer-focus-ack',
-      description: '控制台已消费一次焦点牵引请求。Acknowledge the one-shot focus request.',
-      handler: async () => {
-        takeObserverFocus(ctxForStores())
-        return { kind: 'success'         , text: 'focus-acked' }
       },
     })
   }
@@ -14868,117 +14643,6 @@ async function appendTransitionCard(
     },
   })
 
-  /**
-   * v1.1 OBSERVER — the tool surface.
-   *
-   * The console COMMANDS are the UI's channel, but a tool is what the MODEL can call and
-   * what the test harness can reach, so both live here and the commands delegate. The
-   * follower never gets a tape: `graft_observer_create` only creates a session and writes
-   * the pointer.
-   */
-  const createObserverFor = async (mainSessionId        )                                                                    => {
-    if (mainSessionId.length === 0) {
-      return { ok: false, observerSessionId: '', text: '没有可绑定的主会话 id：请在会话里执行，或传入 mainSessionId。' }
-    }
-    if (isObserverSession(mainSessionId)) {
-      return { ok: false, observerSessionId: '', text: '这是一个副脑会话：它跟随主会话，不能再给它召唤副脑。' }
-    }
-    const existing = observerOf(mainSessionId)
-    if (existing.length > 0) return { ok: true, observerSessionId: existing, text: `该会话已有副脑：${existing}（未重复创建）。` }
-    const controller = (() => {
-      try {
-        return (stableCtx       ).get('sessionController')       
-      } catch {
-        return undefined
-      }
-    })()
-    if (!isRecord(controller) || typeof controller.create !== 'function') {
-      return { ok: false, observerSessionId: '', text: 'sessionController.create 不可用：当前宿主不支持创建会话。' }
-    }
-    try {
-      const cwd = workspaceOfAgent(stableCtx, mainSessionId)
-      const created = await controller.create(cwd.length > 0 ? { cwd } : {})
-      const observerSessionId = typeof created?.sessionId === 'string' ? created.sessionId : ''
-      if (observerSessionId.length === 0) {
-        return { ok: false, observerSessionId: '', text: `会话创建返回了空 id：${JSON.stringify(created)}` }
-      }
-      bindObserver(ctxForStores(), mainSessionId, observerSessionId)
-      try {
-        const abort = new AbortController()
-        await controller.prompt(
-          {
-            requestId: `observer-mission-${Date.now()}`,
-            sessionId: observerSessionId,
-            mode: 'queue',
-            content: [
-              {
-                type: 'text',
-                text:
-                  `[副脑启动] 你被绑定为会话 ${mainSessionId} 的观察者（跟随者）。` +
-                  '职责：读主会话日志、澄清需求、在控制台可见地提出方案；不直接改代码。' +
-                  '主会话转生后你会收到新的绑定目标，身份不变。',
-              },
-            ],
-          },
-          abort.signal,
-        )
-      } catch (error) {
-        try {
-          ctx.logger?.warn?.(`[dsh-graft-slice] observer mission prompt failed: ${String((error       )?.message ?? error)}`)
-        } catch {
-          // The binding is already durable; a missing mission message is cosmetic.
-        }
-      }
-      return { ok: true, observerSessionId, text: `已召唤副脑 ${observerSessionId}，绑定到 ${mainSessionId}。` }
-    } catch (error) {
-      return { ok: false, observerSessionId: '', text: `创建副脑失败：${String((error       )?.message ?? error)}` }
-    }
-  }
-
-  ctx.tools.register({
-    name: 'graft_observer_create',
-    description:
-      'Summon a bound observer (副脑) for a session: creates an ordinary session, records the follower pointer in ' +
-      'observer-bindings.json and sends it a one-line mission. The observer is NEVER retired and NEVER sliced — a ' +
-      'transfer only rewrites its pointer, which is what keeps the pair deadlock-free.',
-    parameters: {
-      type: 'object',
-      properties: {
-        mainSessionId: { type: 'string', description: 'Session to observe. Default: the calling session.' },
-      },
-      additionalProperties: false,
-    },
-    execute: async (args                             , exec     ) => {
-      const explicit = typeof args?.mainSessionId === 'string' ? args.mainSessionId.trim() : ''
-      const mainSessionId = explicit.length > 0 ? explicit : typeof exec?.agent?.id === 'string' ? exec.agent.id : ''
-      return createObserverFor(mainSessionId)
-    },
-  })
-
-  ctx.tools.register({
-    name: 'graft_observer_status',
-    description:
-      'Read the follower pointer (who observes whom), plus any pending focus request. Read-only. ' +
-      'ackFocus consumes that one-shot request, and exists so the console can say "I have moved the window".',
-    parameters: {
-      type: 'object',
-      properties: {
-        ackFocus: { type: 'boolean', description: 'Consume the pending focus request (the console already acted on it).' },
-      },
-      additionalProperties: false,
-    },
-    execute: async (args                        ) => {
-      const pending = observerBindings.focus
-      if (args?.ackFocus === true) takeObserverFocus(ctxForStores())
-      return {
-        ok: true,
-        bindings: { ...observerBindings.bindings },
-        reverse: { ...observerBindings.reverse },
-        focus: pending === null ? null : { ...pending },
-        ...(args?.ackFocus === true ? { focusConsumed: true } : {}),
-      }
-    },
-  })
 
   ctx.tools.register({
     name: 'graft_debug_status',
