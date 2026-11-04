@@ -31,6 +31,28 @@ import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
+/**
+ * v1.3 REFACTOR — stateless helpers live in `src/utils/serialize.ts` and are INLINED
+ * into index.js by `scripts/build.mjs` (the entry stays one file). Behaviour is
+ * unchanged: same bodies, same codes, same messages.
+ */
+import {
+  asFiniteInteger,
+  asNonEmptyString,
+  asSafeInteger,
+  clampRatio,
+  graftError,
+  isRecord,
+  truncateEnd,
+  truncateMiddle,
+} from './utils/serialize.js'
+import { formatAuditLine } from './utils/logger.js'
+import type { GraftAuditEntry } from './utils/logger.js'
+
+/** Re-exported: part of the plugin's public surface (tests import it). */
+export { graftError }
+export type { GraftAuditEntry }
+
 /** Cordis plugin name. */
 export const name = 'dsh-graft-slice'
 
@@ -550,39 +572,9 @@ export interface GraftReadResult {
 // ===========================================================================
 // Small helpers
 // ===========================================================================
-
-export function graftError(code: string, message: string): Error & { code: string } {
-  const error = new Error(`[${code}] ${message}`) as Error & { code: string }
-  error.name = 'GraftError'
-  error.code = code
-  return error
-}
-
-function isRecord(value: unknown): value is Record<string, any> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function asNonEmptyString(value: unknown, field: string): string {
-  if (typeof value !== 'string' || value.length === 0) {
-    throw graftError('INVALID_ARGUMENT', `${field} must be a non-empty string`)
-  }
-  return value
-}
-
-function asSafeInteger(value: unknown, field: string): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || Object.is(value, -0)) {
-    throw graftError('INVALID_ARGUMENT', `${field} must be a non-negative safe integer`)
-  }
-  return value
-}
-
-function asFiniteInteger(value: unknown, defaultValue: number, field: string): number {
-  if (value === undefined) return defaultValue
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw graftError('INVALID_CONFIG', `${field} must be a finite number`)
-  }
-  return Math.max(0, Math.trunc(value))
-}
+// v1.3 (first batch): graftError / isRecord / asNonEmptyString / asSafeInteger /
+// asFiniteInteger / truncateEnd / truncateMiddle / clampRatio / Truncation moved to
+// src/utils/serialize.ts, imported at the top of this file. Bodies unchanged.
 
 /**
  * v7.4: exported so a test can assert on DEFAULTS directly.
@@ -685,11 +677,7 @@ function normalizeText(text: string): string {
   return text.replace(/\r\n/gu, '\n').trim()
 }
 
-interface Truncation {
-  text: string
-  truncated: boolean
-  originalLength: number
-}
+// v1.3: `Truncation` and the two truncate* functions moved to src/utils/serialize.ts.
 
 /**
  * v0.23 — NO MORE FREE-TEXT TRUNCATION MARKERS.
@@ -714,29 +702,7 @@ interface Truncation {
  * The `Truncation.truncated` / `originalLength` fields stay, because callers already
  * branch on them and the STRUCTURED facts are what a caller should be using.
  */
-function truncateEnd(text: string, limit: number): Truncation {
-  if (limit <= 0 || text.length <= limit) return { text, truncated: false, originalLength: text.length }
-  // A bare slice: no marker injected into the value. The caller that needs to declare
-  // the cut has the structured fields and `wrapTruncated()` below.
-  return {
-    text: text.slice(0, Math.max(0, limit)),
-    truncated: true,
-    originalLength: text.length,
-  }
-}
-
-function truncateMiddle(text: string, limit: number): Truncation {
-  if (limit <= 0 || text.length <= limit) return { text, truncated: false, originalLength: text.length }
-  const head = Math.max(1, Math.floor(limit * 0.6))
-  const tail = Math.max(0, limit - head)
-  // Head and tail are joined WITHOUT a separator in the middle: the absent region is
-  // declared by `wrapTruncated()`, not by a fake line inside the text.
-  return {
-    text: text.slice(0, head) + (tail > 0 ? text.slice(-tail) : ''),
-    truncated: true,
-    originalLength: text.length,
-  }
-}
+// v1.3: truncateEnd / truncateMiddle moved to src/utils/serialize.ts.
 
 /**
  * Wrap a truncated body so the CUT is declared outside the payload.
@@ -7357,26 +7323,7 @@ const LOCK_STALE_MS = 30_000
  */
 const GRAFT_CHAIN_GRACE_TURNS = 2
 
-export interface GraftAuditEntry {
-  at: string
-  kind:
-    | 'lock-wait'
-    | 'lock-stale'
-    | 'lock-owner-mismatch'
-    | 'lock-reclaimed'
-    | 'command-blocked'
-    | 'chain-guard'
-    | 'model-nudge'
-    | 'nudge-escalation'
-    | 'force-graft'
-    | 'target-created'
-  file?: string
-  sessionId?: string
-  targetSessionId?: string
-  ratio?: number
-  waitedMs?: number
-  detail?: string
-}
+// v1.3: the audit entry type and its one-line formatter live in src/utils/logger.ts.
 
 /**
  * v7.7: an append-only audit next to the state files.
@@ -7394,7 +7341,7 @@ export function appendGraftAudit(entry: GraftAuditEntry): void {
     withFileLock(
       path,
       () => {
-        appendFileSync(path, JSON.stringify({ ...entry, pid: process.pid }) + '\n', 'utf8')
+        appendFileSync(path, formatAuditLine(entry, process.pid) + '\n', 'utf8')
       },
       { timeoutMs: LOCK_TIMEOUT_MS, staleMs: LOCK_STALE_MS, label: 'audit', silent: true },
     )
@@ -8791,10 +8738,7 @@ function round4(value: number): number {
   return Number(value.toFixed(4))
 }
 
-function clampRatio(value: number, low: number, high: number): number {
-  if (!Number.isFinite(value)) return high
-  return Math.min(high, Math.max(low, value))
-}
+// v1.3: clampRatio moved to src/utils/serialize.ts.
 
 export interface WatermarkOptions {
   warnMargin?: number
