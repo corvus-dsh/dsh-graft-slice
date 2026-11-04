@@ -13950,6 +13950,23 @@ async function appendTransitionCard(
       description: '读取转生控制台状态（开关、水位、距 70%/75% 还差多少 token）。Read the graft console state.',
       handler: async () => ({ kind: 'success'         , text: JSON.stringify(await consoleState()) }),
     })
+    /**
+     * v1.2 P0 — THE SESSION-INDEPENDENT VARIANT, mirroring `memory-console-global`.
+     *
+     * The panel's data is global (knobs, thresholds, pending ignitions, session list), yet
+     * the only variant that existed was the agent-scoped one. Executed against a real
+     * session the host answered `{ ok: true }` and put the payload somewhere the bridge
+     * could not see, which is exactly the "unrecognised shape" the panel reported.
+     *
+     * This variant takes no agent state at all, so its answer is always the JSON payload —
+     * the same shape the memory console has been answering with all along.
+     */
+    commands.register({
+      name: 'graft-console-global',
+      description:
+        '读取不依赖具体会话的转生控制台状态（开关、阈值、点火队列、会话列表）。Read the session-independent graft console state.',
+      handler: async () => ({ kind: 'success'         , text: JSON.stringify(await consoleState()) }),
+    })
     commands.register({
       name: 'graft-console-set',
       description:

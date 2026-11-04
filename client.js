@@ -598,8 +598,13 @@ window.__ModuleLoader__.load({
            * In production the placeholder earns `session/not-found` and the retry is what
            * makes the panel work; in a session-bound panel the first attempt already wins.
            */
-          const candidateIds =
-            sessionId.length > 0 && sessionId !== targetId ? [targetId, sessionId] : [targetId]
+          /** v1.2: the LIVE id goes first — the placeholder can never pass session/not-found. */
+          const explicitChoice = typeof preferredId === 'string' && preferredId.length > 0
+          const candidateIds = explicitChoice
+            ? [targetId, ...(sessionId.length > 0 && sessionId !== targetId ? [sessionId] : [])]
+            : sessionId.length > 0 && sessionId !== targetId
+              ? [sessionId, targetId]
+              : [targetId]
           for (const attemptId of candidateIds) {
             for (const shape of ordered) {
               if (shape === undefined) continue
@@ -683,7 +688,7 @@ window.__ModuleLoader__.load({
         sessions: () => listSessions(),
         /** Is there an agent right now? Decides read-only mode vs. interactive. */
         canWrite: () => agentOf() !== undefined,
-        state: (sessionId) => callHost('/graft-console', sessionId),
+        state: (sessionId) => callHost('/graft-console-global', sessionId),
         set: (key, value, sessionId) => callHost(`/graft-console-set ${key} ${value}`, sessionId),
         /** v1.1 OBSERVER: summon / switch / ack — all through the same command bridge. */
         observerCreate: (sessionId) =>
@@ -1118,6 +1123,16 @@ window.__ModuleLoader__.load({
          */
 
         const run = async () => {
+          /**
+           * v1.2 P1 — POLL LESS, AND NEVER WHILE THE TAB IS HIDDEN.
+           *
+           * Every poll executes a Host command, and a command executed for a real session is
+           * appended to that session's transcript — that is the `memory-console-global`
+           * noise the user saw in the main chat. Until the payload moves to a projection
+           * (no command, no transcript row), the honest mitigation is to stop hammering it:
+           * once a minute, and not at all while the window is in the background.
+           */
+          if (typeof document !== 'undefined' && document.hidden === true) return
           if (bridge === undefined) {
             if (alive) { setError('桥接未注入（slot inject 缺失）'); setBusy(false) }
             return
@@ -1221,7 +1236,7 @@ window.__ModuleLoader__.load({
           }
         }
         void run()
-        const timer = setInterval(() => { void run() }, 5000)
+        const timer = setInterval(() => { void run() }, 60000)
         return () => { alive = false; clearInterval(timer) }
         /**
          * v0.27: `sessionKey` (a plain string) instead of the array.

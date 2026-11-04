@@ -111,7 +111,9 @@ test('v0.22: the bridge calls execute(agent, "/line", attachments, signal)', asy
   // for a bare id, `gateway/input-invalid` for an object), so the string is what arrives.
   const sentId = typeof callAgent === 'string' ? callAgent : callAgent.id
   assert.equal(sentId, agent.id, 'the first argument names the receiving session')
-  assert.equal(line, '/graft-console', 'the second is a complete slash-command line')
+  // v1.2: the panel asks the SESSION-INDEPENDENT variant, mirroring the memory console —
+  // the agent-scoped one answered `{ ok: true }` on a real session and lost the payload.
+  assert.match(String(line), /^\/graft-console(-global)?/u, 'the second is a complete slash-command line')
   assert.deepEqual(attachments, [])
   assert.equal(signal, undefined)
 })
