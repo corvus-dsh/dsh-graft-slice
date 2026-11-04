@@ -146,6 +146,33 @@ export class FakePersistence {
     return record === undefined ? undefined : { header: clone(record.header), sizeBytes: 0 }
   }
 
+  /**
+   * v0.21: open a durable artifact for appending.
+   *
+   * The real `SessionPersistence` exposes open/append/flush/close, and the rollback
+   * needs it: a target that failed to ignite is a DURABLE record with no live session,
+   * so marking it `[点火失败]` cannot go through `ctx.sessions`.
+   */
+  async open(id) {
+    const record = this.byId.get(id)
+    if (record === undefined) throw new Error(`session "${id}" not found`)
+    const persistence = this
+    return {
+      async append(events) {
+        persistence.appendCalls.push({ id, count: events.length, options: {} })
+        record.events.push(...events.map(clone))
+      },
+      async flush() {
+        persistence.flushCalls += 1
+        record.flushed = true
+      },
+      async close() {
+        persistence.closeCalls += 1
+        record.closed = true
+      },
+    }
+  }
+
   read(id) {
     const record = this.byId.get(id)
     if (record === undefined) return undefined
@@ -228,6 +255,15 @@ export function makeCtx({ sourceLog, persistence = new FakePersistence(), paths,
           sourceTitleAppends.push(clone({ type, data }))
           return clone({ type, data })
         }
+        // v0.21: the real host accepts a log-only `developer/message` on a live
+        // session — that is the channel the rollback notice uses, and the same one
+        // the constraint re-assertion uses. Recorded separately for the same reason
+        // as titles: appending to `sourceLog.events` would change the event list
+        // every other test slices over.
+        if (type === 'developer/message') {
+          sourceDeveloperAppends.push(clone({ type, data }))
+          return clone({ type, data })
+        }
         throw new Error('the fixture source session is read-only')
       },
     }
@@ -248,6 +284,8 @@ export function makeCtx({ sourceLog, persistence = new FakePersistence(), paths,
    * would change the event list every other test slices over.
    */
   const sourceTitleAppends = []
+  /** v0.21: log-only `developer/message` appends made to the LIVE source session. */
+  const sourceDeveloperAppends = []
   const dataDir = paths?.data ?? mkdtempSync(join(tmpdir(), 'dsh-graft-test-'))
   const currentAgent = { id: currentAgentId ?? sourceLog.session.id }
   const agents = {
@@ -448,6 +486,7 @@ export function makeCtx({ sourceLog, persistence = new FakePersistence(), paths,
     _workspaceRegistry: workspaceRegistry,
     _attachedSessions: attachedSessions,
     _sourceTitleAppends: sourceTitleAppends,
+    _sourceDeveloperAppends: sourceDeveloperAppends,
     _agents: agents,
     _currentAgent: currentAgent,
     pathsData: dataDir,

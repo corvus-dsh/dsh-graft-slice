@@ -20,7 +20,16 @@
  */
 window.__ModuleLoader__.load({
   id: 'dsh-graft-slice',
-  factory(require) {
+  /**
+   * v0.21: `host` is the THIRD symbol the client sandbox hands the factory.
+   *
+   * The documented surface for a Client half is `(require, styles, host)` — the
+   * package-private JSON RPC to this package's own Host half. The panel used
+   * `ctx.get('remote')` instead, and on the live page that threw
+   * `cannot get property "remote.commands" without inject`. Keeping the old path as
+   * a fallback costs nothing; making it the primary makes the panel dead.
+   */
+  factory(require, styles, host) {
     const React = require('react')
     const h = React.createElement
     const PANEL_KEY = 'graft-console'
@@ -55,43 +64,72 @@ window.__ModuleLoader__.load({
 .gc-seg button[aria-pressed="true"]{background:var(--dsw-alias-brand-primary,#3b82f6);color:#fff;opacity:1}
 `
 
-    /** Try the plausible Client→Host command shapes; report which one worked. */
-    function makeBridge(ctx) {
-      const tryCall = async (line) => {
-        const candidates = []
-        const remote = ctx.get && ctx.get('remote')
-        if (remote && remote.commands && typeof remote.commands.execute === 'function') {
-          candidates.push(['remote.commands.execute(line)', () => remote.commands.execute(line, [], undefined)])
-          candidates.push(['remote.commands.execute(null,line)', () => remote.commands.execute(null, line, [], undefined)])
-        }
-        if (remote && remote.session && remote.session.commands && typeof remote.session.commands.execute === 'function') {
-          candidates.push(['remote.session.commands.execute(line)', () => remote.session.commands.execute(line, [], undefined)])
-        }
-        if (remote && typeof remote.execute === 'function') candidates.push(['remote.execute(line)', () => remote.execute(line)])
+    /**
+     * Client -> Host.
+     *
+     * v0.21: the FIRST channel is `host.call(...)`.
+     *
+     * The panel used to probe `ctx.get('remote').commands.execute(...)` shapes. On
+     * the live page that threw `cannot get property "remote.commands" without
+     * inject` — `remote` is a GENERATED namespace that only exists once the
+     * api-remotes client package is declared in `dsh.client.inject`, and even then
+     * the property is guarded per-declaration. The package-private RPC builtin
+     * `host.call(method, args)` reaches this package's own Host half with no such
+     * declaration, so it is tried first and the namespace is the fallback.
+     */
+    function makeBridge(ctx, host) {
+      const callHost = async (method, args) => {
         const failures = []
-        for (const [label, run] of candidates) {
+        // 1. the package-private RPC: no inject declaration needed, no namespace guard.
+        if (host !== undefined && typeof host.call === 'function') {
           try {
-            const settled = await run()
-            const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
-            if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: label }
-            if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: label }
+            const value = await host.call(method, args)
+            return { ok: true, text: typeof value === 'string' ? value : JSON.stringify(value), via: `host.call(${method})` }
           } catch (error) {
-            failures.push(`${label}: ${String((error && error.message) || error)}`)
+            failures.push(`host.call(${method}): ${String((error && error.message) || error)}`)
           }
         }
-        // The Host half is also reachable as a tool; telling the user the exact
-        // command to type beats a spinner that never resolves.
+        // 2. the generated namespace, when this composition declares it.
+        const remote = (() => {
+          try {
+            return ctx && ctx.get ? ctx.get('remote') : undefined
+          } catch (error) {
+            failures.push(`ctx.get('remote'): ${String((error && error.message) || error)}`)
+            return undefined
+          }
+        })()
+        const namespace = remote && remote.commands
+        if (namespace && typeof namespace.execute === 'function') {
+          try {
+            const settled = await namespace.execute(method, args, [], undefined)
+            const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
+            if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
+            if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
+          } catch (error) {
+            failures.push(`remote.commands.execute: ${String((error && error.message) || error)}`)
+          }
+        }
         return {
           ok: false,
           via: 'none',
           text:
-            `无法从页面调用宿主命令（尝试：${failures.length === 0 ? candidates.map(([label]) => label).join(', ') || '无可用通道' : failures.join(' | ')}）。` +
-            `\n请先在输入框直接执行：/${line.replace(/^\//u, '')}`,
+            `面板无法调用宿主（${failures.length === 0 ? '没有可用的 Client→Host 通道' : failures.join(' | ')}）。\n` +
+            `请在输入框直接执行：/${method.startsWith('graft') || method.startsWith('memory') ? method : 'graft-console'}`,
         }
       }
       return {
-        state: () => tryCall('graft-console'),
-        set: (key, value) => tryCall(`graft-console-set ${key} ${value}`),
+        state: () => callHost('graft-console', null),
+        set: (key, value) => callHost('graft-console-set', { rawInput: `${key} ${value}` }),
+        // The panel must render even when the bridge is dead: every method resolves
+        // to an error RESULT, never a thrown exception, so one failed call cannot
+        // blank the slot entry.
+        safe: async (fn, ...args) => {
+          try {
+            return await fn(...args)
+          } catch (error) {
+            return { ok: false, via: 'none', text: String((error && error.message) || error) }
+          }
+        },
       }
     }
 
@@ -446,7 +484,9 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots'],
       apply(ctx) {
-        const bridge = makeBridge(ctx)
+        // v0.21: `host` is threaded through so the bridge has a channel that needs
+        // no inject declaration at all.
+        const bridge = makeBridge(ctx, host)
         ctx.slots.inject('main', () =>
           ctx.slots.register({ name: 'main', key: PANEL_KEY, inject: () => ({ bridge }) }, GraftConsole),
         )

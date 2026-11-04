@@ -39,6 +39,13 @@ function activate(data) {
   resetRetiredSessions()
   const log = makeSourceLog({ turns: 3 })
   const ctx = makeCtx({ sourceLog: log, paths: { data } })
+  // v0.21: mount a working ignition channel.
+  //
+  // Without one, a migration now ROLLS BACK (the source is un-retired) — which is the
+  // correct v0.21 behaviour and the wrong thing to test here: these cases are about
+  // the LEDGER's epoch handling, so the migration they observe must be one that
+  // actually sticks.
+  ctx.sessionController = { async prompt() { return { accepted: true } } }
   apply(ctx, { dataDir: data })
   return { ctx, log }
 }

@@ -1,3 +1,65 @@
+# dsh-graft-slice v0.21.0 — 点火死锁拦截、身份追溯、以及控制台真接通
+
+**发布日期**：2026-11-04　**状态**：预发布（v0.20.0 → v0.21.0）　**测试**：404/404（+17）
+
+## P0：双盲状态（源已冻结、目标没醒）已被拦截
+
+**这是本次最致命的一条**。迁移刻意先退休源、再点火目标——因为源要被替换，不能让它继续接受输入。
+于是存在一个**单边窗口**：源冻结，目标是唯一出路。如果点火最终失败（无通道 / 抛错 / 20s 超时 × 3 轮），
+这个窗口**永不关闭**：源 `pre-step` 返回 `reject`，目标虽在磁盘上但不动。两者都活着，**没有一个接受工作**——
+不是丢了一次迁移，是**丢了一个会话**。
+
+修法：`rollbackFailedIgnition` + `ignitionExhausted`。预算耗尽时执行 **un-retire**：
+
+1. 从 `.retired.json` / `.transferred.json` **文件里**移除（不只是内存）；
+2. 清掉 pre-step 实际读取的**四个**标记：`retiredSessions` / `transferredSessions` / `autoGraftStates` /
+   `pendingGraftSources`（只清台账会留下 `autoGraftStates==='done'`，pre-step 永远返回 `Transferred`——
+   同一双盲状态低一层复现）；
+3. 向源会话写一条 `developer/message`：`[dsh-graft-slice 回滚] 由于新会话点火失败，已为您自动回滚到当前会话，请重试切片。`
+4. 目标保留但标题标记 `[点火失败] <id>`，避免被误认为该继续的会话；
+5. 审计 `ignite-rollback`，含 `sourceRestored` / `noticeAppended`。
+
+三个实现细节值得单说：
+
+- **`persistRetiredStore(ctx, [id])` 不够**。写路径是 read-modify-write，并且会把文件内容**采纳回内存**
+  （为合并两个进程的退休集，这是对的）。所以"先删内存、再写文件"会被同一次写回的采纳步骤撤销——
+  内存看着成功，磁盘上还在，**下次重启照样冻结**。`unRetireDurably` 在锁内先改文件，再让内存与文件一致。
+- **回滚提示只写一次**：单次路径与队列路径可能都到达回滚，两条同样的提示读起来像两次独立故障。
+- **成功点火绝不回滚**：那会复活用户已经离开的会话，正是退休机制要阻止的「两个分叉目标」。
+
+## P1：切片身份元数据（容灾追溯）
+
+每个目标的第一条用户消息里多一行**机器可读**的溯源：
+
+```
+<!-- graft-identity: {"sourceSessionId":"session-…","boundarySeq":4043,"generation":1} -->
+```
+
+HTML 注释形状 ⇒ UI 里渲染为无、模型不会当指令；`parseIdentityMetadata` 可逆解析。
+目标被污染或需要重切时，能从一条普通日志读取里拿到**确切**的 source / boundary / generation，
+而不是让人去读散文猜。
+
+## 修复：控制台 `cannot get property "remote.commands" without inject`
+
+重启后两个面板报这条错误、全部不可操作。根因不是笔误：Client 侧 `remote` 是**生成的命名空间**，
+只有当 `dsh.client.inject` 声明了 api-remotes 包时才存在，且属性读取受守卫。
+
+两处修复：
+
+1. `dsh.client.inject` 声明 `@deepseek-ai/dsh-api-remotes` + `@deepseek-ai/dsh-client-ui-conversation`；
+2. bridge 改为优先走 `host.call(method, args)`——**包私有 RPC，无需任何 inject 声明**；
+   生成的命名空间降为兜底。并且每个方法**返回结果而不抛异常**，所以一个通道死掉不会让整个面板崩成空白。
+
+## 验证
+17 条新测试：`v021-ignition-rollback`（7，含用户点名的**「点火永远超时 ⇒ 旧会话被成功 un-retire」**验收）、
+`v021-identity-metadata`（5）、`v021-console-bridge`（5，用**真实 client.js 源码**求值，不是复制品）。
+404/404 全绿；`check-docs` 27 facts；`verify-bundle` 27/27。
+
+技术债登记见 [ARCHITECTURE.md](./ARCHITECTURE.md)（TD-1..TD-5，含 `index.ts` 体积）；
+**本次发版不做任何大规模代码搬迁**。
+
+---
+
 # dsh-graft-slice v0.20.0 — 交接任务看板（Task Board）
 
 **发布日期**：2026-11-04　**状态**：预发布（v0.19.0 → v0.20.0）　**测试**：387/387（+11）

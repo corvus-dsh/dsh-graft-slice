@@ -3587,6 +3587,14 @@ function ignitionPath(): string {
 }
 
 const pendingIgnitions = new Map<string, PendingIgnition>()
+/**
+ * v0.21: sources already told about a rollback, in this process.
+ *
+ * Both the single-shot path and the queue path can reach the rollback for the same
+ * migration; without this, the user gets the same notice twice and reads it as two
+ * separate failures.
+ */
+const rollbackNoticed = new Set<string>()
 
 export function buildIgnitionPrompt(settings: Pick<Required<GraftConfig>, 'ignitionPrompt'>): string {
   const custom = settings.ignitionPrompt.trim()
@@ -3783,33 +3791,275 @@ export async function attemptIgnition(
 }
 
 /**
+ * v0.21 P0 — the DOUBLE-BLIND ROLLBACK.
+ *
+ * THE FAILURE THIS PREVENTS, AND WHY IT IS THE WORST ONE
+ *
+ * The migration retires the source BEFORE it ignites the target, because the whole
+ * point is that the user stops typing into a session that is about to be replaced.
+ * So for a window the system is deliberately one-sided: the source is frozen and
+ * the target is the only way forward.
+ *
+ * If the ignition then fails — no channel, a throwing prompt, a 20s timeout, three
+ * activation rounds of the same — that window never closes. The source is retired,
+ * so its pre-step returns `{kind:'reject'}` and the user cannot continue there; the
+ * target is durable but inert, so nothing happens there either. Both sessions are
+ * alive on disk and NEITHER accepts work. That is the double-blind state: not a lost
+ * migration, a lost SESSION.
+ *
+ * So the last resort is an UN-RETIRE: put the source back exactly as it was before
+ * the migration (out of `.retired.json`, out of `.transferred.json`, and out of the
+ * in-memory sets), tell it in its own log why it is back, and let the user retry.
+ *
+ * Deliberately NOT attempted when the target did wake up: a rollback that fires on
+ * a successful ignition would resurrect a session the user has already left, which
+ * is the "two divergent targets" failure the retirement machinery exists to stop.
+ */
+export const ROLLBACK_NOTICE_MARKER = '[dsh-graft-slice 回滚]'
+
+export const ROLLBACK_NOTICE =
+  `${ROLLBACK_NOTICE_MARKER} 由于新会话点火失败，已为您自动回滚到当前会话，请重试切片。`
+
+/**
+ * v0.21 P0: the TRUE un-retire.
+ *
+ * `persistRetiredStore(ctx, [id])` is not enough, and the reason is subtle: the write
+ * path is a read-modify-write that ADOPTS the file's contents back into memory (which
+ * is correct for merging two processes' retirements). So a removal that runs before
+ * the file is rewritten can be undone by that same adopt pass on the next write — the
+ * id comes back from disk and the session is frozen again, durably, on the next
+ * restart. The rollback would look successful in memory and be a no-op on disk.
+ *
+ * This function does the removal in the only order that holds: remove from the file
+ * under the lock, and make the in-memory set agree with the file afterwards.
+ */
+function unRetireDurably(ctx: PluginContextLike, sessionId: string): boolean {
+  let restored = false
+  try {
+    mkdirSync(dirname(retiredStorePath), { recursive: true })
+    withFileLock(retiredStorePath, () => {
+      const remaining = new Set(
+        ledgerArray(retiredStorePath).filter((value): value is string => typeof value === 'string'),
+      )
+      remaining.delete(sessionId)
+      writeLedgerAtomic(retiredStorePath, [...remaining].sort())
+      // The memory set is made to AGREE with the file, not merged into: after an
+      // explicit removal, "the file does not have it" is the authoritative answer.
+      retiredSessions.delete(sessionId)
+      restored = !remaining.has(sessionId)
+    })
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(`[dsh-graft-slice] un-retire write failed for ${sessionId}: ${String((error as any)?.message ?? error)}`)
+    } catch {
+      // Logging must not change the rollback result.
+    }
+    return false
+  }
+  try {
+    mkdirSync(dirname(transferredStorePath), { recursive: true })
+    withFileLock(transferredStorePath, () => {
+      const remaining = { ...(ledgerRecord(transferredStorePath) as Record<string, unknown>) }
+      delete remaining[sessionId]
+      writeLedgerAtomic(transferredStorePath, remaining)
+      transferredSessions.delete(sessionId)
+    })
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] un-retire transfer write failed for ${sessionId}: ${String((error as any)?.message ?? error)}`,
+      )
+    } catch {
+      // Logging must not change the rollback result.
+    }
+  }
+  // Belt and braces for the in-memory gate the pre-step actually reads.
+  //
+  // The pre-step consults FOUR per-session marks, not just the two ledgers: the
+  // retired set, the transferred map, the auto-graft STATE machine, and the deferred
+  // graft queue. Clearing only the ledgers leaves `autoGraftStates === 'done'`, which
+  // returns `reason: 'Transferred'` forever — the session would be un-retired on disk
+  // and still frozen in the running process, which is the same double-blind one layer
+  // down.
+  retiredSessions.delete(sessionId)
+  transferredSessions.delete(sessionId)
+  autoGraftStates.delete(sessionId)
+  autoGraftInFlight.delete(sessionId)
+  pendingGraftSources.delete(sessionId)
+  pendingConfirms.delete(sessionId)
+  // The "this id is a target we created" mark belongs to the TARGET, and a rollback
+  // ends that relationship: the source is a plain session again and must not inherit
+  // the target's grace-window protection.
+  graftTargets.delete(sessionId)
+  return restored || !retiredSessions.has(sessionId)
+}
+
+export interface IgnitionRollback {
+  attempted: boolean
+  sourceRestored: boolean
+  noticeAppended: boolean
+  /** Target left in place and marked, so it is visible but not picked up. */
+  targetId: string
+  reason?: string
+}
+
+/**
+ * v0.21: undo a migration whose target never started.
+ *
+ * Order matters: the ledgers are restored FIRST, because an in-memory-only rollback
+ * dies on the next restart and leaves the user exactly as stuck as before.
+ */
+export async function rollbackFailedIgnition(
+  ctx: PluginContextLike,
+  sourceSessionId: string,
+  targetId: string,
+  reason: string,
+): Promise<IgnitionRollback> {
+  const out: IgnitionRollback = {
+    attempted: true,
+    sourceRestored: false,
+    noticeAppended: false,
+    targetId,
+    reason,
+  }
+  if (sourceSessionId.length === 0) {
+    return { ...out, attempted: false, reason: 'no source session to roll back to' }
+  }
+  try {
+    retiredSessions.delete(sourceSessionId)
+    transferredSessions.delete(sourceSessionId)
+    // v0.21: durable, in the order that survives a restart — see `unRetireDurably`.
+    out.sourceRestored = unRetireDurably(ctx, sourceSessionId)
+  } catch (error) {
+    out.reason = `${reason}; ledger rollback failed: ${String((error as any)?.message ?? error)}`
+  }
+  // Tell the human, in the session they will actually be looking at. A rollback that
+  // is only visible in an audit file reads as "nothing happened, try again" — and
+  // repeating the same failed migration is the wrong next move.
+  //
+  // v0.21: written at most ONCE per source. Both the single-shot path (this call
+  // exhausted the budget) and the queue path (a restart found the budget spent) can
+  // reach here for the same migration, and two identical notices read as two
+  // separate failures.
+  if (rollbackNoticed.has(sourceSessionId)) {
+    out.noticeAppended = true
+  } else {
+    try {
+      const live = ctx.sessions.get(sourceSessionId) as any
+      if (live !== undefined && typeof live.append === 'function') {
+        live.append('developer/message', {
+          turn: 0,
+          step: 0,
+          message: {
+            id: `graft-rollback-${sourceSessionId}-${Date.now().toString(36)}`,
+            role: 'developer',
+            content: [{ type: 'text', text: ROLLBACK_NOTICE }],
+          },
+        })
+        rollbackNoticed.add(sourceSessionId)
+        out.noticeAppended = true
+      }
+    } catch (error) {
+      out.reason = `${out.reason ?? reason}; notice failed: ${String((error as any)?.message ?? error)}`
+    }
+  }
+  // The target stays on disk — it may be perfectly good and just un-wakeable — but it
+  // must not look like the session to continue. A title is visible and survives a
+  // reload; the retirement of the source is what actually stops the split.
+  //
+  // The target is a DURABLE artifact, not a live session: nobody has resumed it, which
+  // is the whole problem. So the mark is appended through sessionPersistence when a
+  // live handle is absent, and a failure to mark is reported rather than hidden.
+  try {
+    const target = ctx.sessions.get(targetId) as any
+    if (target !== undefined && typeof target.append === 'function') {
+      target.append('session/title', {
+        title: `[点火失败] ${targetId}`,
+        messageSeqs: [],
+        source: { kind: 'user' },
+      })
+    } else {
+      const persistence = (ctx.get as any)?.('sessionPersistence')
+      if (isRecord(persistence) && typeof persistence.open === 'function') {
+        const handle = await persistence.open(targetId)
+        if (handle !== undefined && typeof handle.append === 'function') {
+          await handle.append([
+            {
+              type: 'session/title',
+              time: Date.now(),
+              data: { title: `[点火失败] ${targetId}`, messageSeqs: [], source: { kind: 'user' } },
+            },
+          ])
+          if (typeof handle.flush === 'function') await handle.flush()
+          if (typeof handle.close === 'function') await handle.close()
+        }
+      }
+    }
+  } catch {
+    // A missing target is not a rollback failure; the title is cosmetic evidence.
+  }
+  try {
+    appendGraftAudit({
+      at: new Date().toISOString(),
+      kind: 'ignite-rollback',
+      sessionId: sourceSessionId,
+      targetSessionId: targetId,
+      detail: `${reason}; sourceRestored=${out.sourceRestored} noticeAppended=${out.noticeAppended}`,
+    })
+  } catch {
+    // Evidence only.
+  }
+  return out
+}
+
+/**
+ * v0.21: has this target exhausted its ignition budget?
+ *
+ * `IGNITION_MAX_ATTEMPTS` activation rounds is the contract the user asked for (20s
+ * timeout x 3). Kept as a predicate so the rollback decision is testable without
+ * waiting for a timer.
+ */
+export function ignitionExhausted(entry: PendingIgnition | undefined): boolean {
+  return entry !== undefined && entry.attempts >= IGNITION_MAX_ATTEMPTS
+}
+
+export interface IgnitionAttemptWithRollback extends IgnitionResult {
+  /** Present when the attempt exhausted its budget and the source was restored. */
+  rollback?: IgnitionRollback
+}
+
+/**
  * v0.19: consume the queue — one activation, one attempt per pending target.
  *
  * Called at the end of `apply()`. It retries what a crash or a missing channel left
  * behind, and it GIVES UP after `IGNITION_MAX_ATTEMPTS` instead of retrying forever:
  * a target nobody can start is a fact to report, not a loop.
+ *
+ * v0.21: giving up now means ROLLING BACK. Before this, "gave up" deleted the queue
+ * entry and left the source retired — the double-blind state, permanently.
  */
 export async function resumePendingIgnitions(
   ctx: PluginContextLike,
   settings: Required<GraftConfig>,
-): Promise<Array<{ targetId: string; ok: boolean; reason?: string }>> {
-  const out: Array<{ targetId: string; ok: boolean; reason?: string }> = []
+): Promise<Array<{ targetId: string; ok: boolean; reason?: string; rollback?: IgnitionRollback }>> {
+  const out: Array<{ targetId: string; ok: boolean; reason?: string; rollback?: IgnitionRollback }> = []
   for (const entry of [...pendingIgnitions.values()]) {
     if (!settings.igniteTarget) break
-    if (entry.attempts >= IGNITION_MAX_ATTEMPTS) {
+    if (ignitionExhausted(entry)) {
       pendingIgnitions.delete(entry.targetId)
       persistPendingIgnitions(ctx)
-      out.push({ targetId: entry.targetId, ok: false, reason: `gave up after ${entry.attempts} attempts` })
-      try {
-        appendGraftAudit({
-          at: new Date().toISOString(),
-          kind: 'ignite-failed',
-          sessionId: entry.targetId,
-          detail: `gave up after ${entry.attempts} attempts; the target is durable and can be opened by hand`,
-        })
-      } catch {
-        // Evidence only.
-      }
+      const rollback = await rollbackFailedIgnition(
+        ctx,
+        entry.sourceSessionId,
+        entry.targetId,
+        `gave up after ${entry.attempts} attempts`,
+      )
+      out.push({
+        targetId: entry.targetId,
+        ok: false,
+        reason: `gave up after ${entry.attempts} attempts; rolled back to ${entry.sourceSessionId}`,
+        rollback,
+      })
       continue
     }
     const result = await attemptIgnition(ctx, settings, entry.sourceSessionId, entry.targetId)
@@ -5200,6 +5450,66 @@ export function buildInjectionPlan(
  * 旧格式把 `{"kind":"persistent-capability-seed",...}` 放进 user/message，
  * 轻量模型会对着括号发呆、或把字段名当指令复读。改成一段陈述 + 列表。
  */
+/**
+ * v0.21 P1: the machine-readable provenance of a handoff.
+ *
+ * THE QUESTION IT ANSWERS
+ *
+ * "This target is behaving oddly — where did it actually come from?" The pipeline has
+ * always stated the chain depth and the source id as PROSE, which a human can read and
+ * a program cannot. When a target is polluted, or when a later generation needs to be
+ * re-cut from the true origin, the coordinates must be exact: which session, which
+ * boundary seq, which generation.
+ *
+ * Shape: one HTML comment. It renders as nothing in a UI (so it cannot leak into what
+ * the user sees), it greps as one line, and it is stable enough to be parsed by a
+ * future tool that wants to walk the chain backwards.
+ */
+export const IDENTITY_METADATA_MARKER = 'graft-identity'
+
+export interface GraftIdentity {
+  sourceSessionId: string
+  boundarySeq: number
+  generation: number
+  cwd?: string
+  at?: string
+}
+
+export function renderIdentityMetadata(identity: GraftIdentity): string {
+  const payload: Record<string, unknown> = {
+    sourceSessionId: identity.sourceSessionId,
+    boundarySeq: identity.boundarySeq,
+    generation: identity.generation,
+  }
+  if (identity.cwd !== undefined && identity.cwd.length > 0) payload.cwd = identity.cwd
+  if (identity.at !== undefined && identity.at.length > 0) payload.at = identity.at
+  return `<!-- ${IDENTITY_METADATA_MARKER}: ${JSON.stringify(payload)} -->`
+}
+
+/** Read the provenance back out of a message (or any text that carries the block). */
+export function parseIdentityMetadata(text: string): GraftIdentity | undefined {
+  if (typeof text !== 'string') return undefined
+  const match = new RegExp(`<!--\\s*${IDENTITY_METADATA_MARKER}:\\s*(\\{.*?\\})\\s*-->`, 'u').exec(text)
+  if (match === null) return undefined
+  try {
+    const parsed = JSON.parse(match[1]) as Record<string, unknown>
+    const sourceSessionId = typeof parsed.sourceSessionId === 'string' ? parsed.sourceSessionId : ''
+    const boundarySeq = Number(parsed.boundarySeq)
+    const generation = Number(parsed.generation)
+    if (sourceSessionId.length === 0 || !Number.isFinite(boundarySeq) || !Number.isFinite(generation)) return undefined
+    return {
+      sourceSessionId,
+      boundarySeq,
+      generation,
+      ...(typeof parsed.cwd === 'string' && parsed.cwd.length > 0 ? { cwd: parsed.cwd } : {}),
+      ...(typeof parsed.at === 'string' && parsed.at.length > 0 ? { at: parsed.at } : {}),
+    }
+  } catch {
+    // A malformed block is "no metadata", never a crash on the read path.
+    return undefined
+  }
+}
+
 function goalMessage(
   cwd: string,
   goal: string,
@@ -5217,6 +5527,8 @@ function goalMessage(
    * it is generation 2.
    */
   generation = 1,
+  /** v0.21 P1: the boundary the tape was cut at, for the identity metadata. */
+  boundarySeqForIdentity = 0,
 ): Record<string, any> {
   // v7.0 B4: read as a continuation, not as a handoff notice.
   //
@@ -5261,6 +5573,20 @@ function goalMessage(
     '',
     `graft_generation: ${generation}（第 ${generation} 代迁移产物${generation === 1 ? '：由原始会话直接切片' : ''}）`,
   ]
+  // v0.21 P1: the IDENTITY METADATA, in the PendingState.
+  //
+  // Why this is worth a block of its own: the pipeline has always carried the chain
+  // depth as PROSE ("graft_generation: 3（第 3 代迁移产物）") and the source id in a
+  // sentence, and neither survives a machine reader. When a target turns out to be
+  // poisoned — the tape carried the wrong error, the boundary was wrong, the
+  // constraints were inherited from a session that no longer exists — the questions
+  // are exact: WHICH session, WHICH boundary seq, WHICH generation. Answering them
+  // from prose means a human re-reading a log; answering them from a machine-readable
+  // line means `graft_read_result` can be pointed at the exact coordinates.
+  //
+  // Deliberately HTML-comment shaped so it renders as nothing in a UI, and
+  // deliberately one line so a reader can grep it.
+  lines.push('', renderIdentityMetadata({ sourceSessionId, boundarySeq: boundarySeqForIdentity, generation, cwd }))
   // v0.14 CHAIN GUARD: state the re-graft prohibition in the durable channel too.
   // The tool layer refuses it (see autoGraftIfNeeded); saying it here is what stops
   // the model from *asking* for a slice on its very first turn.
@@ -5625,6 +5951,9 @@ function buildInjectionEvents(
       plan.constraints,
       redlineBlock,
       plan.generation,
+      // v0.21 P1: the boundary seq travels in the identity metadata, so a later
+      // reader can re-cut from the exact origin instead of hunting for it.
+      Number(plan.boundary?.boundarySeq ?? 0),
     ),
     surface: true,
   })
@@ -7383,6 +7712,12 @@ export function resetRetiredSessions(): void {
   watermarkEscalations.clear()
   watermarkEscalated.clear()
   forcedCutMarks.clear()
+  // v0.21: the ignition queue and the rollback notice ledger are session state too.
+  // A reset that kept them would (a) leave a stale "already noticed" mark that
+  // suppresses the next rollback's notice, and (b) leave a queued ignition that
+  // fires against a session the reset just un-retired.
+  pendingIgnitions.clear()
+  rollbackNoticed.clear()
   // v7.4: a reset must also drop the resume grace, or a test that resumes a
   // session poisons every later test that expects the watermark to fire.
   autoGraftSuppressedUntil.clear()
@@ -7392,6 +7727,19 @@ export function resetRetiredSessions(): void {
 /** Test/diagnostic view of graft-target marks (v7.0 C2). */
 export function getGraftTargets(): ReadonlyMap<string, GraftTargetMark> {
   return graftTargets
+}
+
+/**
+ * v0.21: drop the "this id is a target we created" marks.
+ *
+ * Exported for tests and for an operator who deliberately repurposes an id. The marks
+ * are what protect a fresh target from re-grafting itself, so clearing them is an
+ * explicit act rather than something a reset does implicitly — except in the test
+ * reset, where a leaked mark makes the next case behave differently from an isolated
+ * run and hides a real regression.
+ */
+export function clearGraftTargetsForTest(): void {
+  graftTargets.clear()
 }
 
 /**
@@ -8849,16 +9197,34 @@ async function graftSliceAndInjectUnlocked(
     // the retirement transaction has committed, so this is the exact moment the
     // target becomes a session the host can resume. Ask the host to start it.
     //
-    // Deliberately AFTER the durability barrier and BEFORE the report, and
-    // deliberately non-fatal: a session that exists but did not wake is reported
-    // (and retried from `.graft-pending-ignition.json`), while a failed ignition
-    // must never roll back a completed migration.
-    const ignition = await attemptIgnition(ctx, settings, sourceId, newId)
+    // v0.21 P0: an ignition that fails here is NOT the end of the story. The first
+    // attempt failing is normal (a channel that is not mounted yet, a cold session
+    // the host has not opened); what must never happen is the LAST attempt failing
+    // while the source stays retired. That is the double-blind state, and it is
+    // handled below and in `resumePendingIgnitions`.
+    let ignition = await attemptIgnition(ctx, settings, sourceId, newId)
+    // The queue records the attempt; if this single call already exhausted the
+    // budget (e.g. the timeout path is instant), roll back now rather than leaving
+    // the user blocked until the next activation.
+    if (!ignition.ok && ignitionExhausted(pendingIgnitions.get(newId))) {
+      const rollback = await rollbackFailedIgnition(
+        ctx,
+        sourceId,
+        newId,
+        ignition.reason ?? 'ignition failed',
+      )
+      pendingIgnitions.delete(newId)
+      persistPendingIgnitions(ctx)
+      ignition = { ...ignition, rollback }
+    }
     if (!ignition.ok) {
       try {
         ctx.logger?.warn?.(
           `[dsh-graft-slice] ignition ${ignition.attempted ? 'failed' : 'skipped'} for ${newId}: ` +
-            `${ignition.reason ?? 'unknown'}; the target is durable and queued for a retry`,
+            `${ignition.reason ?? 'unknown'}; ` +
+            (ignition.rollback?.sourceRestored === true
+              ? `source ${sourceId} was RESTORED (not left retired)`
+              : 'the target is durable and queued for a retry'),
         )
       } catch {
         // Logging must not change the migration result.
