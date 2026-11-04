@@ -1,5 +1,11 @@
 # 0.2.2-rc.1 兼容性修复报告
 
+> **2026-11-04 追加（真机切片后）**：本报告第 4.2 节明确写过「未在真机跑过完整切片」。真机执行后发现了两个本审计未覆盖的缺陷：
+> - **P0**：0.2.2 的 `sessions.prepare()` 返回**只读** Session；在 `enter()` + `announce()` 之前调用 `append()` 会抛 `cannot append outside a SessionStore`。旧实现用 `prepared.append()` 构造磁带，物理点火因此彻底失败。
+> - **P1**：交接看板的「⏭️ 待开始」列在若干形状下会回退到旧 prose / 旧 todo，而不是最新一次 `todo_write`。
+>
+> 两者均已修复并有回归测试；详见 `P0-P1-P2-修复报告-2026-11-04.md`。本报告其余结论仍然有效。
+
 **运行时**：0.2.2-rc.1（`plugin_manager list_version_exemptions` 实测确认）
 **审计方式**：以 `cordis_inspect_query` 读取**实时契约**为准，不以升级说明为准——说明写「改了什么」，检查写「现在是什么」。
 **自报无豁免**：`exemptions: {}`，两个插件均满足运行时版本要求。
@@ -95,6 +101,44 @@ const request = () => ({
 ```
 
 **结论**：形状与 0.2.2 完全一致，无需改动。指令中「确保提供合法的 `{ id: string }` agent」对 `sessionController.prompt` **不适用**——它不要 agent。该要求只对 `commands.execute` 有效，而后者在 v0.30 已用常量占位 agent 满足。
+
+#### 1.3.1 真机 P0 更正（2026-11-04 19:40）：`signal` 不是可选的
+
+上面「无需改动」的结论**错了一半**：`request` 形状对，但**第二个参数 `signal` 是必填的**，而我们一直传 `undefined`。
+
+Host 实现的第一行就是 `signal.throwIfAborted()`（"caller cancellation before prompt admission"），所以每次点火都在**写入任何事件之前**就崩：
+
+```
+sessionController.prompt: Cannot read properties of undefined (reading 'throwIfAborted')
+```
+
+真机证据（`.dsh/profiles/desktop/data/dsh-graft-slice/.graft-audit.jsonl`）：
+
+| 时间 (UTC) | kind | target | detail |
+|---|---|---|---|
+| 2026-11-04T11:40:39.599Z | `ignite-failed` | `auto-graft-mw21oowu-e7kcmk` | `sessionController.prompt: Cannot read properties of undefined (reading 'throwIfAborted')` |
+
+后果是「双盲」的最坏形态：源会话已退休、目标已落盘但**永远静止**，用户在侧边栏看到一个不会自己开工的会话——即用户报告的「未自动唤醒，自动点火失效」。
+
+**修复**（`src/index.ts` `ignitionDeadline()` / `igniteTargetSession()`）：
+
+1. 每次点火构造真实 `AbortController`，把 `signal` 作为第二参数交给 `sessionController.prompt` 与 `remote.session.prompt`；该 signal 同时是 20s 超时载体（abort + `Promise.race` 兜底）。
+2. 失败原因里区分「Host 主动 abort」与「我们自己的 deadline」，写进审计行。
+3. 重试路径（`resumePendingIgnitions` → `attemptIgnition(..., {retry:true})`）新增两道闸：
+   - `sessionController.state({sessionId}, signal).active === true` → 目标已活，视为已点火，**不再重复下发**；
+   - 目标日志事件数超过切片写入的 `seedEvents`（记录在 `.graft-targets.json`）→ 目标已被驱动（人打开过或已自跑），同样不再重复下发。
+   两者都是为了不让「重试」把同一条指令变成目标眼里的两轮用户意图，也避免在目标其实已经醒来时误触发回滚、把已退休的源会话复活。
+
+回归测试：`test/v032-ignition-signal.test.mjs`（10 例，含一个**忠实于 0.2.2 的假控制器**——`prompt(request, signal)` 第一行 `signal.throwIfAborted()`，传 `undefined` 必然失败，因此该 bug 无法再次悄悄复发）。
+
+#### 1.3.2 同一链路上的第二个缺陷：未知读取被当成「已点火」
+
+审计里另有一条 `{"kind":"ignite","detail":"ok (already ignited)"}`，但目标日志里从未有过点火 `user/message`。原因：
+
+- 0.2.2 的 Remote 错误码是 **`session/not-found`**（连字符），旧判定 `/not found/` 匹配不到；
+- 更根本的是默认值反了 —— `sessionQuery.readSession` 的契约写明「persistence / header 兼容 / replay 校验失败都会 throw」，而目标 live 且正在跑时 replay 校验失败属正常现象，却被读成「已点火」，于是清空待重试队列、永不唤醒。
+
+修复：`SESSION_MISSING = /session\/not[\s_-]?found|not[\s_-]found|enoent|no such/iu`；只有确定不存在才返 `false`（照常点火，`prompt` 自身会 resume 冷会话），其余未知一律报 `ok:false` 并**保留队列**；重试路径把 `sessionController.state().active` 判活提到日志读取之前。
 
 ### 1.4 `tokenMeter` 与水位计算
 

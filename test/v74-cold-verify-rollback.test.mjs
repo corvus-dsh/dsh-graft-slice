@@ -33,22 +33,19 @@ function scaffold() {
   return { log, ctx, persistence, dir }
 }
 
-test('v7.4 P0-1a: an invalid tape never reaches persistence — validation runs first', async () => {
+test('v7.4 P0-1a: an invalid target header never reaches persistence — preflight runs first', async () => {
   resetRetiredSessions()
   const { log, ctx, persistence, dir } = scaffold()
   apply(ctx, { dataDir: dir, verifyReadBack: true })
 
-  // Corrupt the tape in memory: fewer events than the plan says must exist. The
-  // pre-write check catches this BEFORE `persistence.create`, which is the whole
-  // point of the reordering — the host has no delete, so avoidance beats cleanup.
+  // Corrupt the prepared header. 0.2.2 made the prepared session read-only, so
+  // the old "truncate snapshotEvents" probe no longer models the tape path; the
+  // invariant under test is unchanged though: a target that fails preflight must
+  // be rejected BEFORE `persistence.create`, because the host has no delete.
   const realPrepare = ctx.sessions.prepare.bind(ctx.sessions)
   ctx.sessions.prepare = (id, options) => {
     const session = realPrepare(id, options)
-    const realSnapshot = session.snapshotEvents.bind(session)
-    session.snapshotEvents = (from) => {
-      const all = realSnapshot(from)
-      return from === undefined || from === 0 ? all.slice(0, Math.max(0, all.length - 1)) : all
-    }
+    session.header.isSeeded = true
     return session
   }
 
@@ -57,7 +54,7 @@ test('v7.4 P0-1a: an invalid tape never reaches persistence — validation runs 
       ctx._tools
         .get('graft_slice_and_inject')
         .execute({ sourceSessionId: log.session.id, newSessionId: 'prewrite-target' }, {}),
-    /APPEND_COUNT_MISMATCH|cold/iu,
+    /SEEDED_HEADER|GRAFT_ERROR/iu,
   )
 
   // Nothing was reserved, so nothing has to be cleaned up.

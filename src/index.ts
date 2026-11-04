@@ -1370,6 +1370,79 @@ function looksLikeToolDump(text: string): boolean {
   return (text.match(/[A-Za-z]:\\/gu) ?? []).length >= 4
 }
 
+/**
+ * v0.32 P1: recognise the todo tool even when it arrives under a namespace.
+ *
+ * The live host registers `todo_write`, but a preset/toolset is allowed to expose
+ * it as `mcp__server__todo_write`, `foo.todo_write` or `foo/todo-write`. An exact
+ * `name === 'todo_write'` test then misses the newest write and the board keeps
+ * showing the previous list — the exact "old P1-1/P1-2" symptom.
+ */
+const TODO_TOOL_NAME = /(?:^|[^a-z0-9])todo[_-]?write$/iu
+
+function isTodoWriteTool(name: string): boolean {
+  return TODO_TOOL_NAME.test(name.trim())
+}
+
+/**
+ * v0.32 P1: parse a todo_write argument payload from every shape the log may
+ * carry: a JSON string (the public `tool/call.arguments` contract), an
+ * already-parsed object (older plugin / fixture), a bare array, or a `todos`
+ * field that is itself a JSON string.
+ *
+ * `undefined` means "this call did not carry a usable list"; it must NOT replace
+ * the previous state with an empty list.
+ */
+function todoItemsFromArguments(raw: unknown): Array<{ text: string; completed: boolean }> | undefined {
+  let payload: any
+  if (typeof raw === 'string') {
+    try {
+      payload = JSON.parse(raw)
+    } catch {
+      return undefined
+    }
+  } else if (isRecord(raw)) {
+    payload = raw
+  } else {
+    return undefined
+  }
+  let list: unknown = Array.isArray(payload) ? payload : payload?.todos
+  if (typeof list === 'string') {
+    try {
+      list = JSON.parse(list)
+    } catch {
+      return undefined
+    }
+  }
+  if (!Array.isArray(list)) return undefined
+  const next: Array<{ text: string; completed: boolean }> = []
+  for (const item of list) {
+    if (!isRecord(item)) continue
+    const content = String(item.content ?? item.text ?? item.title ?? '').replace(/\s+/gu, ' ').trim()
+    if (content.length === 0) continue
+    const status = String(item.status ?? '')
+    next.push({
+      text: truncateEnd(content, 300).text,
+      completed: status === 'completed' || status === 'done' || item.completed === true,
+    })
+  }
+  return next
+}
+
+/** Stable seq order: a concatenated or replayed log must never let an older write win. */
+function orderedBySeq(events: readonly SessionEventLike[]): SessionEventLike[] {
+  return [...events].sort((left, right) => {
+    const a = Number(left.seq)
+    const b = Number(right.seq)
+    const aValid = Number.isFinite(a)
+    const bValid = Number.isFinite(b)
+    if (!aValid && !bValid) return 0
+    if (!aValid) return 1
+    if (!bValid) return -1
+    return a - b
+  })
+}
+
 export function extractTaskState(events: readonly SessionEventLike[]): TaskState {
   const reports: string[] = []
   const reportSeen = new Set<string>()
@@ -1389,6 +1462,25 @@ export function extractTaskState(events: readonly SessionEventLike[]): TaskState
   let latestTodoSeq: number | undefined
   let latestTodoTurn: number | undefined
   let lastTurn = 0
+
+  // v0.32 P1: read in SEQ order, never in array order. `readSession` is normally
+  // monotonic, but a rebuilt/concatenated snapshot (live tail + persisted prefix)
+  // is not guaranteed to be. Taking "the last todo_write in the array" then picked
+  // an older write and the board showed a plan from dozens of turns ago.
+  const ordered = orderedBySeq(events)
+
+  // A failed todo_write never changed the model's state. Without this, the
+  // arguments of a REJECTED call override the last successful list — again an
+  // older board. A call with no result yet stays eligible: it is the newest
+  // intent and the surrounding step has not closed.
+  const resultFailed = new Map<string, boolean>()
+  for (const event of ordered) {
+    if (event.type !== 'tool/result') continue
+    const message = event.data?.message
+    const callId = String(message?.source?.callId ?? message?.toolCallId ?? '')
+    if (callId.length === 0) continue
+    resultFailed.set(callId, message?.isError === true || event.data?.error !== undefined)
+  }
 
   const addReport = (text: string): void => {
     const normalized = text.replace(/\s+/gu, ' ').trim()
@@ -1416,7 +1508,7 @@ export function extractTaskState(events: readonly SessionEventLike[]): TaskState
     reports.push(line)
   }
 
-  for (const event of events) {
+  for (const event of ordered) {
     if (event.type === 'turn/start') {
       const value = Number(event.data?.turn)
       if (Number.isFinite(value)) lastTurn = value
@@ -1426,27 +1518,20 @@ export function extractTaskState(events: readonly SessionEventLike[]): TaskState
       const name = String(event.data?.name ?? '')
       const callId = String(event.data?.callId ?? '')
       if (callId.length > 0) callNames.set(callId, name)
-      if (name === 'todo_write') {
-        try {
-          const payload = JSON.parse(String(event.data?.arguments ?? '{}'))
-          const list = Array.isArray(payload) ? payload : Array.isArray(payload?.todos) ? payload.todos : []
-          const next: Array<{ text: string; completed: boolean }> = []
-          for (const item of list) {
-            if (!isRecord(item)) continue
-            const content = String(item.content ?? item.text ?? item.title ?? '').replace(/\s+/gu, ' ').trim()
-            if (content.length === 0) continue
-            const status = String(item.status ?? '')
-            next.push({
-              text: truncateEnd(content, 300).text,
-              completed: status === 'completed' || status === 'done' || item.completed === true,
-            })
+      if (isTodoWriteTool(name)) {
+        // A rejected write did not land. Keep the last successful state.
+        if (callId.length > 0 && resultFailed.get(callId) === true) continue
+        const next = todoItemsFromArguments(event.data?.arguments)
+        if (next !== undefined) {
+          const seq = Number(event.seq)
+          // Sorting already guarantees this; the guard keeps the invariant local
+          // even if a caller passes duplicate/shadowed seqs.
+          if (latestTodoSeq === undefined || !Number.isFinite(seq) || seq >= latestTodoSeq) {
+            // Replace, never merge.
+            latestTodoWrite = next
+            latestTodoSeq = Number.isFinite(seq) ? seq : latestTodoSeq
+            latestTodoTurn = lastTurn
           }
-          // Replace, never merge.
-          latestTodoWrite = next
-          latestTodoSeq = Number(event.seq)
-          latestTodoTurn = lastTurn
-        } catch {
-          // Malformed tool arguments are not a task-state failure.
         }
       }
       continue
@@ -1503,7 +1588,10 @@ export function extractTaskState(events: readonly SessionEventLike[]): TaskState
   )
 
   // v7.4: how stale is this snapshot?
-  const lastSeq = events.length > 0 ? Number(events[events.length - 1]?.seq) : 0
+  const lastSeq = ordered.reduce((max, event) => {
+    const seq = Number(event?.seq)
+    return Number.isFinite(seq) ? Math.max(max, seq) : max
+  }, 0)
   const ageEvents =
     latestTodoSeq === undefined || !Number.isFinite(lastSeq) ? undefined : Math.max(0, lastSeq - latestTodoSeq)
   const ageTurns =
@@ -3091,6 +3179,15 @@ function buildPendingState(
   scene: LastStepScene = {},
   lastOpenCall?: { readonly tool: string; readonly seq: number },
   todoFreshness?: { readonly todoSeq?: number; readonly newerSuccesses: number },
+  /**
+   * v0.32 P1: a todo_write exists even when it has no open items.
+   *
+   * The fallback below reads the last turn's prose, which is a different claim
+   * from "the model's written list is finished". On a long session that prose can
+   * still name an older plan, and the board presented it as the next action. A
+   * finished written plan must be stated as finished, not recycled.
+   */
+  hasWrittenPlan = false,
 ): string {
   const lines: string[] = []
 
@@ -3124,6 +3221,11 @@ function buildPendingState(
           '某项可能已完成，先核对再重跑。）',
       )
     }
+  } else if (hasWrittenPlan) {
+    // v0.32 P1: the model's latest write exists and has nothing open. Say that.
+    // Falling through to prose here is how an older "P1-1/P1-2"-style plan got
+    // presented as the current next action.
+    lines.push('我写的待办清单已全部完成；接下来按「这个会话的任务」做最后验证与收尾。')
   } else {
     // Fallback: prose, but only sentences that survive the noise filter.
     const prose = proseWithoutPointers(lastTurnText)
@@ -3427,6 +3529,13 @@ export interface TaskBoardInput {
   inProgress?: string
   /** The next actions, in order. First one is the immediate next step. */
   pending: readonly string[]
+  /**
+   * v0.32 P1: a todo_write exists even when every item is completed.
+   *
+   * The empty-pending fallback below is for a session that never wrote a plan.
+   * A finished written plan is a different fact and must be rendered as such.
+   */
+  hasWrittenPlan?: boolean
   stopPoint: { turn?: number; boundarySeq?: number }
   sourceSessionId?: string
   pointerCount: number
@@ -3596,7 +3705,12 @@ export function renderTaskBoard(input: TaskBoardInput): string {
   lines.push('', `**${BOARD_COLUMNS.todo}**`)
   const pending = input.pending.map((item) => item.replace(/\s+/gu, ' ').trim()).filter((item) => item.length > 0)
   if (pending.length === 0) {
-    lines.push('- 按上面的「原始用户要求」继续推进，并验证结果。')
+    // v0.32 P1: "the written list is finished" is NOT "there is no plan".
+    lines.push(
+      input.hasWrittenPlan === true
+        ? '- 待办清单已全部完成；按上面的「原始用户要求」做最后验证与收尾。'
+        : '- 按上面的「原始用户要求」继续推进，并验证结果。',
+    )
   } else {
     for (const item of pending.slice(0, 4)) lines.push(`- ${truncateEnd(item, 200).text}`)
     if (pending.length > 4) lines.push(`- 其余 ${pending.length - 4} 项按清单顺序处理。`)
@@ -3721,6 +3835,14 @@ export interface InstructionCardInput {
   /** v0.20: further next actions (openTodos), after the prose body. */
   pending?: readonly string[]
   /**
+   * v0.32 P1: a written todo list exists, even when every item is completed.
+   *
+   * Without this flag an empty `pending` makes the card say "continue the task",
+   * which is indistinguishable from "the model's list is finished" — and the
+   * prose fallback it used to take could resurrect an older plan.
+   */
+  hasWrittenPlan?: boolean
+  /**
    * v0.23 P2: the measured workspace facts, or the reason they could not be measured.
    *
    * Supplied by the caller rather than probed here, so the card stays a pure renderer
@@ -3765,6 +3887,10 @@ export function renderInstructionCard(input: InstructionCardInput): string {
       proseNext.push(next[1].trim())
       continue
     }
+    // v0.32 P1: the ⏭️ column already carries these when the model wrote a list.
+    // Keeping them duplicated the plan inside the same card.
+    if ((pending.length > 0 || input.hasWrittenPlan === true) && /^再往后还有[：:]/u.test(trimmed)) continue
+    if (input.hasWrittenPlan === true && /^我写的待办清单已全部完成/u.test(trimmed)) continue
     // Stated by 停泊点 / the trailer already.
     if (/^前面提到的那些细节都还留着/u.test(trimmed)) continue
     if (/^如果有不确定的报错或历史代码/u.test(trimmed)) continue
@@ -3774,12 +3900,16 @@ export function renderInstructionCard(input: InstructionCardInput): string {
     notes.push(trimmed)
   }
   // The written plan wins when it exists; the body's line is the fallback.
-  const boardPending = pending.length > 0 ? pending : proseNext
+  // v0.32 P1: a finished written plan is NOT replaced by prose — that fallback
+  // could resurrect an older plan, which is the stale-board failure.
+  const boardPending =
+    pending.length > 0 ? pending : input.hasWrittenPlan === true ? [] : proseNext
   return renderTaskBoard({
     request: input.request ?? '',
     ...(input.semantic.outcome === undefined ? {} : { outcome: input.semantic.outcome }),
     ...(input.inProgress === undefined ? {} : { inProgress: input.inProgress }),
     pending: boardPending,
+    ...(input.hasWrittenPlan === true ? { hasWrittenPlan: true } : {}),
     stopPoint: input.stopPoint,
     ...(input.sourceSessionId === undefined ? {} : { sourceSessionId: input.sourceSessionId }),
     pointerCount: input.pointerCount,
@@ -3971,6 +4101,14 @@ export function getIgnitionAdmissions(): ReadonlyMap<string, { at: number; promp
   return ignitionAdmissions
 }
 
+/**
+ * Does this error mean "that session is not there", as opposed to "I could not read it"?
+ *
+ * 0.2.2's Remote error code is `session/not-found` — hyphenated — so the old
+ * `/not found/` test missed the exact case it was written for.
+ */
+const SESSION_MISSING = /session\/not[\s_-]?found|not[\s_-]found|enoent|no such/iu
+
 /** Does the target's own log already carry the ignition prompt? */
 async function alreadyIgnited(ctx: PluginContextLike, targetId: string): Promise<boolean> {
   // The in-process admission is checked FIRST: it is the only signal that covers the
@@ -3985,14 +4123,21 @@ async function alreadyIgnited(ctx: PluginContextLike, targetId: string): Promise
     }
     return false
   } catch (error) {
-    // Two different failures, two different answers:
-    //  - the session does not exist  -> it was certainly not ignited; proceed (the
-    //    call itself will report a bad id);
-    //  - anything else (transient I/O) -> UNKNOWN, and an unknown must not be
-    //    prompted twice: a duplicate admission reads to the target as the same
-    //    instruction given twice, which is how one ask becomes two turns of intent.
     const message = String((error as any)?.message ?? error)
-    return !/not found|enoent|no such/iu.test(message)
+    // Two different failures, two different answers:
+    //  - the session does not exist -> it was certainly not ignited; prompt (the
+    //    resume inside `prompt` is what creates the live agent);
+    //  - anything else (transient I/O, a service proxy that refuses reads) -> UNKNOWN.
+    //
+    // v0.32 P0: an unknown used to return `true`, i.e. "already ignited". That turned a
+    // failed READ into a reported SUCCESS, so the queue entry was deleted and the target
+    // was never woken — the silent no-op this module promises never to produce. (It also
+    // explains a real `ignite … ok (already ignited)` audit line for a target whose log
+    // had no ignition event: the not-found test did not match `session/not-found`, the
+    // Remote's hyphenated code.) Unknown must now be reported as a failure so the
+    // durable intent survives to the next activation.
+    if (SESSION_MISSING.test(message)) return false
+    throw new Error(`cannot read target log: ${message}`)
   }
 }
 
@@ -4005,16 +4150,129 @@ async function alreadyIgnited(ctx: PluginContextLike, targetId: string): Promise
  * mounted. No channel means the capability is absent, which is reported as such —
  * never as a silent no-op.
  */
+/**
+ * v0.32 P0 — THE 0.2.2 SIGNAL CONTRACT, WHICH v0.31 VIOLATED.
+ *
+ * In 0.2.2-rc.1 `sessionController.prompt(request, signal)` takes the AbortSignal as a
+ * REQUIRED second argument and touches it on the first line
+ * (`signal.throwIfAborted()`, for caller cancellation before prompt admission).
+ * v0.31 passed `undefined` there, so every ignition died before the prompt was ever
+ * admitted:
+ *
+ *   sessionController.prompt: Cannot read properties of undefined (reading 'throwIfAborted')
+ *
+ * The target stayed durable and permanently inert, the source was already retired, and
+ * the only trace was one audit line — the "no auto wake-up" the user saw. The signal is
+ * now built for every channel, and its abort is also the timeout, so a prompt that never
+ * settles leaves an ABORTED signal behind instead of a dangling promise race.
+ */
+function ignitionDeadline(): { signal: AbortSignal; release: () => void; expired: Promise<never> } {
+  const controller = new AbortController()
+  let rejectExpired: (error: Error) => void = () => {}
+  const expired = new Promise<never>((_resolve, reject) => {
+    rejectExpired = reject
+  })
+  const timer = setTimeout(() => {
+    const error = new Error(`timeout after ${IGNITION_TIMEOUT_MS}ms`)
+    controller.abort(error)
+    rejectExpired(error)
+  }, IGNITION_TIMEOUT_MS)
+  if (typeof (timer as any).unref === 'function') (timer as any).unref()
+  // The race loser's rejection must not surface as an unhandled one when the prompt
+  // settled first and `release()` cleared the timer.
+  expired.catch(() => {})
+  return { signal: controller.signal, release: () => clearTimeout(timer), expired }
+}
+
+/**
+ * Is the target already RUNNING, as the Host itself defines it?
+ *
+ * Used only on the retry path. A retried ignition must never re-instruct a target that
+ * is already live: either our earlier prompt did land (and its marker is in the log) or
+ * a human opened the target and took over. Prompting again in that window reads to the
+ * target as the same instruction given twice, and treating it as a failure would fire
+ * the rollback that resurrects a retired source.
+ */
+async function targetAlreadyLive(ctx: PluginContextLike, targetId: string): Promise<boolean> {
+  try {
+    const service = (ctx.get as any)?.('sessionController')
+    if (!isRecord(service) || typeof (service as any).state !== 'function') return false
+    const { signal, release } = ignitionDeadline()
+    try {
+      const state = await (service as any).state({ sessionId: targetId }, signal)
+      return isRecord(state) && (state as any).active === true
+    } finally {
+      release()
+    }
+  } catch {
+    // Unknown is not "live": an unknown target still gets its one ignition attempt.
+    return false
+  }
+}
+
+/**
+ * Has the target moved past the tape the slice wrote?
+ *
+ * Only meaningful on the retry path, and only when the mark recorded how many events
+ * the tape had. A cold target that nobody touched still ends exactly at that count.
+ */
+async function targetAlreadyDriven(ctx: PluginContextLike, targetId: string): Promise<boolean> {
+  const mark = graftTargets.get(targetId)
+  if (mark === undefined || typeof mark.seedEvents !== 'number') return false
+  try {
+    const raw = await ctx.sessionQuery.readSession(targetId)
+    const events = Array.isArray((raw as any)?.events) ? ((raw as any).events as unknown[]) : []
+    return events.length > mark.seedEvents
+  } catch {
+    return false
+  }
+}
+
 export async function igniteTargetSession(
   ctx: PluginContextLike,
   settings: Required<GraftConfig>,
   targetId: string,
   sourceSessionId: string,
+  options: { retry?: boolean } = {},
 ): Promise<IgnitionResult> {
   if (!settings.igniteTarget) return { attempted: false, ok: false, reason: 'igniteTarget=false' }
   const prompt = buildIgnitionPrompt(settings)
-  if (await alreadyIgnited(ctx, targetId)) {
-    return { attempted: false, ok: true, alreadyIgnited: true, promptChars: prompt.length }
+  // v0.32: the retry path asks the HOST for liveness FIRST, because a target that is
+  // running makes the log read below unreliable (a live log mid-turn can fail replay
+  // validation), and "I could not read it" must not become "it was never woken".
+  if (options.retry === true && (await targetAlreadyLive(ctx, targetId))) {
+    return {
+      attempted: false,
+      ok: true,
+      alreadyIgnited: true,
+      channel: 'sessionController.state',
+      reason: 'target already live',
+      promptChars: prompt.length,
+    }
+  }
+  try {
+    if (await alreadyIgnited(ctx, targetId)) {
+      return { attempted: false, ok: true, alreadyIgnited: true, promptChars: prompt.length }
+    }
+  } catch (error) {
+    // v0.32: an unreadable log is UNKNOWN, and an unknown is reported as a failure so
+    // the queued intent survives — never as "already ignited".
+    return {
+      attempted: false,
+      ok: false,
+      reason: String((error as any)?.message ?? error),
+      promptChars: prompt.length,
+    }
+  }
+  if (options.retry === true && (await targetAlreadyDriven(ctx, targetId))) {
+    return {
+      attempted: false,
+      ok: true,
+      alreadyIgnited: true,
+      channel: 'graft-targets.seedEvents',
+      reason: 'target already driven past its seed',
+      promptChars: prompt.length,
+    }
   }
   const request = (): Record<string, unknown> => ({
     requestId: `graft-ignite-${targetId}-${Date.now().toString(36)}`,
@@ -4022,7 +4280,7 @@ export async function igniteTargetSession(
     mode: settings.ignitionMode,
     content: [{ type: 'text', text: prompt }],
   })
-  const channels: Array<[string, () => Promise<unknown>]> = []
+  const channels: Array<[string, (signal: AbortSignal) => Promise<unknown>]> = []
   const service = (() => {
     try {
       return (ctx.get as any)?.('sessionController')
@@ -4031,7 +4289,8 @@ export async function igniteTargetSession(
     }
   })()
   if (isRecord(service) && typeof (service as any).prompt === 'function') {
-    channels.push(['sessionController.prompt', () => (service as any).prompt(request(), undefined)])
+    // v0.32: the signal is the second argument the Host requires, not an optional extra.
+    channels.push(['sessionController.prompt', (signal) => (service as any).prompt(request(), signal)])
   }
   const remote = (() => {
     try {
@@ -4042,7 +4301,7 @@ export async function igniteTargetSession(
   })()
   const remoteSession = isRecord(remote) ? (remote as any).session : undefined
   if (remoteSession !== undefined && typeof remoteSession.prompt === 'function') {
-    channels.push(['remote.session.prompt', () => remoteSession.prompt(request(), undefined)])
+    channels.push(['remote.session.prompt', (signal) => remoteSession.prompt(request(), signal)])
   }
   if (channels.length === 0) {
     return {
@@ -4052,29 +4311,45 @@ export async function igniteTargetSession(
     }
   }
   const failures: string[] = []
-  for (const [label, run] of channels) {
-    try {
-      const settled = await Promise.race([
-        run(),
-        new Promise((_resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error(`timeout after ${IGNITION_TIMEOUT_MS}ms`)), IGNITION_TIMEOUT_MS)
-          if (typeof (timer as any).unref === 'function') (timer as any).unref()
-        }),
-      ])
-      const accepted = isRecord(settled) ? (settled as any).accepted !== false : true
-      if (accepted) {
-        // v0.22 P0: record the admission for THIS target before returning, so a second
-        // concurrent attempt cannot slip through the window before the prompt is
-        // visible in the target's own log.
-        markIgnitionAdmission(targetId, prompt.length)
-        return { attempted: true, ok: true, channel: label, promptChars: prompt.length }
+  const { signal, release, expired } = ignitionDeadline()
+  try {
+    for (const [label, run] of channels) {
+      try {
+        const settled = await Promise.race([run(signal), expired])
+        const accepted = isRecord(settled) ? (settled as any).accepted !== false : true
+        if (accepted) {
+          // v0.22 P0: record the admission for THIS target before returning, so a second
+          // concurrent attempt cannot slip through the window before the prompt is
+          // visible in the target's own log.
+          markIgnitionAdmission(targetId, prompt.length)
+          return { attempted: true, ok: true, channel: label, promptChars: prompt.length }
+        }
+        failures.push(`${label}: prompt was not accepted`)
+      } catch (error) {
+        failures.push(`${label}: ${describePromptFailure(error, signal)}`)
       }
-      failures.push(`${label}: prompt was not accepted`)
-    } catch (error) {
-      failures.push(`${label}: ${String((error as any)?.message ?? error)}`)
     }
+  } finally {
+    release()
   }
   return { attempted: true, ok: false, reason: failures.join(' | '), promptChars: prompt.length }
+}
+
+/**
+ * v0.32: say WHY the prompt died, in the one line the audit keeps.
+ *
+ * A bare `AbortError` hides the interesting case: the Host aborted because the session
+ * was busy or its writer was held, which is retryable, versus our own deadline, which
+ * is not a fact about the target at all.
+ */
+function describePromptFailure(error: unknown, signal: AbortSignal): string {
+  const message = String((error as any)?.message ?? error)
+  if (signal.aborted) {
+    const reason = (signal as any).reason
+    const why = typeof reason === 'string' ? reason : String((reason as any)?.message ?? 'deadline')
+    return `${message} (aborted: ${why})`
+  }
+  return message
 }
 
 /**
@@ -4086,6 +4361,7 @@ export async function attemptIgnition(
   settings: Required<GraftConfig>,
   sourceSessionId: string,
   targetId: string,
+  options: { retry?: boolean } = {},
 ): Promise<IgnitionResult> {
   if (!settings.igniteTarget) return { attempted: false, ok: false, reason: 'igniteTarget=false' }
   const existing = pendingIgnitions.get(targetId)
@@ -4096,7 +4372,7 @@ export async function attemptIgnition(
     attempts: existing?.attempts ?? 0,
   })
   persistPendingIgnitions(ctx)
-  const result = await igniteTargetSession(ctx, settings, targetId, sourceSessionId)
+  const result = await igniteTargetSession(ctx, settings, targetId, sourceSessionId, options)
   if (result.ok) {
     pendingIgnitions.delete(targetId)
     persistPendingIgnitions(ctx)
@@ -4116,7 +4392,8 @@ export async function attemptIgnition(
       detail:
         `${result.ok ? 'ok' : result.reason ?? 'not attempted'}` +
         `${result.channel === undefined ? '' : ` via ${result.channel}`}` +
-        `${result.alreadyIgnited === true ? ' (already ignited)' : ''}`,
+        `${result.alreadyIgnited === true ? ' (already ignited)' : ''}` +
+        `${result.ok && result.reason !== undefined ? ` (${result.reason})` : ''}`,
     })
   } catch {
     // The audit line is evidence; the migration must not depend on it.
@@ -4396,7 +4673,7 @@ export async function resumePendingIgnitions(
       })
       continue
     }
-    const result = await attemptIgnition(ctx, settings, entry.sourceSessionId, entry.targetId)
+    const result = await attemptIgnition(ctx, settings, entry.sourceSessionId, entry.targetId, { retry: true })
     out.push({ targetId: entry.targetId, ok: result.ok, ...(result.reason === undefined ? {} : { reason: result.reason }) })
   }
   return out
@@ -4499,6 +4776,15 @@ export function buildTape(
    * honestly.
    */
   workspaceCwd?: string,
+  /**
+   * v0.32 P1: a todo_write exists, even when every item is already completed.
+   *
+   * "no open items" and "no written plan" are different states. Conflating them
+   * made the board fall back to prose, which could quote a plan from an older
+   * turn — the "old P1-1/P1-2" symptom — instead of reporting that the written
+   * plan is finished.
+   */
+  hasWrittenPlan = false,
 ): GraftTape {
   const sliced = events.filter((event) => Number(event.seq) <= boundary.boundarySeq)
   const calls = new Map<string, CallRecord>()
@@ -4790,6 +5076,7 @@ export function buildTape(
     slimScene(extractLastStepScene(events)),
     lastOpenCall,
     todoFreshness,
+    hasWrittenPlan,
   )
   // 硬约束 7: provenance for inherited constraints goes FIRST in the pending
   // state, ahead of every other line a reader might act on.
@@ -4886,6 +5173,7 @@ export function buildTape(
     request: goal.goal,
     ...(openTurnInstruction === undefined ? {} : { inProgress: openTurnInstruction }),
     pending: openTodos,
+    ...(hasWrittenPlan ? { hasWrittenPlan: true } : {}),
     stopPoint: {
       ...(typeof boundary.lastTurn === 'number' ? { turn: boundary.lastTurn } : {}),
       ...(typeof boundary.boundarySeq === 'number' ? { boundarySeq: boundary.boundarySeq } : {}),
@@ -5229,6 +5517,7 @@ export function buildInjectionPlan(
     taskStateForPending.openTodos,
     availableTools,
     typeof cwd === 'string' ? cwd : undefined,
+    taskStateForPending.todoSeq !== undefined,
   )
   if (typeof cwd !== 'string' || cwd.length === 0 || !isAbsolutePath(cwd)) {
     throw graftError(
@@ -6141,50 +6430,69 @@ function assertMessageSurface(event: SessionEventLike, type: string): void {
   }
 }
 
-function appendLogOnly(session: PreparedSessionLike, type: string, data: Record<string, any>): SessionEventLike {
-  const event = session.append(type, data)
-  assertLogOnly(event, type)
-  return event
-}
-
-function appendUserMessage(session: PreparedSessionLike, data: Record<string, any>): SessionEventLike {
-  const event = session.append('user/message', data, { surfaceOp: 'append' })
-  assertMessageSurface(event, 'user/message')
-  return event
-}
-
-function appendSystemMessage(session: PreparedSessionLike, data: Record<string, any>): SessionEventLike {
-  const event = session.append('system/message', data, { surfaceOp: 'append' })
-  assertMessageSurface(event, 'system/message')
-  if (event.sourceEventSeqs !== undefined) {
-    throw graftError('RED_LINE_SYSTEM_SOURCE_EVENTS', 'system/message must not carry sourceEventSeqs')
-  }
-  if (event.data?.message?.role !== 'system') {
-    throw graftError('RED_LINE_SYSTEM_ROLE', 'system/message data.message.role must be system')
-  }
-  if (event.data?.message?.source?.kind !== 'system-prompt') {
-    throw graftError('RED_LINE_SYSTEM_SOURCE', 'system/message source.kind must be system-prompt')
-  }
-  if (!Array.isArray(event.data?.message?.content) || event.data.message.content.length === 0) {
-    throw graftError('RED_LINE_SYSTEM_CONTENT', 'system/message must have non-empty content')
-  }
-  return event
-}
-
-function appendAssistantMessage(session: PreparedSessionLike, data: Record<string, any>): SessionEventLike {
-  const event = session.append('assistant/message', data, { surfaceOp: 'append' })
-  assertMessageSurface(event, 'assistant/message')
-  if (!Array.isArray(event.data?.stream) || event.data.stream.length !== 0) {
-    throw graftError('RED_LINE_ASSISTANT_STREAM', 'assistant/message stream must be []')
-  }
-  if (event.data?.message?.role !== 'assistant') {
-    throw graftError('RED_LINE_ASSISTANT_ROLE', 'assistant/message data.message.role must be assistant')
-  }
-  const sourceKind = event.data?.message?.source?.kind
-  if (typeof sourceKind !== 'string' || sourceKind.length === 0 || sourceKind === 'plugin') {
-    throw graftError('RED_LINE_SOURCE_KIND', 'assistant/message source.kind must be producer-owned, not plugin')
-  }
-  return event
+/**
+ * v0.32 (0.2.2 P0): build the tape as plain `SessionEvent` objects.
+ *
+ * DSH 0.2.2 moved `Session.append()` behind the store lifecycle: `prepare()`
+ * returns a session that is read-only until `enter()` + `announce()` publish it,
+ * and appending before that throws `cannot append outside a SessionStore`.
+ *
+ * This plugin must keep the target COLD. Publishing it into the live store would
+ * make a later `agents.resume()` collide with the live entry (see the client
+ * announcement note in `graftSliceAndInjectUnlocked`), and an unannounced entry
+ * is exactly the half-live target that broke DSH restart recovery before.
+ *
+ * So the tape is materialised from the PUBLIC event contract instead: events are
+ * contiguous from seq 0, a surface event carries `surfaceOp: 'append'`, and a
+ * log-only event carries neither surface field. That is the same shape the old
+ * `Session.append()` produced; only the store-owned writer is gone.
+ */
+function materializeTape(
+  events: ReadonlyArray<{ type: string; data: Record<string, any>; surface: boolean }>,
+  createdAt: number,
+): SessionEventLike[] {
+  return events.map((item, index) => {
+    const event: SessionEventLike = {
+      type: item.type,
+      seq: index,
+      time: createdAt + index,
+      data: item.data,
+      ...(item.surface ? { surfaceOp: 'append' as const } : {}),
+    }
+    if (!item.surface) {
+      assertLogOnly(event, item.type)
+      return event
+    }
+    assertMessageSurface(event, item.type)
+    if (item.type === 'system/message') {
+      if (event.sourceEventSeqs !== undefined) {
+        throw graftError('RED_LINE_SYSTEM_SOURCE_EVENTS', 'system/message must not carry sourceEventSeqs')
+      }
+      if (event.data?.message?.role !== 'system') {
+        throw graftError('RED_LINE_SYSTEM_ROLE', 'system/message data.message.role must be system')
+      }
+      if (event.data?.message?.source?.kind !== 'system-prompt') {
+        throw graftError('RED_LINE_SYSTEM_SOURCE', 'system/message source.kind must be system-prompt')
+      }
+      if (!Array.isArray(event.data?.message?.content) || event.data.message.content.length === 0) {
+        throw graftError('RED_LINE_SYSTEM_CONTENT', 'system/message must have non-empty content')
+      }
+      return event
+    }
+    if (item.type === 'assistant/message') {
+      if (!Array.isArray(event.data?.stream) || event.data.stream.length !== 0) {
+        throw graftError('RED_LINE_ASSISTANT_STREAM', 'assistant/message stream must be []')
+      }
+      if (event.data?.message?.role !== 'assistant') {
+        throw graftError('RED_LINE_ASSISTANT_ROLE', 'assistant/message data.message.role must be assistant')
+      }
+      const sourceKind = event.data?.message?.source?.kind
+      if (typeof sourceKind !== 'string' || sourceKind.length === 0 || sourceKind === 'plugin') {
+        throw graftError('RED_LINE_SOURCE_KIND', 'assistant/message source.kind must be producer-owned, not plugin')
+      }
+    }
+    return event
+  })
 }
 
 function sourceForReport(source: GraftSource): GraftSource {
@@ -9287,37 +9595,17 @@ async function graftSliceAndInjectUnlocked(
     // would therefore stay on disk forever, listed but unopenable.
     //
     // The only reliable guarantee is that an invalid tape never gets written. The
-    // prepared session is a detached, purely in-memory object, so the whole tape
-    // can be built and run through the SAME `assertColdLog` the reader uses, and
-    // only then handed to the persistence layer.
-    const appended: SessionEventLike[] = []
-    for (const item of events) {
-      if (item.surface) {
-        const event =
-          item.type === 'system/message'
-            ? appendSystemMessage(prepared, item.data)
-            : item.type === 'user/message'
-              ? appendUserMessage(prepared, item.data)
-              : appendAssistantMessage(prepared, item.data)
-        appended.push(event)
-      } else {
-        // v7.3 CRITICAL: do NOT point the title at the goal message.
-        //
-        // This used to set `messageSeqs = [goalSeq]`. The host's validator
-        // requires every cited seq to be an EARLIER `user/message` whose
-        // `source.kind === 'user'` — a HUMAN message. The goal is authored by
-        // this plugin (`plugin:graft-replay`), so citing it is exactly the
-        // "must cite distinct earlier human user/message events" rejection.
-        //
-        // A target has no human message to cite, so the title keeps its empty
-        // `messageSeqs` (paired with `kind: 'user'`, see buildInjectionEvents).
-        appended.push(appendLogOnly(prepared, item.type, item.data))
-      }
-    }
-
-    const snapshot = prepared.snapshotEvents(0)
+    // whole tape is materialised in memory (see `materializeTape`), run through
+    // the SAME `assertColdLog` the reader uses, and only then handed to the
+    // persistence layer.
+    // v0.32 P0 (DSH 0.2.2): the prepared session is read-only; appending to it is
+    // what raised `cannot append outside a SessionStore`. Materialise the tape
+    // from the public event contract and keep the target COLD. Persistence below
+    // is still the only writer: `sessionPersistence.create` + `handle.append`.
+    const headerCreatedAt = Number(prepared.header.createdAt)
+    const snapshot = materializeTape(events, Number.isFinite(headerCreatedAt) ? headerCreatedAt : Date.now())
     if (snapshot.length !== events.length) {
-      throw graftError('APPEND_COUNT_MISMATCH', `prepared session has ${snapshot.length} events, expected ${events.length}`)
+      throw graftError('APPEND_COUNT_MISMATCH', `materialised tape has ${snapshot.length} events, expected ${events.length}`)
     }
     // Pre-write validation. Same function the cold reader uses, same rules: an
     // invalid title, a broken turn/step skeleton, or a stray surface op fails HERE,
@@ -9517,7 +9805,7 @@ async function graftSliceAndInjectUnlocked(
     // v7.0 C2: remember that this id is OUR target, so the auto path cannot
     // graft it again merely because its seeded tape already sits above the
     // ratio. Marked before retirement so a crash mid-way still leaves the mark.
-    markGraftTarget(newId, sourceId)
+    markGraftTarget(newId, sourceId, Array.isArray(snapshot) ? snapshot.length : undefined)
     // v7.0 P0-5: register the durable, every-request constraint section for
     // this target. The goal message carries the same list; the section is the
     // copy that compaction cannot reach.
@@ -10721,6 +11009,16 @@ interface GraftTargetMark {
   createdAt: number
   /** How many migrations deep this session already is. */
   generation: number
+  /**
+   * v0.32: how many events the slice itself wrote.
+   *
+   * The retry path needs to tell "this target was never woken" from "somebody already
+   * drove it" — a human opening the session between the failed ignition and the next
+   * start is the common case. Growth past this count is the only evidence the plugin
+   * has, and it is exact: the tape is written contiguously from seq 0 and nothing else
+   * writes to a cold target.
+   */
+  seedEvents?: number
 }
 
 const graftTargets = new Map<string, GraftTargetMark>()
@@ -10730,11 +11028,12 @@ function graftGenerationOf(sessionId: string): number {
   return graftTargets.get(sessionId)?.generation ?? 0
 }
 
-function markGraftTarget(sessionId: string, sourceSessionId: string): void {
+function markGraftTarget(sessionId: string, sourceSessionId: string, seedEvents?: number): void {
   graftTargets.set(sessionId, {
     sourceSessionId,
     createdAt: Date.now(),
     generation: graftGenerationOf(sourceSessionId) + 1,
+    ...(typeof seedEvents === 'number' && seedEvents > 0 ? { seedEvents } : {}),
   })
   // v7.0: persist the mark.
   //

@@ -23,6 +23,16 @@ export class FakeSession {
     this.id = id
     this.header = header
     this.log = []
+    /**
+     * DSH 0.2.2 session lifecycle: `prepare()` returns a session that is
+     * read-only until `enter()` + `announce()` attach it to the store. The real
+     * host throws `cannot append outside a SessionStore` from append() before
+     * that; the fixture models it, because the old fixture accepted the write
+     * and let the P0 crash pass 508 tests.
+     */
+    this.entered = false
+    this.announced = false
+    this.appendCalls = 0
   }
 
   get seq() {
@@ -30,6 +40,10 @@ export class FakeSession {
   }
 
   append(type, data, opts) {
+    if (!this.entered || !this.announced) {
+      throw new Error('cannot append outside a SessionStore')
+    }
+    this.appendCalls += 1
     if (SURFACE.has(type)) {
       if (opts?.surfaceOp !== 'append') throw new Error(`${type} requires surfaceOp:'append'`)
       if (type === 'assistant/message') {
@@ -200,7 +214,8 @@ export class FakeSessionStore {
   create(id, options = {}) {
     this.createCalls.push({ id, options })
     const session = this.prepare(id, options)
-    this.live.set(id, session)
+    this.enter(session)
+    this.announce(session)
     return session
   }
 
@@ -221,6 +236,25 @@ export class FakeSessionStore {
     const session = new FakeSession(id, header)
     this.prepared.set(id, session)
     return session
+  }
+
+  /** 0.2.2: install the store-owned publication hooks and add the session. */
+  enter(session) {
+    if (this.live.has(session.id)) throw new Error(`session "${session.id}" already exists`)
+    session.entered = true
+    this.live.set(session.id, session)
+    return () => {
+      this.live.delete(session.id)
+      session.entered = false
+      session.announced = false
+    }
+  }
+
+  /** 0.2.2: publish exactly once; appends stay disabled until this succeeds. */
+  announce(session) {
+    if (!session.entered) throw new Error('cannot announce a session outside a SessionStore')
+    if (session.announced) throw new Error('session was already announced')
+    session.announced = true
   }
 
   async flush(session) {
