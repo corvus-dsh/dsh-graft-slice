@@ -26,6 +26,8 @@
     "graft_read_result",
     "graft_resume_session",
     "graft_update_goal",
+    "graft_observer_create",
+    "graft_observer_status",
     "graft_debug_status"
   ],
   "engines": {
