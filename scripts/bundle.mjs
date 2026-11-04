@@ -78,9 +78,16 @@ function removeLocalImportsKeepSpecifiers(source) {
   return specs
 }
 
-/** Depth-first topological order; throws on a cycle with the offending path. */
+/**
+ * Depth-first topological order over the modules REACHABLE FROM index.ts.
+ *
+ * Only reachable files are inlined. That is what makes a refactor safe to land in stages:
+ * a brand-new module that nothing imports yet is inert, so "add the file" and "delete the
+ * old block" can be separate, individually testable steps. Inlining every file under src/
+ * (the first version) made any duplicate name a build failure the moment it was created.
+ */
 function orderModules(srcDir) {
-  const files = listTsFiles(srcDir).filter((file) => !file.endsWith(`${sep}index.ts`))
+  const indexPath = join(srcDir, 'index.ts')
   const state = new Map()
   const ordered = []
   const visit = (file, stack) => {
@@ -93,7 +100,7 @@ function orderModules(srcDir) {
     state.set(file, 'done')
     ordered.push(file)
   }
-  for (const file of files) visit(file, [])
+  for (const dep of localImportsOf(indexPath)) visit(dep, [indexPath])
   return ordered
 }
 
@@ -148,5 +155,24 @@ export function composeBundle(root) {
   const names = ordered.map((file) => relative(srcDir, file).replace(/\\/gu, '/'))
   const { header: nodeHeader, stripped } = hoistNodeImports(pieces)
   const header = `${BANNER}// Inlined modules (dependency order): ${names.length === 0 ? '(none)' : names.join(', ')}\n${nodeHeader}\n`
-  return { output: `${header}\n${stripped.join('\n\n')}\n`, modules: names }
+  const output = `${header}\n${stripped.join('\n\n')}\n`
+
+  /**
+   * v1.3 GUARD: no relative specifier may survive into the shipped file.
+   *
+   * A single `export { x } from './core/ledger.js'` left in index.ts produced a bundle that
+   * failed at IMPORT time with "Cannot find module ... core/ledger.js" — and `node --check`
+   * passed, so the whole suite failing was the first symptom. Fail the BUILD instead, with
+   * the offending line.
+   */
+  for (const [index, line] of output.split('\n').entries()) {
+    if (/^\s*(?:import|export)[^\n]*from\s*'\.\.?\//u.test(line)) {
+      throw new Error(
+        `bundle would ship an unresolved relative import (line ${index + 1}): ${line.trim()}\n` +
+          'Hint: inlined modules must be re-exported BARE (`export { a, b }`), not `export ... from`.',
+      )
+    }
+  }
+
+  return { output, modules: names }
 }

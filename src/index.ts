@@ -52,6 +52,15 @@ import type { GraftAuditEntry } from './utils/logger.js'
  * v1.3 batch 2: the file lock lives in src/core/txn.ts. Its audit sink is INJECTED
  * (`setAuditSink`) rather than imported there, so the dependency stays one-way.
  */
+import { ledgerRecord, readJsonRecord, readLedger, readLedgerPayload, writeJsonAtomic, writeLedgerAtomic } from './core/ledger.js'
+import type { LedgerDefect } from './core/ledger.js'
+import { LEDGER_EPOCH } from './core/ledger.js'
+/**
+ * Re-exported because it is the plugin's public surface: tests and the disk-only scripts
+ * import these from index.js. The bundler inlines ledger.ts, so a BARE export is correct
+ * here — `export ... from` would keep a runtime specifier that does not exist.
+ */
+export { readLedger, readLedgerPayload, readLedgerEpoch, LEDGER_EPOCH }
 import {
   LOCK_SETTLE_MS,
   LOCK_STALE_MS,
@@ -7302,11 +7311,7 @@ let constraintSectionsPath = join(PLUGIN_DIR, '.graft-constraint-sections.json')
  * `rename` is atomic on the same volume on both NTFS and POSIX, so a reader either
  * sees the old file or the new one, never a partial one.
  */
-function writeJsonAtomic(path: string, value: unknown): void {
-  const temp = `${path}.tmp-${process.pid}-${Date.now().toString(36)}`
-  writeFileSync(temp, JSON.stringify(value, null, 2), 'utf8')
-  renameSync(temp, path)
-}
+/** v1.3 batch 2: writeJsonAtomic moved to src/core/ledger.ts. */
 
 /**
  * v7.7: one lock per state file, and MERGE (never overwrite) on write.
@@ -7421,54 +7426,12 @@ export function acquireSourceLock(sessionId: string): () => void {
  * written by v0.17 is still read correctly, and is upgraded in place on the next
  * write.
  */
-export const LEDGER_EPOCH = 2
 
-export interface LedgerEnvelope {
-  epoch: number
-  at: string
-  pid: number
-  payload: unknown
-}
 
-export type LedgerDefect = 'unreadable' | 'torn' | 'future-epoch'
 
-export interface LedgerRead {
-  /** 0 = absent/unreadable, 1 = a bare legacy payload, 2+ = an envelope epoch. */
-  epoch: number
-  payload: unknown
-  /** Present when `payload` must not be used. */
-  defect?: LedgerDefect
-}
 
-export function readLedger(path: string): LedgerRead {
-  let text: string
-  try {
-    text = readFileSync(path, 'utf8')
-  } catch {
-    return { epoch: 0, payload: undefined, defect: 'unreadable' }
-  }
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(text)
-  } catch {
-    return { epoch: 0, payload: undefined, defect: 'unreadable' }
-  }
-  if (isRecord(parsed) && 'epoch' in parsed) {
-    const epoch = Number((parsed as Record<string, unknown>).epoch)
-    if (!Number.isFinite(epoch) || epoch <= 0) return { epoch: 0, payload: undefined, defect: 'torn' }
-    if (epoch > LEDGER_EPOCH) return { epoch, payload: undefined, defect: 'future-epoch' }
-    if (!('payload' in parsed)) return { epoch, payload: undefined, defect: 'torn' }
-    const payload = (parsed as Record<string, unknown>).payload
-    if (payload === undefined || payload === null) return { epoch, payload: undefined, defect: 'torn' }
-    return { epoch, payload }
-  }
-  return { epoch: 1, payload: parsed }
-}
 
 /** The epoch of a ledger file: 0 absent, 1 legacy, 2+ envelope. */
-export function readLedgerEpoch(path: string): number {
-  return readLedger(path).epoch
-}
 
 /**
  * The usable payload of a ledger file, whatever shape wrote it.
@@ -7477,10 +7440,6 @@ export function readLedgerEpoch(path: string): number {
  * `scripts/prune-ghosts.mjs`) and the tests read the same files: one unwrap
  * implementation, not five.
  */
-export function readLedgerPayload(path: string): unknown {
-  const read = readLedger(path)
-  return read.defect === undefined || read.defect === 'unreadable' ? read.payload : undefined
-}
 
 /** A defect worth telling the operator about, or undefined when the file is fine. */
 export function ledgerDefectOf(path: string): LedgerDefect | undefined {
@@ -7495,21 +7454,7 @@ function ledgerArray(path: string): unknown[] {
   return Array.isArray(read.payload) ? read.payload : []
 }
 
-function ledgerRecord(path: string): Record<string, unknown> {
-  const read = readLedger(path)
-  if (read.defect !== undefined && read.defect !== 'unreadable') return {}
-  return isRecord(read.payload) ? read.payload : {}
-}
 
-function writeLedgerAtomic(path: string, payload: unknown): void {
-  const envelope: LedgerEnvelope = {
-    epoch: LEDGER_EPOCH,
-    at: new Date().toISOString(),
-    pid: process.pid,
-    payload,
-  }
-  writeJsonAtomic(path, envelope)
-}
 
 function readJsonArray(path: string): unknown[] {
   try {
@@ -7520,14 +7465,7 @@ function readJsonArray(path: string): unknown[] {
   }
 }
 
-function readJsonRecord(path: string): Record<string, unknown> {
-  try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8'))
-    return isRecord(parsed) ? parsed : {}
-  } catch {
-    return {}
-  }
-}
+/** v1.3 batch 2: readJsonRecord moved to src/core/ledger.ts. */
 
 function persistConstraintSections(ctx: PluginContextLike | undefined): void {
   if (ctx === undefined) return
