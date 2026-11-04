@@ -3647,8 +3647,44 @@ export function getPendingIgnitions()                                       {
   return pendingIgnitions
 }
 
+/**
+ * v0.22 P0: per-TARGET ignition bookkeeping, keyed by targetId.
+ *
+ * THE ROUTING BUG THIS PREVENTS
+ *
+ * "Already ignited" used to be decided only by re-reading the target's log. That is
+ * correct but not sufficient: two grafts that finish within the same tick both read
+ * "not ignited" before either prompt lands, so both call `prompt` — and a target that
+ * receives the same instruction twice reads it as two separate turns of user intent.
+ *
+ * Worse, any state shared across targets (a single "last ignited id", a boolean) would
+ * let session A's admission mark session B as already started: A's instruction is
+ * effectively delivered to nobody while B never gets one. So this map is keyed by the
+ * TARGET and every read/write names that key explicitly — there is no code path that
+ * consults ignition state without saying which target it is about.
+ */
+const ignitionAdmissions = new Map                                             ()
+
+/** Has THIS target been admitted an ignition prompt in this process? */
+export function hasIgnitionAdmission(targetId        )          {
+  return ignitionAdmissions.has(targetId)
+}
+
+/** Record that a prompt was admitted for THIS target (never for another one). */
+export function markIgnitionAdmission(targetId        , promptChars        )       {
+  ignitionAdmissions.set(targetId, { at: Date.now(), promptChars })
+}
+
+/** Test/diagnostic view: the admissions recorded in this process, per target. */
+export function getIgnitionAdmissions()                                                           {
+  return ignitionAdmissions
+}
+
 /** Does the target's own log already carry the ignition prompt? */
 async function alreadyIgnited(ctx                   , targetId        )                   {
+  // The in-process admission is checked FIRST: it is the only signal that covers the
+  // window between "prompt accepted" and "prompt visible in the target's log".
+  if (ignitionAdmissions.has(targetId)) return true
   try {
     const raw = await ctx.sessionQuery.readSession(targetId)
     const events = Array.isArray((raw       )?.events) ? ((raw       ).events                      ) : []
@@ -3735,7 +3771,13 @@ export async function igniteTargetSession(
         }),
       ])
       const accepted = isRecord(settled) ? (settled       ).accepted !== false : true
-      if (accepted) return { attempted: true, ok: true, channel: label, promptChars: prompt.length }
+      if (accepted) {
+        // v0.22 P0: record the admission for THIS target before returning, so a second
+        // concurrent attempt cannot slip through the window before the prompt is
+        // visible in the target's own log.
+        markIgnitionAdmission(targetId, prompt.length)
+        return { attempted: true, ok: true, channel: label, promptChars: prompt.length }
+      }
       failures.push(`${label}: prompt was not accepted`)
     } catch (error) {
       failures.push(`${label}: ${String((error       )?.message ?? error)}`)
@@ -7719,6 +7761,9 @@ export function resetRetiredSessions()       {
   // fires against a session the reset just un-retired.
   pendingIgnitions.clear()
   rollbackNoticed.clear()
+  // v0.22: the per-target admission marks are session state too. A reset that kept
+  // them would make the next attempt on a reused target id a silent no-op.
+  ignitionAdmissions.clear()
   // v7.4: a reset must also drop the resume grace, or a test that resumes a
   // session poisons every later test that expects the watermark to fire.
   autoGraftSuppressedUntil.clear()

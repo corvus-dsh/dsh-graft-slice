@@ -1,6 +1,6 @@
 # dsh-graft-slice v0.21.0 — 点火死锁拦截、身份追溯、以及控制台真接通
 
-**发布日期**：2026-11-04　**状态**：预发布（v0.20.0 → v0.21.0）　**测试**：404/404（+17）
+**发布日期**：2026-11-04　**状态**：预发布（v0.20.0 → v0.21.0）　**测试**：410/410（+23）
 
 ## P0：双盲状态（源已冻结、目标没醒）已被拦截
 
@@ -53,7 +53,7 @@ HTML 注释形状 ⇒ UI 里渲染为无、模型不会当指令；`parseIdentit
 ## 验证
 17 条新测试：`v021-ignition-rollback`（7，含用户点名的**「点火永远超时 ⇒ 旧会话被成功 un-retire」**验收）、
 `v021-identity-metadata`（5）、`v021-console-bridge`（5，用**真实 client.js 源码**求值，不是复制品）。
-404/404 全绿；`check-docs` 27 facts；`verify-bundle` 27/27。
+410/410 全绿；`check-docs` 27 facts；`verify-bundle` 27/27。
 
 技术债登记见 [ARCHITECTURE.md](./ARCHITECTURE.md)（TD-1..TD-5，含 `index.ts` 体积）；
 **本次发版不做任何大规模代码搬迁**。

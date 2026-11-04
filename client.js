@@ -78,48 +78,69 @@ window.__ModuleLoader__.load({
      * declaration, so it is tried first and the namespace is the fallback.
      */
     function makeBridge(ctx, host) {
-      const callHost = async (method, args) => {
-        const failures = []
-        // 1. the package-private RPC: no inject declaration needed, no namespace guard.
-        if (host !== undefined && typeof host.call === 'function') {
-          try {
-            const value = await host.call(method, args)
-            return { ok: true, text: typeof value === 'string' ? value : JSON.stringify(value), via: `host.call(${method})` }
-          } catch (error) {
-            failures.push(`host.call(${method}): ${String((error && error.message) || error)}`)
-          }
+      /**
+       * v0.22: `remote.commands.execute(agent, line, attachments, signal)`.
+       *
+       * The earlier version passed `(method, args, ...)`, which is not the signature:
+       * the Remote takes the first ARGUMENT as the receiving Agent and the second as a
+       * complete `/name args` line. `agentOf` reads the first live agent because a
+       * command must be executed FOR an agent (scoped definitions shadow globals).
+       */
+      const agentOf = () => {
+        try {
+          const sessions = ctx.get ? ctx.get('sessions') : undefined
+          const list = sessions && typeof sessions.list === 'function' ? sessions.list() : undefined
+          const first = Array.isArray(list) && list.length > 0 ? list[0] : undefined
+          if (first !== undefined) return first
+        } catch {
+          // A missing sessions service is not fatal: the call reports it.
         }
-        // 2. the generated namespace, when this composition declares it.
-        const remote = (() => {
+        return undefined
+      }
+      const callHost = async (line) => {
+        const failures = []
+        const commands = (() => {
           try {
-            return ctx && ctx.get ? ctx.get('remote') : undefined
+            const remote = ctx && ctx.get ? ctx.get('remote') : undefined
+            return remote && remote.commands
           } catch (error) {
             failures.push(`ctx.get('remote'): ${String((error && error.message) || error)}`)
             return undefined
           }
         })()
-        const namespace = remote && remote.commands
-        if (namespace && typeof namespace.execute === 'function') {
+        if (commands && typeof commands.execute === 'function') {
           try {
-            const settled = await namespace.execute(method, args, [], undefined)
+            const settled = await commands.execute(agentOf(), line, [], undefined)
             const text = settled && settled.result && typeof settled.result.text === 'string' ? settled.result.text : undefined
             if (text !== undefined) return { ok: settled.result.kind !== 'error', text, via: 'remote.commands.execute' }
             if (settled !== undefined) return { ok: true, text: JSON.stringify(settled), via: 'remote.commands.execute' }
+            failures.push('remote.commands.execute: returned undefined (the command name did not resolve)')
           } catch (error) {
             failures.push(`remote.commands.execute: ${String((error && error.message) || error)}`)
+          }
+        }
+        // The dynamic-package RPC: only present when this bundle runs as a DYNAMIC
+        // package. An installed client module receives `require` alone, so this is a
+        // bonus channel, never the primary one.
+        if (host !== undefined && typeof host.call === 'function') {
+          try {
+            const value = await host.call('commands.execute', { line })
+            return { ok: true, text: typeof value === 'string' ? value : JSON.stringify(value), via: 'host.call(commands.execute)' }
+          } catch (error) {
+            failures.push(`host.call(commands.execute): ${String((error && error.message) || error)}`)
           }
         }
         return {
           ok: false,
           via: 'none',
           text:
-            `面板无法调用宿主（${failures.length === 0 ? '没有可用的 Client→Host 通道' : failures.join(' | ')}）。\n` +
-            `请在输入框直接执行：/${method.startsWith('graft') || method.startsWith('memory') ? method : 'graft-console'}`,
+            `面板无法调用宿主（${failures.length === 0 ? 'remote.commands 与 host.call 都不可用' : failures.join(' | ')}）。\n` +
+            'Host 侧功能不受影响：可直接在输入框执行该命令。',
         }
       }
       return {
-        state: () => callHost('graft-console', null),
-        set: (key, value) => callHost('graft-console-set', { rawInput: `${key} ${value}` }),
+        state: () => callHost('/graft-console'),
+        set: (key, value) => callHost(`/graft-console-set ${key} ${value}`),
         // The panel must render even when the bridge is dead: every method resolves
         // to an error RESULT, never a thrown exception, so one failed call cannot
         // blank the slot entry.
@@ -471,21 +492,36 @@ window.__ModuleLoader__.load({
       ])
     }
 
+    /**
+     * The sidebar cell renders the ICON ONLY.
+     *
+     * v0.22: it used to render an icon AND a text span '转生', while the panellist
+     * registration ALSO supplies `label: () => '转生'` for the owner to render. Both
+     * drew text, which is why the sidebar showed "转生 转生". The owner projects the
+     * label; the cell is the icon.
+     */
     function SidebarEntry() {
-      return h('span', { 'aria-hidden': true, style: { display: 'inline-flex', alignItems: 'center', gap: 6 } }, [
+      return h('span', { 'aria-hidden': true, style: { display: 'inline-flex', alignItems: 'center' } }, [
         h('svg', { key: 'i', width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.6 }, [
           h('path', { key: 'p', d: 'M4 17c3-9 7-9 10-2s5 5 6 1' }),
           h('circle', { key: 'c', cx: 4, cy: 17, r: 1.6, fill: 'currentColor', stroke: 'none' }),
         ]),
-        h('span', { key: 'l' }, '转生'),
       ])
     }
 
     return {
-      inject: ['slots'],
+      /**
+       * v0.22: `remote` and `remote.commands` are SERVICES, not package names.
+       *
+       * The page kept reporting `cannot get property "remote.commands" without
+       * inject` after the previous fix because that fix declared a package in
+       * `dsh.client` — that orders bundle LOADING, it does not grant service access.
+       * The official client plugins declare the service keys themselves
+       * (`["sessions", "remote", "remote.commands", ...]`), and the Cordis property
+       * guard reads exactly this array.
+       */
+      inject: ['slots', 'remote', 'remote.commands'],
       apply(ctx) {
-        // v0.21: `host` is threaded through so the bridge has a channel that needs
-        // no inject declaration at all.
         const bridge = makeBridge(ctx, host)
         ctx.slots.inject('main', () =>
           ctx.slots.register({ name: 'main', key: PANEL_KEY, inject: () => ({ bridge }) }, GraftConsole),
