@@ -284,6 +284,54 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * v1.0.3 — A REAL SESSION ID, because the command's first argument must name one.
+       *
+       * Proven by the live rejection `session/not-found` (see the shapes comment): the
+       * gateway accepts a bare id and looks it up, so a constant placeholder can never
+       * succeed. A root-scoped panel has no session of its own, so the id comes from:
+       *
+       *   1. the slot's session snapshot (`useSessions`), when the owner publishes one;
+       *   2. the Host's content index (`sessions.search`), which returns session ids;
+       *   3. nothing — and then the panel says so instead of pretending to read.
+       *
+       * Resolved once per panel instance: it only has to be A live session, because the
+       * console's payload is global.
+       */
+      let cachedSessionId = ''
+      const realSessionId = async () => {
+        if (cachedSessionId.length > 0) return cachedSessionId
+        const fromProps = sessionIdsFromProps()
+        if (fromProps.length > 0) {
+          cachedSessionId = fromProps[fromProps.length - 1]
+          return cachedSessionId
+        }
+        try {
+          const sessions = ctx.get ? ctx.get('sessions') : undefined
+          if (sessions && typeof sessions.search === 'function') {
+            for (const query of ['的', '我们', '我', 'the', 'a']) {
+              try {
+                const reply = await sessions.search(query, undefined)
+                const items = reply && reply.ok === true && reply.value ? reply.value.items : undefined
+                if (!Array.isArray(items)) continue
+                for (const item of items) {
+                  const id = item && typeof item.sessionId === 'string' ? item.sessionId : ''
+                  if (id.length > 0) {
+                    cachedSessionId = id
+                    return cachedSessionId
+                  }
+                }
+              } catch {
+                // A search shape that throws simply does not contribute an id.
+              }
+            }
+          }
+        } catch {
+          // No sessions face: the panel reports "no id", which is the truthful state.
+        }
+        return ''
+      }
+
+      /**
        * Resolve ONE valid `{ id }` agent, or undefined with the reason recorded.
        *
        * `remote.commands.execute` needs the agent of the session the command runs FOR.
@@ -432,32 +480,58 @@ window.__ModuleLoader__.load({
            * that worked, and reports every rejection it had to survive. A rejection is
            * NEVER success.
            */
+          /**
+           * v1.0.3 — THE PROBE ANSWERED THE QUESTION. `id-string` IS THE CONTRACT.
+           *
+           * Measured from the live error text (2026-11-04 21:39):
+           *
+           *   agent-object:   gateway/input-invalid field=agentId   <- wrong TYPE
+           *   id-string:      session/not-found                     <- right type, id missing
+           *   agentId-object: gateway/input-invalid field=agentId   <- wrong TYPE
+           *
+           * `session/not-found` is a BUSINESS error, not a validation error: the gateway
+           * accepted a bare SessionId string and then looked it up. So the first argument
+           * is the id STRING, and it has to name a session that EXISTS — which a constant
+           * placeholder never can. Hence `realSessionId()`: a live id from the slot's
+           * own session snapshot, or from the Host's content index.
+           */
           const shapes = [
-            { name: 'agent-object', build: (id) => [{ id }, line, [], undefined] },
             { name: 'id-string', build: (id) => [id, line, [], undefined] },
+            { name: 'agent-object', build: (id) => [{ id }, line, [], undefined] },
             { name: 'agentId-object', build: (id) => [{ agentId: id }, line, [], undefined] },
           ]
           const ordered =
             workingShape === undefined
               ? shapes
               : [shapes.find((shape) => shape.name === workingShape), ...shapes.filter((shape) => shape.name !== workingShape)]
-          for (const shape of ordered) {
-            if (shape === undefined) continue
-            try {
-              const settled = await commands.execute(...shape.build(targetId))
-              const execution = unwrapExecution(settled)
-              if (execution !== undefined) {
-                workingShape = shape.name
-                return {
-                  ok: execution.kind !== 'error',
-                  text: execution.text,
-                  via: `remote.commands.execute(${shape.name})`,
-                  raw: settled,
+          const sessionId = await realSessionId()
+          /**
+           * v1.0.3: the RESOLVED id goes first — an explicit choice must never be
+           * second-guessed — and the live id found from the snapshot/index is the retry.
+           * In production the placeholder earns `session/not-found` and the retry is what
+           * makes the panel work; in a session-bound panel the first attempt already wins.
+           */
+          const candidateIds =
+            sessionId.length > 0 && sessionId !== targetId ? [targetId, sessionId] : [targetId]
+          for (const attemptId of candidateIds) {
+            for (const shape of ordered) {
+              if (shape === undefined) continue
+              try {
+                const settled = await commands.execute(...shape.build(attemptId))
+                const execution = unwrapExecution(settled)
+                if (execution !== undefined) {
+                  workingShape = shape.name
+                  return {
+                    ok: execution.kind !== 'error',
+                    text: execution.text,
+                    via: `remote.commands.execute(${shape.name})`,
+                    raw: settled,
+                  }
                 }
+                failures.push(`${shape.name}: ${describeRejection(settled)}`)
+              } catch (error) {
+                failures.push(`${shape.name}: ${String((error && error.message) || error)}`)
               }
-              failures.push(`${shape.name}: ${describeRejection(settled)}`)
-            } catch (error) {
-              failures.push(`${shape.name}: ${String((error && error.message) || error)}`)
             }
           }
         } else {

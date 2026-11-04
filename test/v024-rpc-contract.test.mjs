@@ -73,8 +73,15 @@ function makeRemote({ reject } = {}) {
           const error = new Error('{"code":"gateway/arguments-invalid","details":{"endpoint":"commands/execute"}}')
           throw error
         }
-        if (agent === undefined || agent === null || typeof agent !== 'object' || typeof agent.id !== 'string') {
+        if (agent === undefined || agent === null) {
           throw new Error('{"code":"gateway/arguments-invalid","details":{"endpoint":"commands/execute"}}')
+        }
+        // v1.0.3: the live contract is the ID STRING (`session/not-found` proves the
+        // gateway looked it up); the object shapes are still accepted here so the tests
+        // keep describing "any well-formed id", not one specific spelling.
+        const id = typeof agent === 'string' ? agent : typeof agent.id === 'string' ? agent.id : typeof agent.agentId === 'string' ? agent.agentId : ''
+        if (id.length === 0) {
+          throw new Error('{"code":"gateway/input-invalid","details":{"endpoint":"commands/execute","field":"agentId"}}')
         }
         return { commandId: 'c1', result: { kind: 'success', text: '{"ok":true}' } }
       },
@@ -126,7 +133,10 @@ for (const [label, file] of [
     assert.match(String(reply.via), /^remote\.commands\.execute\(/u)
     assert.equal(remote.calls.length, 1, 'exactly one execute call — the working shape is remembered')
     const { agent, line } = remote.calls[0]
-    assert.deepEqual(agent, { id: 'session-live-2' }, 'the MOST RECENT live session is used, as a plain { id }')
+    // v1.0.3: the id may arrive as a bare string (the accepted contract) or wrapped; what
+    // matters is WHICH session it names.
+    const usedId = typeof agent === 'string' ? agent : agent.id
+    assert.equal(usedId, 'session-live-2', 'the MOST RECENT live session is used')
     assert.match(String(line), /^\/[a-z-]+/u, 'the line is a complete slash command')
   })
 
@@ -154,8 +164,9 @@ for (const [label, file] of [
     assert.equal(remote.calls.length, 1, 'a global read must go out; refusing it empties the panel')
     const agent = remote.calls[0].agent
     assert.ok(agent !== undefined && agent !== null, 'an undefined agent must NEVER reach the gateway')
-    assert.equal(typeof agent.id, 'string', 'the placeholder must satisfy the Agent shape')
-    assert.ok(String(agent.id).length > 0, 'and not be an empty string')
+    const placeholderId = typeof agent === 'string' ? agent : agent.id
+    assert.equal(typeof placeholderId, 'string', 'the placeholder must satisfy the id contract')
+    assert.ok(String(placeholderId).length > 0, 'and not be an empty string')
     assert.equal(reply.ok, true, 'so the Host answer is actually surfaced')
     assert.equal(String(reply.text).includes('没有可用的活动会话'), false, 'the dead-end message must be gone')
   })
@@ -209,9 +220,11 @@ for (const [label, file] of [
       // Must not throw, whatever the shape: a crash here blanks the panel.
       const reply = await bridge.state()
       assert.equal(typeof reply.ok, 'boolean', `${file}: shape ${shape.name} produced no result`)
-      // Whatever the shape, whenever a request DID go out it carried a shape-valid agent.
+      // Whatever the shape, whenever a request DID go out it carried a non-empty id
+      // (v1.0.3: a bare string is the accepted contract; the object shapes are tolerated).
       for (const call of remote.calls) {
-        assert.ok(call.agent && typeof call.agent.id === 'string' && call.agent.id.length > 0,
+        const sentId = typeof call.agent === 'string' ? call.agent : call.agent && call.agent.id
+        assert.ok(typeof sentId === 'string' && sentId.length > 0,
           `${file}: shape ${shape.name} sent an invalid agent`)
       }
     }
@@ -228,7 +241,8 @@ for (const [label, file] of [
     const reply = await bridge.state()
     assert.equal(typeof reply.ok, 'boolean', 'a throwing hook must not break the panel')
     for (const call of remote.calls) {
-      assert.ok(call.agent && typeof call.agent.id === 'string', 'and must not emit an invalid agent')
+      const sentId = typeof call.agent === 'string' ? call.agent : call.agent && call.agent.id
+      assert.ok(typeof sentId === 'string' && sentId.length > 0, 'and must not emit an invalid agent')
     }
   })
 }

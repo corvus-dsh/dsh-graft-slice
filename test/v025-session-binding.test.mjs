@@ -155,7 +155,9 @@ for (const [label, file] of [
     const bridge = mod.__bridgeFactory(makeCtx(remote), undefined, slotProps)
     const reply = await bridge.state('session-chosen')
     assert.equal(reply.ok, true, `the chosen session must be usable; got ${JSON.stringify(reply)}`)
-    assert.deepEqual(remote.calls[0].agent, { id: 'session-chosen' }, 'the explicit choice WINS over the newest')
+    const chosen = remote.calls[0].agent
+    const chosenId = typeof chosen === 'string' ? chosen : chosen.id
+    assert.equal(chosenId, 'session-chosen', 'the explicit choice WINS over the newest')
   })
 
   test(`v0.25 P0: with no choice, the newest live session is used`, async () => {
@@ -164,7 +166,8 @@ for (const [label, file] of [
     const slotProps = { useSessions: (selector) => selector({ sessions: [{ id: 'a1' }, { id: 'a2' }] }) }
     const bridge = mod.__bridgeFactory(makeCtx(remote), undefined, slotProps)
     await bridge.state()
-    assert.deepEqual(remote.calls[0].agent, { id: 'a2' })
+    const newest = remote.calls[0].agent
+    assert.equal(typeof newest === 'string' ? newest : newest.id, 'a2')
   })
 
   test(`v0.25 P0: a chosen id makes canWrite true without a snapshot`, () => {

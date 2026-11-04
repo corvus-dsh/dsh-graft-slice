@@ -332,6 +332,7 @@ for (const [label, file] of [
     dispose()
 
     assert.ok(remote.calls.length > 0, 'a request must follow the selection')
-    assert.deepEqual(remote.calls[0].agent, { id: 'a' }, 'the CHOSEN session is used, not the newest')
+    const chosenAgent = remote.calls[0].agent
+  assert.equal(typeof chosenAgent === 'string' ? chosenAgent : chosenAgent.id, 'a', 'the CHOSEN session is used, not the newest')
   })
 }

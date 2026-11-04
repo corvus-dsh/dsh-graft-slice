@@ -101,12 +101,16 @@ test('v0.22: the bridge calls execute(agent, "/line", attachments, signal)', asy
   const bridge = factory(ctx, undefined)
   const result = await bridge.state()
   assert.equal(result.ok, true)
-  // v1.0.2: `via` names the PROBED shape that worked, so an operator can tell a working
-  // contract from a lucky guess.
-  assert.match(result.via, /^remote\.commands\.execute\(agent-object\)$/u)
+  // v1.0.2/v1.0.3: `via` names the PROBED shape that worked — and the live evidence
+  // (`session/not-found` for a bare id vs `gateway/input-invalid` for an object) says the
+  // contract is the ID STRING, so that shape is tried first.
+  assert.match(result.via, /^remote\.commands\.execute\(id-string\)$/u)
   assert.equal(seen.length, 1)
   const [callAgent, line, attachments, signal] = seen[0]
-  assert.deepEqual(callAgent, agent, 'the first argument is the receiving AGENT')
+  // v1.0.3: the accepted contract is the ID STRING (live evidence: `session/not-found`
+  // for a bare id, `gateway/input-invalid` for an object), so the string is what arrives.
+  const sentId = typeof callAgent === 'string' ? callAgent : callAgent.id
+  assert.equal(sentId, agent.id, 'the first argument names the receiving session')
   assert.equal(line, '/graft-console', 'the second is a complete slash-command line')
   assert.deepEqual(attachments, [])
   assert.equal(signal, undefined)

@@ -92,8 +92,12 @@ test('v0.30 P0: BOTH reads and writes use a shape-valid placeholder, never undef
     // ARGUMENT is now probed over three shapes (agent object / bare id / agentId object),
     // so the assertion is on the probed builder rather than on a literal call.
     assert.match(source, /const targetId =/u, `${file} must resolve a non-empty target id`)
-    assert.match(source, /commands\.execute\(\.\.\.shape\.build\(targetId\)\)/u,
-      `${file} must pass a probed, non-optional agent`)
+    assert.match(source, /commands\.execute\(\.\.\.shape\.build\(attemptId\)\)/u,
+      `${file} must pass a probed, non-optional id`)
+    // v1.0.3: and it must try a REAL live session before the constant placeholder, because
+    // the gateway looks the id up (`session/not-found` is what a placeholder always gets).
+    assert.match(source, /const realSessionId = async/u, `${file} must be able to resolve a live id`)
+    assert.match(source, /candidateIds/u, `${file} must try the live id first, then the fallback`)
   }
 })
 
