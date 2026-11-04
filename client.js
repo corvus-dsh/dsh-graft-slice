@@ -298,7 +298,23 @@ window.__ModuleLoader__.load({
        * console's payload is global.
        */
       let cachedSessionId = ''
+      /**
+       * v1.0.4: an id the HUMAN pasted, remembered across reloads. It outranks every
+       * automatic source, because the person looking at the sidebar knows which session
+       * is live and the Client has no service that can tell us.
+       */
+      const SESSION_STORAGE_KEY = 'dsh-graft-console-session-id'
+      let preferredSessionId = (() => {
+        try {
+          return typeof window !== 'undefined' && window.localStorage
+            ? String(window.localStorage.getItem(SESSION_STORAGE_KEY) || '')
+            : ''
+        } catch {
+          return ''
+        }
+      })()
       const realSessionId = async () => {
+        if (preferredSessionId.length > 0) return preferredSessionId
         if (cachedSessionId.length > 0) return cachedSessionId
         const fromProps = sessionIdsFromProps()
         if (fromProps.length > 0) {
@@ -459,10 +475,13 @@ window.__ModuleLoader__.load({
            * writer identifiable as the console itself, and the UI states plainly that the
            * switch is a global setting.
            */
+          /** v1.0.4: a pasted id outranks the hook, the snapshot and the placeholder. */
           const targetId =
-            agent !== undefined && agent !== null && typeof agent.id === 'string' && agent.id.length > 0
-              ? agent.id
-              : GLOBAL_AGENT_ID
+            preferredSessionId.length > 0
+              ? preferredSessionId
+              : agent !== undefined && agent !== null && typeof agent.id === 'string' && agent.id.length > 0
+                ? agent.id
+                : GLOBAL_AGENT_ID
           /**
            * v1.0.2 P0 — THE FIRST ARGUMENT IS PROBED, NOT ASSUMED.
            *
@@ -569,6 +588,30 @@ window.__ModuleLoader__.load({
         attach: (hook) => {
           if (typeof hook === 'function') sessionsHook = hook
         },
+        /**
+         * v1.0.4 — THE ONE THING THE CLIENT CANNOT DISCOVER: a live session id.
+         *
+         * A root-scoped panel has no session, `useSessions` publishes nothing for it, and
+         * the host's `commands.execute` looks the id up (`session/not-found` proves it).
+         * The sidebar knows the id but exposes no client service to read it. So the panel
+         * accepts an explicit id from the human — pasted once from the sidebar's
+         * "copy session id" — and remembers it.
+         */
+        useSession: (id) => {
+          const trimmed = typeof id === 'string' ? id.trim() : ''
+          if (trimmed.length === 0) return false
+          preferredSessionId = trimmed
+          cachedSessionId = trimmed
+          try {
+            if (typeof window !== 'undefined' && window.localStorage) {
+              window.localStorage.setItem(SESSION_STORAGE_KEY, trimmed)
+            }
+          } catch {
+            // A private window may refuse storage; the in-memory value still works.
+          }
+          return true
+        },
+        session: () => preferredSessionId || cachedSessionId || '',
         sessions: () => listSessions(),
         /** Is there an agent right now? Decides read-only mode vs. interactive. */
         canWrite: () => agentOf() !== undefined,
@@ -953,6 +996,18 @@ window.__ModuleLoader__.load({
        */
       const [picked, setPicked] = React.useState('')
       const [tick, setTick] = React.useState(0)
+      /**
+       * v1.0.4: the id the human pasted. Read from the bridge once, then owned by state so
+       * the row can show which session the panel is pinned to.
+       */
+      const [preferredSession, setPreferredSession] = React.useState(() => {
+        try {
+          return bridge !== undefined && typeof bridge.session === 'function' ? String(bridge.session() || '') : ''
+        } catch {
+          return ''
+        }
+      })
+      const [sessionDraft, setSessionDraft] = React.useState('')
       const refresh = () => setTick((value) => value + 1)
 
       React.useEffect(() => {
@@ -1134,7 +1189,15 @@ window.__ModuleLoader__.load({
       const sessions = hostSessions.length > 0 ? hostSessions : liveSessions
       const sessionSource = hostSessions.length > 0 ? 'host' : liveSessions.length > 0 ? 'hook' : 'none'
       /** The session this panel acts on. */
-      const effectiveSession = picked.length > 0 ? picked : activeFromHook !== '' ? activeFromHook : sessions.length > 0 ? sessions[sessions.length - 1] : ''
+      const effectiveSession = picked.length > 0
+        ? picked
+        : preferredSession.length > 0
+          ? preferredSession
+          : activeFromHook !== ''
+            ? activeFromHook
+            : sessions.length > 0
+              ? sessions[sessions.length - 1]
+              : ''
       /**
        * v0.28: knobs are GLOBAL settings, so they are editable whenever the Host is
        * reachable. v0.26 gated them on a session, which left the panel inert in exactly
@@ -1297,6 +1360,50 @@ window.__ModuleLoader__.load({
                   ...sessions.map((id) => h('option', { key: id, value: id }, id)),
                 ]),
               ]),
+          /**
+           * v1.0.4 — THE ESCAPE HATCH THE HOST CONTRACT REQUIRES.
+           *
+           * `commands.execute` resolves the id it is given (`session/not-found`), and a
+           * root-scoped panel has no way to learn a live one: `useSessions` publishes
+           * nothing here and the Client exposes no session list. The sidebar DOES know —
+           * right-click a session → 复制会话 id — so the panel accepts that id once.
+           */
+          h('div', { key: 'manual', className: 'gc-row' }, [
+            h('span', { key: 'l', className: 'gc-label' }, [
+              '会话 id（宿主校验存在性）',
+              h('span', { key: 'b', className: 'gc-hint' },
+                preferredSession === ''
+                  ? '自动取不到时：右键侧边栏会话 →「复制会话 id」→ 粘贴到这里，只需一次'
+                  : `已固定在 ${preferredSession}（清空后重新自动探测）`),
+            ]),
+            h('span', { key: 's', style: { display: 'flex', gap: '6px' } }, [
+              h('input', {
+                key: 'i',
+                className: 'gc-num',
+                style: { width: '260px', textAlign: 'left' },
+                value: sessionDraft,
+                placeholder: preferredSession || 'session-…',
+                'aria-label': '会话 id',
+                onChange: (event) => setSessionDraft(String(event.target.value || '')),
+              }),
+              h('button', {
+                key: 'b',
+                type: 'button',
+                className: 'gc-btn',
+                onClick: () => {
+                  const ok = bridge !== undefined && typeof bridge.useSession === 'function' ? bridge.useSession(sessionDraft) : false
+                  if (!ok) {
+                    setError('请输入一个非空的会话 id（右键侧边栏会话 →「复制会话 id」）')
+                    return
+                  }
+                  setPreferredSession(sessionDraft.trim())
+                  setState(null)
+                  setError('')
+                  setTick((value) => value + 1)
+                },
+              }, '使用'),
+            ]),
+          ]),
         ]),
         h('div', { key: 'sw', className: 'gc-card' }, [
           h('h3', { key: 'h', className: 'gc-h' }, '核心开关'),

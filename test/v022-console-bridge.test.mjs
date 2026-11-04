@@ -244,3 +244,42 @@ test('v1.0.1: an unrecognised reply shape is an error, never panel state', async
   assert.equal(result.ok, false, 'guessing a state from an unknown shape is how the panel lied before')
   assert.match(String(result.text), /无法识别的返回形状/u)
 })
+
+/**
+ * v1.0.4 — THE ONE INPUT THE CLIENT CANNOT DISCOVER.
+ *
+ * `commands.execute` resolves the id it receives (`session/not-found` proves it), and a
+ * root-scoped panel has no session while the Client exposes no session list. So the panel
+ * takes an id from the human, and that id must outrank every automatic guess.
+ */
+test('v1.0.4: an id pasted by the human outranks every automatic source', async () => {
+  for (const file of ['dsh-graft-slice/client.js', 'dsh-memory/client.js']) {
+    const { factory } = loadBridge(file)
+    const seen = []
+    const ctx = {
+      get(name) {
+        // A snapshot that WOULD give a different id: the pasted one must still win.
+        if (name === 'sessions') return { list: () => [{ id: 'from-snapshot' }] }
+        if (name === 'remote') {
+          return {
+            commands: {
+              async execute(first) {
+                seen.push(first)
+                return { kind: 'success', text: '{"ok":true}' }
+              },
+            },
+          }
+        }
+        return undefined
+      },
+    }
+    const bridge = factory(ctx, undefined, { useSessions: (selector) => selector({ sessions: [{ id: 'from-hook' }] }) })
+    assert.equal(bridge.useSession('session-pasted'), true, `${file}: a non-empty id is accepted`)
+    assert.equal(bridge.session(), 'session-pasted', `${file}: and remembered`)
+    assert.equal(bridge.useSession('   '), false, `${file}: an empty id is refused rather than stored`)
+    const reply = await bridge.state()
+    assert.equal(reply.ok, true)
+    const first = typeof seen[0] === 'string' ? seen[0] : seen[0] && seen[0].id
+    assert.equal(first, 'session-pasted', `${file}: the pasted id is the one that goes out`)
+  }
+})
