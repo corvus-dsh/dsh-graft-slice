@@ -346,7 +346,15 @@ test('phase 3: refuses a prepared header with subagent lineage', async () => {
       ctx._tools
         .get('graft_slice_and_inject')
         .execute({ sourceSessionId: sourceLog.session.id, newSessionId: 'session-graft-lineage' }, {}),
-    /GRAFT_ERROR: lineage must be empty/,
+    /**
+     * v7.7: the lineage refusal moved INTO the write layer, so its wording is the layer's now.
+     *
+     * What must not change is the observable outcome asserted below: the migration is REFUSED and no
+     * artifact is created. The check itself (`prepare` returns a header with `parentSession`) still
+     * reaches the writer, because that is where `sessions.prepare` is now called — this test's patch
+     * proves the refusal survives the move rather than that a particular string still exists.
+     */
+    /LINEAGE_NOT_EMPTY|GRAFT_ERROR: lineage must be empty/u,
   )
   assert.equal(persistence.createCalls.length, 0)
 })

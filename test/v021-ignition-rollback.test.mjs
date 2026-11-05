@@ -35,6 +35,7 @@ import {
   ROLLBACK_NOTICE_MARKER,
   resumePendingIgnitions,
   rollbackFailedIgnition,
+  takeRollbackNotice,
 } from '../index.js'
 import { dispatchPreStep, makeCtx, makeSourceLog } from './fake-harness.mjs'
 
@@ -154,7 +155,7 @@ test('v0.21 P0 ACCEPTANCE: an always-timing-out ignition UN-RETIRES the old sess
   resetRetiredSessions()
 })
 
-test('v0.21 P0: the source is told WHY it is back, in its own log', async () => {
+test('v0.21 P0 / v7.8: the source is told WHY it is back — through pre-step messages, not its log', async () => {
   const { ctx, log } = scaffold({ controller: { async prompt() { return { accepted: true } } } })
   await ctx._tools
     .get('graft_slice_and_inject')
@@ -162,16 +163,51 @@ test('v0.21 P0: the source is told WHY it is back, in its own log', async () => 
 
   const rollback = await rollbackFailedIgnition(ctx, log.session.id, 'session-notice', 'timeout after 20000ms')
   assert.equal(rollback.sourceRestored, true)
-  assert.equal(rollback.noticeAppended, true, 'a rollback nobody can see reads as "nothing happened"')
+  assert.equal(
+    rollback.noticeAppended,
+    true,
+    'a rollback nobody can see reads as "nothing happened" — the notice must exist SOMEWHERE',
+  )
 
-  // The fixture records log-only appends separately (they must not disturb the
-  // event list the slicing tests read from).
-  const notices = ctx._sourceDeveloperAppends
-    .map((entry) => entry.data?.message?.content?.[0]?.text ?? '')
-    .filter((text) => text.includes(ROLLBACK_NOTICE_MARKER))
-  assert.equal(notices.length, 1, 'the rollback notice is written once')
-  assert.equal(notices[0], ROLLBACK_NOTICE)
-  assert.match(notices[0], /由于新会话点火失败，已为您自动回滚到当前会话，请重试切片。/u)
+  /**
+   * v7.8 — THE CHANNEL MOVED. This test used to assert the notice arrived as an appended
+   * `developer/message` event. That shape carried `{ turn: 0, step: 0 }`, which is not a real round; the
+   * host's resume-time format validation rejects it, and it fired on the SOURCE session the user was
+   * still working in. The notice now travels through the pre-step `messages` channel, which writes
+   * nothing and consumes no step.
+   *
+   * So there are now TWO facts to pin, and they are opposite halves of the same guarantee:
+   *   1. the notice is DELIVERED to the model on the source's next step (below);
+   *   2. it is NOT written into the source's log (asserted at the end).
+   */
+  const decision = await dispatchPreStep(ctx, { agent: { id: log.session.id }, messages: [{ role: 'user', content: [] }] })
+  assert.equal(decision.kind, 'enter')
+  const injected = decision.messages.filter(
+    (message) => typeof message?.content?.[0]?.text === 'string' && message.content[0].text.includes(ROLLBACK_NOTICE_MARKER),
+  )
+  assert.equal(injected.length, 1, 'the rollback notice is delivered exactly once')
+  assert.equal(injected[0].content[0].text, ROLLBACK_NOTICE)
+  assert.match(injected[0].content[0].text, /由于新会话点火失败，已为您自动回滚到当前会话，请重试切片。/u)
+
+  /**
+   * THE DEFECT THIS CHANGE EXISTS TO REMOVE: nothing may be appended to the source's log, and in
+   * particular nothing may carry the fabricated `turn: 0` / `step: 0`.
+   */
+  assert.equal(
+    ctx._sourceDeveloperAppends.length,
+    0,
+    'the rollback must NOT write a developer/message into the source log — that event needed turn:0/step:0',
+  )
+
+  /**
+   * ...and it is one-shot: the next step must not be told again. A repeated notice reads as a second
+   * failure, which is the wrong next move for the user to take.
+   */
+  const second = await dispatchPreStep(ctx, { agent: { id: log.session.id }, messages: [{ role: 'user', content: [] }] })
+  const again = second.messages.filter(
+    (message) => typeof message?.content?.[0]?.text === 'string' && message.content[0].text.includes(ROLLBACK_NOTICE_MARKER),
+  )
+  assert.equal(again.length, 0, 'the notice is consumed on delivery, never repeated')
   resetRetiredSessions()
 })
 
@@ -244,5 +280,36 @@ test('v0.21 P0: the rollback is audited, and the audit names both sides', async 
   assert.match(audit, /"kind":"ignite-rollback"/u)
   assert.match(audit, /session-audited/u)
   assert.match(audit, /sourceRestored=true/u)
+  resetRetiredSessions()
+})
+
+test('v7.8: the rollback notice queue is ONE-SHOT and keyed per source', async () => {
+  /**
+   * THE PRIMITIVE, ASSERTED DIRECTLY.
+   *
+   * The delivery test above proves the notice reaches the model once. This proves the MECHANISM cannot
+   * do otherwise: `takeRollbackNotice` is a TAKE, not a GET, and the queue is keyed by source id — so
+   * two sessions that each rolled back get their own notice, and neither gets a second one.
+   *
+   * A `get`-style accessor here would be catastrophic in a subtle way: every step of the recovered
+   * session would re-tell the model that a migration failed, and the model would keep apologising for
+   * something that is already resolved.
+   */
+  const { ctx, log } = scaffold({ controller: { async prompt() { return { accepted: true } } } })
+  await rollbackFailedIgnition(ctx, log.session.id, 'session-notice-q', 'no channel')
+  assert.equal(takeRollbackNotice(log.session.id)?.content?.[0]?.text, ROLLBACK_NOTICE)
+  assert.equal(takeRollbackNotice(log.session.id), undefined, 'the second take finds nothing')
+
+  /**
+   * PER SOURCE. A notice queued for session A must not be delivered to session B — the exact class of
+   * bug the ignition routing tests pinned for admissions ("an admission for A does not mark B").
+   */
+  await rollbackFailedIgnition(ctx, log.session.id, 'session-notice-q2', 'no channel again')
+  assert.equal(
+    takeRollbackNotice('session-some-other-source'),
+    undefined,
+    'a notice is addressed to the session that rolled back, not to whoever asks next',
+  )
+  assert.equal(takeRollbackNotice(log.session.id), undefined, 'the doorbell has already been answered once')
   resetRetiredSessions()
 })

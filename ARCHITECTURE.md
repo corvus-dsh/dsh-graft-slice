@@ -49,11 +49,22 @@
 
 | 项 | 内容 |
 |---|---|
-| 现状 | `src/index.ts` 约 13,750 行 / 约 620 KB；`index.js` 约 600 KB。含 90+ 导出、约 60 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、点火、台账、锁、控制台命令、调试面板、工具注册 |
+| 现状 | **v7.7 起：`src/index.ts` 12,710 行**（v7.6 为 12,614；本轮接入彼岸层只增不减，见 TD-8）。已抽出 `core/host-shape.ts`（996 行）、`core/ignition.ts`（1,005 行）与 `core/paradise-write.ts`（240 行）。剩余部分仍含 90+ 导出、约 60 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册 |
 | 影响 | 单文件让「改 A 碰坏 B」的排查成本变高；diff review 困难；IDE 索引与增量构建变慢；新人无法按职责分层阅读 |
-| 为什么现在不动 | v0.21 刚完成 P0 容灾（点火失败 un-retire 回滚）与 P1 治理（身份元数据 / 记忆库治理），行为面刚被 399 条测试锁定。此刻搬迁会把「已验证」变回「未验证」，且回滚路径本身是新代码，风险叠加 |
-| 退出条件（可验收） | ① 按职责拆成 `session-slice.ts` / `tape.ts` / `injection.ts` / `ignition.ts` / `ledger.ts` / `guards.ts` / `console.ts` / `tools.ts` 等模块，每个 ≤ 800 行；② `index.ts` 只保留 `apply()` 装配与再导出，≤ 300 行；③ **拆前后测试数不变、全绿**；④ `scripts/build.mjs` 的产物字节差异仅来自模块边界（banner 与 import 语句）；⑤ 每个模块导出面的 `grep` 参考计数与拆前一致（防止顺手删了导出） |
+| 为什么现在不动 | 见下方 TD-7：本轮只搬了「与彼岸层真正重叠」的两块。剩下的搬运是纯位移，不减复杂度，且 84 个测试文件直接 import 那些区域的 30 个符号 |
+| 退出条件（可验收） | ① 按职责拆成 `session-slice.ts` / `tape.ts` / `injection.ts` / `ledger.ts` / `guards.ts` / `console.ts` / `tools.ts` 等模块，每个 ≤ 800 行；② `index.ts` 只保留 `apply()` 装配与再导出，≤ 300 行；③ **拆前后测试数不变、全绿**；④ `scripts/build.mjs` 的产物字节差异仅来自模块边界（banner 与 import 语句）；⑤ 每个模块导出面的 `grep` 参考计数与拆前一致（防止顺手删了导出） |
 | 建议节奏 | 一次只搬一个模块，搬完立刻跑全量 + 真机切片一次；不与其他行为改动混在同一次提交 |
+| 进度 | ✅ `core/host-shape.ts`（v7.6，996 行：身份元数据 / 四个消息构造器 / materializeTape / buildInjectionEvents / assertColdLog / extractActiveGoalChange / 系统头与红线）<br>✅ `core/ignition.ts`（v7.6，921 行 → v7.7 1,005 行：点火通道 + 每目标准入 + 持久队列 + 重试 + 回滚）<br>✅ `core/paradise-write.ts`（v7.7，240 行：彼岸层桥接 —— 懒加载、按 ctx 缓存、具名拒绝）<br>⏳ 存储/账本层（约 1,517 行）<br>⏳ 工具注册层（约 4,119 行） |
+
+### TD-7 存储层与工具层「未搬移」（P2，v7.6 登记）
+
+| 项 | 内容 |
+|---|---|
+| 现状 | v7.6 只抽出了与 `dsh-paradise` **真正重叠**的两块：`core/host-shape.ts`（996 行）与 `core/ignition.ts`（921 行）。`index.ts` 仍有两大块没有搬：<br>① **存储 / 账本 / 墓碑 / 转生**（约 1,517 行）：`.retired.json`、`.transferred.json`、`.graft-targets.json`、`.graft-prepared.json`、事务恢复、锁的调用点；<br>② **工具注册层**（约 4,119 行）：8 个工具的 `parameters` / `output.schema` / `render` 样板，加上 `agent/pre-step`、`agent/turn-stopping`、`session/event` 的监听与水位判定。 |
+| 为什么不搬 | **不是因为难，是因为没有收益。** 这两块与彼岸层**零重叠**：存储层是 graft 私有的转生账本（`dsh-paradise` 不关心一个会话为什么被退休），工具层是 graft 自己的对外门面（协议层不该知道 `graft_prepare` 的 schema）。<br>把它们搬到 `src/core/` 只是**换文件**——总行数不变、耦合不变、认知负担不变，但会新增两类风险：<br>（a）84 个测试文件直接 import 这两个区域的 **30 个符号**（`acquireFileLock`、`recoverGraftTransactions`、`renderTaskBoard`、`graftSliceAndInject`、`readLedgerPayload` 等），搬动就要逐个核对 import 面；<br>（b）两个区域都有**模块级可变状态**（`retiredSessions`、`graftTargets`、`autoGraftStates`）被 pre-step 与工具处理器共享，搬到新文件后跨模块访问会立刻遇到本文件已经踩过两次的 TDZ 问题。 |
+| 什么时候该搬 | 当**接入彼岸层的适配器**成为下一步时（第二阶段），工具层要改的是调用点而不是位置——那时顺手搬才有意义：改动本来就要发生，搬动是免费的。现在单独搬一次，等于为同一个文件付两次回归成本。<br>**v7.7 更新**：第二阶段（接入彼岸层）**已经发生**，但工具层仍然没搬——因为实际改动只落在 `graftSliceAndInjectUnlocked` 内的**两个调用点**（create 与 rollback）和 `igniteTargetSession` 的**通道段**，工具注册那一层（8 个工具的 schema / render 样板、pre-step 与 turn-stopping 监听、水位判定）一行都没动。原来那句「第二阶段顺手搬」的假设，被事实推翻了：接入彼岸层不是一次全局改写，而是三处调用点的替换。所以这条记录继续有效，只是理由更新为「**至今仍没有发生那次顺手的机会**」。 |
+| 退出条件（可验收） | ① 存储层搬进 `core/stores.ts`（≤ 800 行），`register` / `commit` / `discard` / `recover` 四个动作各自成函数；② 工具层搬进 `core/tools.ts`，`apply()` 只做 `registerTools(ctx)` 一行装配；③ **542 条测试全绿且数字不变**；④ 上述 30 个被测试 import 的符号全部保持同名再导出；⑤ 真机切片一次，侧边栏、卡片、点火全部正常。 |
+| 与彼岸层的关系 | **无。** 这是 graft 的内部整理，不涉及协议。`dsh-paradise` 只接管「怎么在宿主上写一个会话」，不接管「graft 为什么决定写它」。 |
 
 ### TD-2 `dsh-memory/src/index.ts` 单文件偏大（P2，非阻塞）
 
@@ -88,6 +99,7 @@
 |---|---|
 | 现状 | 点火的成功/失败写入 `.graft-audit.jsonl` 与工具返回值；控制台显示「未点火列表」。但**通道为何不可用**（服务未挂载 / 权限 / provider 拒绝）只能从 `reason` 字符串推断 |
 | 退出条件 | 在 `IgnitionResult` 中区分失败类别（`no-channel` / `rejected` / `timeout` / `threw`），控制台按类别给不同处置建议 |
+| 进度（v7.7/v7.8） | ✅ **部分达成。** v7.7 接入彼岸层后，`no-channel` 与 `rejected` 已在回执上分开：前者是 `attempted: false`（没通道，意图入队重试），后者是 `attempted: true, ok: false`（试过并被拒）。`timeout` 与 `threw` 仍然只能从 `reason` 文本区分——彼岸层的 `describeFailure` 会把 `(aborted: …)` 附在原因后面，这是可读但不可断言的形态。⏳ 剩余：给回执加一个枚举字段（需要同时改彼岸层回执类型与 graft 的映射，属于下一轮的范围） |
 
 ### TD-6 `index.ts` 里的「未导出但被测试间接依赖」的领域逻辑（P2，v0.22 新增）
 
@@ -97,6 +109,18 @@
 | 影响 | 单测成本高、失败定位慢；一个纯函数（如「哪些 target 需要点火」）被迫用集成测试覆盖 |
 | 为什么现在不动 | 拆这些函数会动到 `apply()` 的装配顺序，而点火/回滚路径刚刚才被 410 条测试锁住。**发版前不做搬迁** |
 | 退出条件 | 把 `igniteTargetSession` / `alreadyIgnited` / `unretireSource` 抽到 `ignition.ts`，作为**纯函数 + 注入式副作用**导出；`index.ts` 只做装配；测试可直接 import 单个函数，现有集成测试保持不变且全绿 |
+| 进度（v7.7） | ✅ **已达成。** `igniteTargetSession` / `alreadyIgnited` / `ignitionExhausted` / `igniteTargetSession` 的准入图已住在 `core/ignition.ts`，状态通过 `setIgnitionDepsResolver` 注入（不是 import，避免与 `index.ts` 成环）。`v0.32-ignition-signal.test.mjs` 与 `v0.22-ignition-routing.test.mjs` 直接 import 单函数跑单测，542 条集成测试同时保持全绿 |
+
+---
+
+### TD-8 彼岸层桥接的两条契约，是**调用方**的事实还是**宿主**的事实（P1，v7.7 登记）
+
+| 项 | 内容 |
+|---|---|
+| 现状 | v7.7 把 graft 的物理写入、冷读校验、回滚与点火通道接进了 `dsh-paradise`。接入过程暴露了四个只有**真实业务消费者**才会撞到的边界问题，全部已修，但每一条都是「协议里少了一个字段」而不是「graft 写错了」：<br>① `isSeeded`：预写校验用的是合成 header，缺 `isSeeded: false`，导致 104 条测试在 `SEEDED_HEADER` 处集体失败；<br>② 可见消息的 `source.kind`：适配器把 observer 的 `'user'` 约定当成通用宿主规则，拒绝了 graft 合法的 `plugin:graft-replay` 回放tape；<br>③ `assistant/message` 回显：同理，回显是「本适配器合成的内容」的约定，不是宿主要求，回放tape 里没有它是对的；<br>④ `prompt` 的 marker 与 mode 词：适配器用 observer 的历史 marker（`[dsh-observer 点火]`）与协议词（`interrupt`）发请求，而宿主只认 `steer`、graft 的日志里只有它自己的 marker。 |
+| 影响 | 每一条都表现为「**静默降级或错误拒绝**」，而不是崩溃。最贵的第 ④ 条：marker 不匹配会让幂等检查永远判定「没点过」，于是每次重试都会把同一条指令**再发一次**，目标会把它读成两轮用户意图 |
+| 为什么登记而不是继续修 | 四条都已修完并锁了测试（`dsh-paradise/test/caller-contract.test.mjs` 8 条）。但「哪些字段属于调用方」这个判断**只做过一次**，下一个业务消费者（`dsh-memory`、`dsh-observer` 的下一个版本）很可能带来第五、第六条。把它登记下来，是为了下一次不再靠撞墙发现 |
+| 退出条件 | ① `protocol/adapters.ts` 的 `CreateRequest` / `TurnTrigger` 对每个 caller-supplied 字段都写明「谁的约定」；② `caller-contract.test.mjs` 覆盖 create（`tape` / `publish`）与 trigger（`marker` / `mode` / `fallbackModes` / `origin`）的每一条；③ **第二条业务消费者接入时，零新增修复**——若仍有新增，说明边界还没定清 |
 
 ---
 

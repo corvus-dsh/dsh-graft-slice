@@ -113,8 +113,198 @@ export { graftError }
 export { acquireFileLock, withFileLock, sleepSync, lockDirFor, LOCK_STALE_MS, LOCK_TIMEOUT_MS }
 export type { GraftAuditEntry }
 
+/**
+ * v7.6 — THE IGNITION BLOCK MOVED TO `src/core/ignition.ts` (723 lines out of this file).
+ *
+ * THE SPLIT, AND WHY IT LANDS THERE
+ *
+ * The question asked of every line was: is this a fact about talking to a host, or a fact about graft's
+ * own bookkeeping?
+ *
+ *   → `dsh-paradise` owns the CHANNEL: marker, prompt text, AbortSignal-as-timeout, the two channels,
+ *     "an unreadable log is UNKNOWN rather than already-done". Identical in spirit to what the observer
+ *     needs, so it belongs to the layer.
+ *
+ *   → `src/core/ignition.ts` owns the POLICY: the per-TARGET admission map (so two grafts finishing in
+ *     the same tick cannot both prompt), the retry's liveness checks, the durable pending queue, and the
+ *     rollback that un-retires a source. All of it reads graft's own state, and none of it means
+ *     anything to another plugin.
+ *
+ * THE STATE DID NOT MOVE. `retiredSessions`, `graftTargets` and the auto-graft maps are shared with the
+ * pre-step gate, the transfer machinery and the tool handlers; moving them would mean moving half of
+ * this file. The module reaches them through an injected resolver instead — the same one-way shape
+ * `core/txn.ts` uses for its audit sink, for the same reason (the bundler inlines both into one scope,
+ * where a reverse import is a temporal-dead-zone crash rather than a build error).
+ *
+ * SIGNATURES DID NOT CHANGE. Seven of these functions are called by four test files and by the
+ * activation path; a `deps` argument would have meant editing 21 test cases for a refactor whose whole
+ * promise is to be invisible. The resolver is registered at the END of this file, once every declaration
+ * exists, and every signature stays as it was.
+ */
+import {
+  DEFAULT_IGNITION_PROMPT,
+  IGNITION_MARKER,
+  IGNITION_MAX_ATTEMPTS,
+  ROLLBACK_NOTICE,
+  ROLLBACK_NOTICE_MARKER,
+  alreadyIgnited,
+  attemptIgnition,
+  buildIgnitionPrompt,
+  describePromptFailure,
+  igniteTargetSession,
+  ignitionDeadline,
+  ignitionExhausted,
+  isIgnitionText,
+  loadPendingIgnitions,
+  persistPendingIgnitions,
+  resumePendingIgnitions,
+  rollbackFailedIgnition,
+  setIgnitionDepsResolver,
+  takeRollbackNotice,
+} from './core/ignition.js'
+import type { IgnitionDeps, IgnitionResult, IgnitionRollback, PendingIgnition } from './core/ignition.js'
+
+export {
+  DEFAULT_IGNITION_PROMPT,
+  IGNITION_MARKER,
+  IGNITION_MAX_ATTEMPTS,
+  ROLLBACK_NOTICE,
+  ROLLBACK_NOTICE_MARKER,
+  alreadyIgnited,
+  attemptIgnition,
+  buildIgnitionPrompt,
+  describePromptFailure,
+  igniteTargetSession,
+  ignitionDeadline,
+  ignitionExhausted,
+  isIgnitionText,
+  loadPendingIgnitions,
+  persistPendingIgnitions,
+  resumePendingIgnitions,
+  rollbackFailedIgnition,
+  takeRollbackNotice,
+}
+export type { IgnitionResult, IgnitionRollback, PendingIgnition }
+
+/**
+ * THE IGNITION STATE LIVES HERE; the functions live in `core/ignition.ts`.
+ *
+ * These four declarations were inside the block that moved. They stayed behind because code this file
+ * still owns reads them: the pre-step gate consults `ignitionAdmissions`, the debug-status tool
+ * serialises `pendingIgnitions`, and `configureRetiredStore` resets all of them.
+ */
+const pendingIgnitions = new Map<string, PendingIgnition>()
+/** Admissions recorded in this process, per TARGET. See the routing note in core/ignition.ts. */
+const ignitionAdmissions = new Map<string, { at: number; promptChars: number }>()
+/** Sources already told about a rollback in this process, so the same notice is written twice. */
+const rollbackNoticed = new Set<string>()
+/**
+ * v7.8 — THE ROLLBACK NOTICES WAITING FOR DELIVERY, per source session.
+ *
+ * Replaces the `live.append('developer/message', { turn: 0, step: 0 })` that used to put the notice
+ * into the source's log. That shape is not a real round, and the host's resume-time format validation
+ * rejects it; the notice now travels through the pre-step `messages` channel instead, which writes
+ * nothing and consumes no step. Lives HERE (not in `core/ignition.ts`) because the pre-step waterfall
+ * that delivers it is declared here — same reason every other piece of ignition state does.
+ */
+const rollbackNotices = new Map<string, { text: string; at: number; targetId: string }>()
+/** Where the pending-ignition queue is persisted; set by `configureRetiredStore`. */
+let pendingIgnitionPath = ''
+
+/**
+ * v7.6 — THE HOST-SHAPE LAYER MOVED TO `src/core/host-shape.ts` (~900 lines out of this file).
+ *
+ * WHAT LEFT: the identity metadata, the four message constructors, `materializeTape` with its surface
+ * assertions, `buildInjectionEvents`, `assertColdLog`, `extractActiveGoalChange`, and the system-head
+ * prompt with its workspace red line.
+ *
+ * WHAT STAYED, DELIBERATELY: `buildTape`, `buildInjectionPlan` and everything they call — the goal, the
+ * board, the constraints, the carryover, the codeblock pointerisation. Those decide WHAT a handoff says,
+ * which is graft's policy, not the runtime's shape. The dependency count is what settled it: the plan
+ * builders touch 59 outside symbols including live state; the shape layer touches 11, and after this move
+ * all eleven are TYPES plus one `const` string.
+ *
+ * EVERY SYMBOL IS RE-EXPORTED because it is the plugin's public surface: the test suite imports these
+ * names from index.js, and a file move must not rename anything.
+ */
+import {
+  GRAFT_CHAIN_GRACE_TURNS,
+  IDENTITY_METADATA_MARKER,
+  MIGRATION_SYSTEM_PROMPT,
+  assertColdLog,
+  assertLogOnly,
+  assertMessageSurface,
+  assertTopLevelHeader,
+  buildInjectionEvents,
+  extractActiveGoalChange,
+  extractRuntimeIntent,
+  injectionSource,
+  materializeTape,
+  migrationSystemPrompt,
+  parseIdentityMetadata,
+  renderIdentityMetadata,
+  workspaceRedline,
+} from './core/host-shape.js'
+import type { GraftIdentity } from './core/host-shape.js'
+export {
+  GRAFT_CHAIN_GRACE_TURNS,
+  IDENTITY_METADATA_MARKER,
+  MIGRATION_SYSTEM_PROMPT,
+  assertColdLog,
+  assertLogOnly,
+  assertMessageSurface,
+  assertTopLevelHeader,
+  buildInjectionEvents,
+  extractActiveGoalChange,
+  extractRuntimeIntent,
+  injectionSource,
+  materializeTape,
+  migrationSystemPrompt,
+  parseIdentityMetadata,
+  renderIdentityMetadata,
+  workspaceRedline,
+}
+export type { GraftIdentity }
+
 /** Cordis plugin name. */
 export const name = 'dsh-graft-slice'
+
+/**
+ * v7.7 — THE PHYSICAL WRITE GOES THROUGH `dsh-paradise`.
+ *
+ * `ensureParadiseWrite` resolves the layer LAZILY (a static bare import would survive into this
+ * single-file bundle and make an absent package fatal at load, before any test could say why), caches the
+ * answer including a failure, and returns a NAMED refusal instead of throwing.
+ * `PARADISE_WRITE_MISSING_CONSEQUENCE` is the one sentence every caller prints, so a user sees the same
+ * instruction wherever the gap is reported.
+ */
+import {
+  PARADISE_WRITE_MISSING_CONSEQUENCE,
+  ensureParadiseWrite,
+  paradiseSpecifiers,
+  resetParadiseWriteCache,
+  unavailableWriteBinding,
+} from './core/paradise-write.js'
+import type { ParadiseWriteBinding } from './core/paradise-write.js'
+
+/**
+ * v7.7 — THE BRIDGE'S PUBLIC SURFACE.
+ *
+ * WHY THESE ARE EXPORTED AND NOT MERELY IMPORTED: the degradation path is the interesting one, and it
+ * is the one a test (or an operator replacing the layer mid-session) must be able to exercise. Without
+ * `resetParadiseWriteCache` there is no way to ask "what happens if the layer is absent NOW?" — and
+ * that question is exactly how a silent fallback would hide. `paradiseSpecifiers` is exported so the
+ * resolution ORDER is assertable rather than assumed, and `unavailableWriteBinding` so a caller can
+ * prime the real failure shape instead of inventing one.
+ */
+export {
+  PARADISE_WRITE_MISSING_CONSEQUENCE,
+  ensureParadiseWrite,
+  paradiseSpecifiers,
+  resetParadiseWriteCache,
+  unavailableWriteBinding,
+}
+export type { ParadiseWriteBinding }
 
 /**
  * Hard service dependencies. sessionPersistence is required for a durable
@@ -375,8 +565,12 @@ export interface GraftSource {
  * `plugin:<name>` is the namespace this project already uses for synthetic
  * producers (`extractSourceTemplate` refuses a bare `plugin` and accepts
  * `plugin:graft`). Reusing it keeps one convention instead of two.
+ *
+ * v7.6: DECLARED IN `core/host-shape.ts` (which cannot import it without a cycle), and imported +
+ * re-exported here so the constant still has exactly ONE definition in the bundle.
  */
-export const GRAFT_REPLAY_SOURCE_KIND = 'plugin:graft-replay'
+import { GRAFT_REPLAY_SOURCE_KIND } from './core/host-shape.js'
+export { GRAFT_REPLAY_SOURCE_KIND }
 
 /** Whether a message source was written by this plugin's replay injector. */
 export function isGraftAuthored(source: unknown): boolean {
@@ -4002,729 +4196,6 @@ export function renderInstructionCard(input: InstructionCardInput): string {
  *  - A failure never fails the migration. The session exists and is loadable; the
  *    outcome is reported (`ignition`) and audited (`ignite` / `ignite-failed`).
  */
-export const IGNITION_MARKER = '[dsh-graft-slice 点火]'
-
-/**
- * v0.20: the wake-up says WHICH part of the tape to act on.
- *
- * v0.19 woke the target but left it to work out that the replayed history is
- * context, not assignment. A model handed a tape of a debugging session will often
- * start by re-reading the last stack trace — the very thing the slimming removed
- * from the board. So the prompt names the board as the instruction source and the
- * tape as evidence, and explicitly relieves the target of the old log's temporary
- * errors.
- *
- * Kept in sync with `BOARD_TRAILER` on purpose, but stated in both places: the
- * ignition prompt is the FIRST thing the target reads, and the board is what it
- * re-reads every turn. Either one alone leaves a gap.
- */
-export const DEFAULT_IGNITION_PROMPT =
-  `${IGNITION_MARKER} 你刚刚完成了一次物理切片：上一段会话的上下文已经交接给你，` +
-  '交接看板（交接任务看板 / PendingState）在工作区与历史里。' +
-  '旧会话的历史执行日志和临时错误无需理会，它们只作为回读证据保留；' +
-  '请直接执行看板中「⏭️ 待开始」里的待办项，不要复述交接过程，也不要重新调研已经完成的部分。'
-
-export interface IgnitionResult {
-  /** The channel was available and a call was made. */
-  attempted: boolean
-  ok: boolean
-  channel?: string
-  promptChars?: number
-  reason?: string
-  /** True when the target's own log already carried the ignition prompt. */
-  alreadyIgnited?: true
-}
-
-export interface PendingIgnition {
-  targetId: string
-  sourceSessionId: string
-  at: number
-  attempts: number
-}
-
-/** How many activation rounds a failed ignition is retried before giving up. */
-export const IGNITION_MAX_ATTEMPTS = 3
-/** A prompt that has not been admitted in this long is retried next activation. */
-const IGNITION_TIMEOUT_MS = 20_000
-
-// `PLUGIN_DIR` is declared further down, so this path is resolved lazily: reading
-// it at module-evaluation time would throw before the module finished loading.
-let pendingIgnitionPath = ''
-
-function ignitionPath(): string {
-  return pendingIgnitionPath.length > 0 ? pendingIgnitionPath : join(PLUGIN_DIR, '.graft-pending-ignition.json')
-}
-
-const pendingIgnitions = new Map<string, PendingIgnition>()
-/**
- * v0.21: sources already told about a rollback, in this process.
- *
- * Both the single-shot path and the queue path can reach the rollback for the same
- * migration; without this, the user gets the same notice twice and reads it as two
- * separate failures.
- */
-const rollbackNoticed = new Set<string>()
-
-export function buildIgnitionPrompt(settings: Pick<Required<GraftConfig>, 'ignitionPrompt'>): string {
-  const custom = settings.ignitionPrompt.trim()
-  if (custom.length === 0) return DEFAULT_IGNITION_PROMPT
-  return custom.startsWith(IGNITION_MARKER) ? custom : `${IGNITION_MARKER} ${custom}`
-}
-
-/** Is this user message the plugin's own ignition, rather than something a human typed? */
-export function isIgnitionText(text: string): boolean {
-  return typeof text === 'string' && text.trimStart().startsWith(IGNITION_MARKER)
-}
-
-export function loadPendingIgnitions(ctx: PluginContextLike | undefined): void {
-  try {
-    for (const value of readJsonArray(ignitionPath())) {
-      if (!isRecord(value)) continue
-      const targetId = typeof value.targetId === 'string' ? value.targetId : ''
-      if (targetId.length === 0) continue
-      pendingIgnitions.set(targetId, {
-        targetId,
-        sourceSessionId: typeof value.sourceSessionId === 'string' ? value.sourceSessionId : '',
-        at: Number(value.at ?? 0),
-        attempts: Number(value.attempts ?? 0),
-      })
-    }
-  } catch (error) {
-    try {
-      ctx?.logger?.warn?.(`[dsh-graft-slice] cannot read ${ignitionPath()}: ${String((error as any)?.message ?? error)}`)
-    } catch {
-      // Logging must not block activation.
-    }
-  }
-}
-
-function persistPendingIgnitions(ctx: PluginContextLike | undefined): void {
-  try {
-    mkdirSync(dirname(ignitionPath()), { recursive: true })
-    writeJsonAtomic(ignitionPath(), [...pendingIgnitions.values()])
-  } catch (error) {
-    try {
-      ctx?.logger?.warn?.(`[dsh-graft-slice] cannot write ${ignitionPath()}: ${String((error as any)?.message ?? error)}`)
-    } catch {
-      // Logging must not change the migration result.
-    }
-  }
-}
-
-export function getPendingIgnitions(): ReadonlyMap<string, PendingIgnition> {
-  return pendingIgnitions
-}
-
-/**
- * v0.22 P0: per-TARGET ignition bookkeeping, keyed by targetId.
- *
- * THE ROUTING BUG THIS PREVENTS
- *
- * "Already ignited" used to be decided only by re-reading the target's log. That is
- * correct but not sufficient: two grafts that finish within the same tick both read
- * "not ignited" before either prompt lands, so both call `prompt` — and a target that
- * receives the same instruction twice reads it as two separate turns of user intent.
- *
- * Worse, any state shared across targets (a single "last ignited id", a boolean) would
- * let session A's admission mark session B as already started: A's instruction is
- * effectively delivered to nobody while B never gets one. So this map is keyed by the
- * TARGET and every read/write names that key explicitly — there is no code path that
- * consults ignition state without saying which target it is about.
- */
-const ignitionAdmissions = new Map<string, { at: number; promptChars: number }>()
-
-/** Has THIS target been admitted an ignition prompt in this process? */
-export function hasIgnitionAdmission(targetId: string): boolean {
-  return ignitionAdmissions.has(targetId)
-}
-
-/** Record that a prompt was admitted for THIS target (never for another one). */
-export function markIgnitionAdmission(targetId: string, promptChars: number): void {
-  ignitionAdmissions.set(targetId, { at: Date.now(), promptChars })
-}
-
-/** Test/diagnostic view: the admissions recorded in this process, per target. */
-export function getIgnitionAdmissions(): ReadonlyMap<string, { at: number; promptChars: number }> {
-  return ignitionAdmissions
-}
-
-/**
- * Does this error mean "that session is not there", as opposed to "I could not read it"?
- *
- * 0.2.2's Remote error code is `session/not-found` — hyphenated — so the old
- * `/not found/` test missed the exact case it was written for.
- */
-const SESSION_MISSING = /session\/not[\s_-]?found|not[\s_-]found|enoent|no such/iu
-
-/** Does the target's own log already carry the ignition prompt? */
-async function alreadyIgnited(ctx: PluginContextLike, targetId: string): Promise<boolean> {
-  // The in-process admission is checked FIRST: it is the only signal that covers the
-  // window between "prompt accepted" and "prompt visible in the target's log".
-  if (ignitionAdmissions.has(targetId)) return true
-  try {
-    const raw = await ctx.sessionQuery.readSession(targetId)
-    const events = Array.isArray((raw as any)?.events) ? ((raw as any).events as SessionEventLike[]) : []
-    for (const event of events) {
-      if (event?.type !== 'user/message') continue
-      if (isIgnitionText(textOfMessage(event.data))) return true
-    }
-    return false
-  } catch (error) {
-    const message = String((error as any)?.message ?? error)
-    // Two different failures, two different answers:
-    //  - the session does not exist -> it was certainly not ignited; prompt (the
-    //    resume inside `prompt` is what creates the live agent);
-    //  - anything else (transient I/O, a service proxy that refuses reads) -> UNKNOWN.
-    //
-    // v0.32 P0: an unknown used to return `true`, i.e. "already ignited". That turned a
-    // failed READ into a reported SUCCESS, so the queue entry was deleted and the target
-    // was never woken — the silent no-op this module promises never to produce. (It also
-    // explains a real `ignite … ok (already ignited)` audit line for a target whose log
-    // had no ignition event: the not-found test did not match `session/not-found`, the
-    // Remote's hyphenated code.) Unknown must now be reported as a failure so the
-    // durable intent survives to the next activation.
-    if (SESSION_MISSING.test(message)) return false
-    throw new Error(`cannot read target log: ${message}`)
-  }
-}
-
-/**
- * v0.19: the one call that turns a durable artifact into a running worker.
- *
- * Channels are tried in order and REPORTED: `sessionController.prompt` is the Host
- * service (what the composer uses); `remote.session.prompt` is the same operation
- * through the generated Remote namespace, for a composition where only that face is
- * mounted. No channel means the capability is absent, which is reported as such —
- * never as a silent no-op.
- */
-/**
- * v0.32 P0 — THE 0.2.2 SIGNAL CONTRACT, WHICH v0.31 VIOLATED.
- *
- * In 0.2.2-rc.1 `sessionController.prompt(request, signal)` takes the AbortSignal as a
- * REQUIRED second argument and touches it on the first line
- * (`signal.throwIfAborted()`, for caller cancellation before prompt admission).
- * v0.31 passed `undefined` there, so every ignition died before the prompt was ever
- * admitted:
- *
- *   sessionController.prompt: Cannot read properties of undefined (reading 'throwIfAborted')
- *
- * The target stayed durable and permanently inert, the source was already retired, and
- * the only trace was one audit line — the "no auto wake-up" the user saw. The signal is
- * now built for every channel, and its abort is also the timeout, so a prompt that never
- * settles leaves an ABORTED signal behind instead of a dangling promise race.
- */
-function ignitionDeadline(): { signal: AbortSignal; release: () => void; expired: Promise<never> } {
-  const controller = new AbortController()
-  let rejectExpired: (error: Error) => void = () => {}
-  const expired = new Promise<never>((_resolve, reject) => {
-    rejectExpired = reject
-  })
-  const timer = setTimeout(() => {
-    const error = new Error(`timeout after ${IGNITION_TIMEOUT_MS}ms`)
-    controller.abort(error)
-    rejectExpired(error)
-  }, IGNITION_TIMEOUT_MS)
-  if (typeof (timer as any).unref === 'function') (timer as any).unref()
-  // The race loser's rejection must not surface as an unhandled one when the prompt
-  // settled first and `release()` cleared the timer.
-  expired.catch(() => {})
-  return { signal: controller.signal, release: () => clearTimeout(timer), expired }
-}
-
-/**
- * Is the target already RUNNING, as the Host itself defines it?
- *
- * Used only on the retry path. A retried ignition must never re-instruct a target that
- * is already live: either our earlier prompt did land (and its marker is in the log) or
- * a human opened the target and took over. Prompting again in that window reads to the
- * target as the same instruction given twice, and treating it as a failure would fire
- * the rollback that resurrects a retired source.
- */
-async function targetAlreadyLive(ctx: PluginContextLike, targetId: string): Promise<boolean> {
-  try {
-    const service = (ctx.get as any)?.('sessionController')
-    if (!isRecord(service) || typeof (service as any).state !== 'function') return false
-    const { signal, release } = ignitionDeadline()
-    try {
-      const state = await (service as any).state({ sessionId: targetId }, signal)
-      return isRecord(state) && (state as any).active === true
-    } finally {
-      release()
-    }
-  } catch {
-    // Unknown is not "live": an unknown target still gets its one ignition attempt.
-    return false
-  }
-}
-
-/**
- * Has the target moved past the tape the slice wrote?
- *
- * Only meaningful on the retry path, and only when the mark recorded how many events
- * the tape had. A cold target that nobody touched still ends exactly at that count.
- */
-async function targetAlreadyDriven(ctx: PluginContextLike, targetId: string): Promise<boolean> {
-  const mark = graftTargets.get(targetId)
-  if (mark === undefined || typeof mark.seedEvents !== 'number') return false
-  try {
-    const raw = await ctx.sessionQuery.readSession(targetId)
-    const events = Array.isArray((raw as any)?.events) ? ((raw as any).events as unknown[]) : []
-    return events.length > mark.seedEvents
-  } catch {
-    return false
-  }
-}
-
-export async function igniteTargetSession(
-  ctx: PluginContextLike,
-  settings: Required<GraftConfig>,
-  targetId: string,
-  sourceSessionId: string,
-  options: { retry?: boolean } = {},
-): Promise<IgnitionResult> {
-  if (!settings.igniteTarget) return { attempted: false, ok: false, reason: 'igniteTarget=false' }
-  const prompt = buildIgnitionPrompt(settings)
-  // v0.32: the retry path asks the HOST for liveness FIRST, because a target that is
-  // running makes the log read below unreliable (a live log mid-turn can fail replay
-  // validation), and "I could not read it" must not become "it was never woken".
-  if (options.retry === true && (await targetAlreadyLive(ctx, targetId))) {
-    return {
-      attempted: false,
-      ok: true,
-      alreadyIgnited: true,
-      channel: 'sessionController.state',
-      reason: 'target already live',
-      promptChars: prompt.length,
-    }
-  }
-  try {
-    if (await alreadyIgnited(ctx, targetId)) {
-      return { attempted: false, ok: true, alreadyIgnited: true, promptChars: prompt.length }
-    }
-  } catch (error) {
-    // v0.32: an unreadable log is UNKNOWN, and an unknown is reported as a failure so
-    // the queued intent survives — never as "already ignited".
-    return {
-      attempted: false,
-      ok: false,
-      reason: String((error as any)?.message ?? error),
-      promptChars: prompt.length,
-    }
-  }
-  if (options.retry === true && (await targetAlreadyDriven(ctx, targetId))) {
-    return {
-      attempted: false,
-      ok: true,
-      alreadyIgnited: true,
-      channel: 'graft-targets.seedEvents',
-      reason: 'target already driven past its seed',
-      promptChars: prompt.length,
-    }
-  }
-  const request = (): Record<string, unknown> => ({
-    requestId: `graft-ignite-${targetId}-${Date.now().toString(36)}`,
-    sessionId: targetId,
-    mode: settings.ignitionMode,
-    content: [{ type: 'text', text: prompt }],
-  })
-  const channels: Array<[string, (signal: AbortSignal) => Promise<unknown>]> = []
-  const service = (() => {
-    try {
-      return (ctx.get as any)?.('sessionController')
-    } catch {
-      return undefined
-    }
-  })()
-  if (isRecord(service) && typeof (service as any).prompt === 'function') {
-    // v0.32: the signal is the second argument the Host requires, not an optional extra.
-    channels.push(['sessionController.prompt', (signal) => (service as any).prompt(request(), signal)])
-  }
-  const remote = (() => {
-    try {
-      return (ctx.get as any)?.('remote')
-    } catch {
-      return undefined
-    }
-  })()
-  const remoteSession = isRecord(remote) ? (remote as any).session : undefined
-  if (remoteSession !== undefined && typeof remoteSession.prompt === 'function') {
-    channels.push(['remote.session.prompt', (signal) => remoteSession.prompt(request(), signal)])
-  }
-  if (channels.length === 0) {
-    return {
-      attempted: false,
-      ok: false,
-      reason: 'no ignition channel: ctx.sessionController.prompt is not mounted',
-    }
-  }
-  const failures: string[] = []
-  const { signal, release, expired } = ignitionDeadline()
-  try {
-    for (const [label, run] of channels) {
-      try {
-        const settled = await Promise.race([run(signal), expired])
-        const accepted = isRecord(settled) ? (settled as any).accepted !== false : true
-        if (accepted) {
-          // v0.22 P0: record the admission for THIS target before returning, so a second
-          // concurrent attempt cannot slip through the window before the prompt is
-          // visible in the target's own log.
-          markIgnitionAdmission(targetId, prompt.length)
-          return { attempted: true, ok: true, channel: label, promptChars: prompt.length }
-        }
-        failures.push(`${label}: prompt was not accepted`)
-      } catch (error) {
-        failures.push(`${label}: ${describePromptFailure(error, signal)}`)
-      }
-    }
-  } finally {
-    release()
-  }
-  return { attempted: true, ok: false, reason: failures.join(' | '), promptChars: prompt.length }
-}
-
-/**
- * v0.32: say WHY the prompt died, in the one line the audit keeps.
- *
- * A bare `AbortError` hides the interesting case: the Host aborted because the session
- * was busy or its writer was held, which is retryable, versus our own deadline, which
- * is not a fact about the target at all.
- */
-function describePromptFailure(error: unknown, signal: AbortSignal): string {
-  const message = String((error as any)?.message ?? error)
-  if (signal.aborted) {
-    const reason = (signal as any).reason
-    const why = typeof reason === 'string' ? reason : String((reason as any)?.message ?? 'deadline')
-    return `${message} (aborted: ${why})`
-  }
-  return message
-}
-
-/**
- * v0.19: queue -> ignite -> clear. The durable intent is what makes a crash
- * between "the target is on disk" and "the target is running" recoverable.
- */
-export async function attemptIgnition(
-  ctx: PluginContextLike,
-  settings: Required<GraftConfig>,
-  sourceSessionId: string,
-  targetId: string,
-  options: { retry?: boolean } = {},
-): Promise<IgnitionResult> {
-  if (!settings.igniteTarget) return { attempted: false, ok: false, reason: 'igniteTarget=false' }
-  const existing = pendingIgnitions.get(targetId)
-  pendingIgnitions.set(targetId, {
-    targetId,
-    sourceSessionId,
-    at: existing?.at ?? Date.now(),
-    attempts: existing?.attempts ?? 0,
-  })
-  persistPendingIgnitions(ctx)
-  const result = await igniteTargetSession(ctx, settings, targetId, sourceSessionId, options)
-  if (result.ok) {
-    pendingIgnitions.delete(targetId)
-    persistPendingIgnitions(ctx)
-  } else {
-    const entry = pendingIgnitions.get(targetId)
-    if (entry !== undefined) {
-      pendingIgnitions.set(targetId, { ...entry, attempts: entry.attempts + 1 })
-      persistPendingIgnitions(ctx)
-    }
-  }
-  try {
-    appendGraftAudit({
-      at: new Date().toISOString(),
-      kind: result.ok ? 'ignite' : result.attempted ? 'ignite-failed' : 'ignite-skipped',
-      sessionId: targetId,
-      ...(sourceSessionId.length === 0 ? {} : { targetSessionId: sourceSessionId }),
-      detail:
-        `${result.ok ? 'ok' : result.reason ?? 'not attempted'}` +
-        `${result.channel === undefined ? '' : ` via ${result.channel}`}` +
-        `${result.alreadyIgnited === true ? ' (already ignited)' : ''}` +
-        `${result.ok && result.reason !== undefined ? ` (${result.reason})` : ''}`,
-    })
-  } catch {
-    // The audit line is evidence; the migration must not depend on it.
-  }
-  return result
-}
-
-/**
- * v0.21 P0 — the DOUBLE-BLIND ROLLBACK.
- *
- * THE FAILURE THIS PREVENTS, AND WHY IT IS THE WORST ONE
- *
- * The migration retires the source BEFORE it ignites the target, because the whole
- * point is that the user stops typing into a session that is about to be replaced.
- * So for a window the system is deliberately one-sided: the source is frozen and
- * the target is the only way forward.
- *
- * If the ignition then fails — no channel, a throwing prompt, a 20s timeout, three
- * activation rounds of the same — that window never closes. The source is retired,
- * so its pre-step returns `{kind:'reject'}` and the user cannot continue there; the
- * target is durable but inert, so nothing happens there either. Both sessions are
- * alive on disk and NEITHER accepts work. That is the double-blind state: not a lost
- * migration, a lost SESSION.
- *
- * So the last resort is an UN-RETIRE: put the source back exactly as it was before
- * the migration (out of `.retired.json`, out of `.transferred.json`, and out of the
- * in-memory sets), tell it in its own log why it is back, and let the user retry.
- *
- * Deliberately NOT attempted when the target did wake up: a rollback that fires on
- * a successful ignition would resurrect a session the user has already left, which
- * is the "two divergent targets" failure the retirement machinery exists to stop.
- */
-export const ROLLBACK_NOTICE_MARKER = '[dsh-graft-slice 回滚]'
-
-export const ROLLBACK_NOTICE =
-  `${ROLLBACK_NOTICE_MARKER} 由于新会话点火失败，已为您自动回滚到当前会话，请重试切片。`
-
-/**
- * v0.21 P0: the TRUE un-retire.
- *
- * `persistRetiredStore(ctx, [id])` is not enough, and the reason is subtle: the write
- * path is a read-modify-write that ADOPTS the file's contents back into memory (which
- * is correct for merging two processes' retirements). So a removal that runs before
- * the file is rewritten can be undone by that same adopt pass on the next write — the
- * id comes back from disk and the session is frozen again, durably, on the next
- * restart. The rollback would look successful in memory and be a no-op on disk.
- *
- * This function does the removal in the only order that holds: remove from the file
- * under the lock, and make the in-memory set agree with the file afterwards.
- */
-function unRetireDurably(ctx: PluginContextLike, sessionId: string): boolean {
-  let restored = false
-  try {
-    mkdirSync(dirname(retiredStorePath), { recursive: true })
-    withFileLock(retiredStorePath, () => {
-      const remaining = new Set(
-        ledgerArray(retiredStorePath).filter((value): value is string => typeof value === 'string'),
-      )
-      remaining.delete(sessionId)
-      writeLedgerAtomic(retiredStorePath, [...remaining].sort())
-      // The memory set is made to AGREE with the file, not merged into: after an
-      // explicit removal, "the file does not have it" is the authoritative answer.
-      retiredSessions.delete(sessionId)
-      restored = !remaining.has(sessionId)
-    })
-  } catch (error) {
-    try {
-      ctx.logger?.warn?.(`[dsh-graft-slice] un-retire write failed for ${sessionId}: ${String((error as any)?.message ?? error)}`)
-    } catch {
-      // Logging must not change the rollback result.
-    }
-    return false
-  }
-  try {
-    mkdirSync(dirname(transferredStorePath), { recursive: true })
-    withFileLock(transferredStorePath, () => {
-      const remaining = { ...(ledgerRecord(transferredStorePath) as Record<string, unknown>) }
-      delete remaining[sessionId]
-      writeLedgerAtomic(transferredStorePath, remaining)
-      transferredSessions.delete(sessionId)
-    })
-  } catch (error) {
-    try {
-      ctx.logger?.warn?.(
-        `[dsh-graft-slice] un-retire transfer write failed for ${sessionId}: ${String((error as any)?.message ?? error)}`,
-      )
-    } catch {
-      // Logging must not change the rollback result.
-    }
-  }
-  // Belt and braces for the in-memory gate the pre-step actually reads.
-  //
-  // The pre-step consults FOUR per-session marks, not just the two ledgers: the
-  // retired set, the transferred map, the auto-graft STATE machine, and the deferred
-  // graft queue. Clearing only the ledgers leaves `autoGraftStates === 'done'`, which
-  // returns `reason: 'Transferred'` forever — the session would be un-retired on disk
-  // and still frozen in the running process, which is the same double-blind one layer
-  // down.
-  retiredSessions.delete(sessionId)
-  transferredSessions.delete(sessionId)
-  autoGraftStates.delete(sessionId)
-  autoGraftInFlight.delete(sessionId)
-  pendingGraftSources.delete(sessionId)
-  pendingConfirms.delete(sessionId)
-  // The "this id is a target we created" mark belongs to the TARGET, and a rollback
-  // ends that relationship: the source is a plain session again and must not inherit
-  // the target's grace-window protection.
-  graftTargets.delete(sessionId)
-  return restored || !retiredSessions.has(sessionId)
-}
-
-export interface IgnitionRollback {
-  attempted: boolean
-  sourceRestored: boolean
-  noticeAppended: boolean
-  /** Target left in place and marked, so it is visible but not picked up. */
-  targetId: string
-  reason?: string
-}
-
-/**
- * v0.21: undo a migration whose target never started.
- *
- * Order matters: the ledgers are restored FIRST, because an in-memory-only rollback
- * dies on the next restart and leaves the user exactly as stuck as before.
- */
-export async function rollbackFailedIgnition(
-  ctx: PluginContextLike,
-  sourceSessionId: string,
-  targetId: string,
-  reason: string,
-): Promise<IgnitionRollback> {
-  const out: IgnitionRollback = {
-    attempted: true,
-    sourceRestored: false,
-    noticeAppended: false,
-    targetId,
-    reason,
-  }
-  if (sourceSessionId.length === 0) {
-    return { ...out, attempted: false, reason: 'no source session to roll back to' }
-  }
-  try {
-    retiredSessions.delete(sourceSessionId)
-    transferredSessions.delete(sourceSessionId)
-    // v0.21: durable, in the order that survives a restart — see `unRetireDurably`.
-    out.sourceRestored = unRetireDurably(ctx, sourceSessionId)
-  } catch (error) {
-    out.reason = `${reason}; ledger rollback failed: ${String((error as any)?.message ?? error)}`
-  }
-  // Tell the human, in the session they will actually be looking at. A rollback that
-  // is only visible in an audit file reads as "nothing happened, try again" — and
-  // repeating the same failed migration is the wrong next move.
-  //
-  // v0.21: written at most ONCE per source. Both the single-shot path (this call
-  // exhausted the budget) and the queue path (a restart found the budget spent) can
-  // reach here for the same migration, and two identical notices read as two
-  // separate failures.
-  if (rollbackNoticed.has(sourceSessionId)) {
-    out.noticeAppended = true
-  } else {
-    try {
-      const live = ctx.sessions.get(sourceSessionId) as any
-      if (live !== undefined && typeof live.append === 'function') {
-        live.append('developer/message', {
-          turn: 0,
-          step: 0,
-          message: {
-            id: `graft-rollback-${sourceSessionId}-${Date.now().toString(36)}`,
-            role: 'developer',
-            content: [{ type: 'text', text: ROLLBACK_NOTICE }],
-          },
-        })
-        rollbackNoticed.add(sourceSessionId)
-        out.noticeAppended = true
-      }
-    } catch (error) {
-      out.reason = `${out.reason ?? reason}; notice failed: ${String((error as any)?.message ?? error)}`
-    }
-  }
-  // The target stays on disk — it may be perfectly good and just un-wakeable — but it
-  // must not look like the session to continue. A title is visible and survives a
-  // reload; the retirement of the source is what actually stops the split.
-  //
-  // The target is a DURABLE artifact, not a live session: nobody has resumed it, which
-  // is the whole problem. So the mark is appended through sessionPersistence when a
-  // live handle is absent, and a failure to mark is reported rather than hidden.
-  try {
-    const target = ctx.sessions.get(targetId) as any
-    if (target !== undefined && typeof target.append === 'function') {
-      target.append('session/title', {
-        title: `[点火失败] ${targetId}`,
-        messageSeqs: [],
-        source: { kind: 'user' },
-      })
-    } else {
-      const persistence = (ctx.get as any)?.('sessionPersistence')
-      if (isRecord(persistence) && typeof persistence.open === 'function') {
-        const handle = await persistence.open(targetId)
-        if (handle !== undefined && typeof handle.append === 'function') {
-          await handle.append([
-            {
-              type: 'session/title',
-              time: Date.now(),
-              data: { title: `[点火失败] ${targetId}`, messageSeqs: [], source: { kind: 'user' } },
-            },
-          ])
-          if (typeof handle.flush === 'function') await handle.flush()
-          if (typeof handle.close === 'function') await handle.close()
-        }
-      }
-    }
-  } catch {
-    // A missing target is not a rollback failure; the title is cosmetic evidence.
-  }
-  try {
-    appendGraftAudit({
-      at: new Date().toISOString(),
-      kind: 'ignite-rollback',
-      sessionId: sourceSessionId,
-      targetSessionId: targetId,
-      detail: `${reason}; sourceRestored=${out.sourceRestored} noticeAppended=${out.noticeAppended}`,
-    })
-  } catch {
-    // Evidence only.
-  }
-  return out
-}
-
-/**
- * v0.21: has this target exhausted its ignition budget?
- *
- * `IGNITION_MAX_ATTEMPTS` activation rounds is the contract the user asked for (20s
- * timeout x 3). Kept as a predicate so the rollback decision is testable without
- * waiting for a timer.
- */
-export function ignitionExhausted(entry: PendingIgnition | undefined): boolean {
-  return entry !== undefined && entry.attempts >= IGNITION_MAX_ATTEMPTS
-}
-
-export interface IgnitionAttemptWithRollback extends IgnitionResult {
-  /** Present when the attempt exhausted its budget and the source was restored. */
-  rollback?: IgnitionRollback
-}
-
-/**
- * v0.19: consume the queue — one activation, one attempt per pending target.
- *
- * Called at the end of `apply()`. It retries what a crash or a missing channel left
- * behind, and it GIVES UP after `IGNITION_MAX_ATTEMPTS` instead of retrying forever:
- * a target nobody can start is a fact to report, not a loop.
- *
- * v0.21: giving up now means ROLLING BACK. Before this, "gave up" deleted the queue
- * entry and left the source retired — the double-blind state, permanently.
- */
-export async function resumePendingIgnitions(
-  ctx: PluginContextLike,
-  settings: Required<GraftConfig>,
-): Promise<Array<{ targetId: string; ok: boolean; reason?: string; rollback?: IgnitionRollback }>> {
-  const out: Array<{ targetId: string; ok: boolean; reason?: string; rollback?: IgnitionRollback }> = []
-  for (const entry of [...pendingIgnitions.values()]) {
-    if (!settings.igniteTarget) break
-    if (ignitionExhausted(entry)) {
-      pendingIgnitions.delete(entry.targetId)
-      persistPendingIgnitions(ctx)
-      const rollback = await rollbackFailedIgnition(
-        ctx,
-        entry.sourceSessionId,
-        entry.targetId,
-        `gave up after ${entry.attempts} attempts`,
-      )
-      out.push({
-        targetId: entry.targetId,
-        ok: false,
-        reason: `gave up after ${entry.attempts} attempts; rolled back to ${entry.sourceSessionId}`,
-        rollback,
-      })
-      continue
-    }
-    const result = await attemptIgnition(ctx, settings, entry.sourceSessionId, entry.targetId, { retry: true })
-    out.push({ targetId: entry.targetId, ok: result.ok, ...(result.reason === undefined ? {} : { reason: result.reason }) })
-  }
-  return out
-}
 
 /**
  * v7.0 A1/A2: render one turn as a replay of the real conversation flow.
@@ -6196,847 +5667,6 @@ export function buildInjectionPlan(
  * the user sees), it greps as one line, and it is stable enough to be parsed by a
  * future tool that wants to walk the chain backwards.
  */
-export const IDENTITY_METADATA_MARKER = 'graft-identity'
-
-export interface GraftIdentity {
-  sourceSessionId: string
-  boundarySeq: number
-  generation: number
-  cwd?: string
-  at?: string
-}
-
-export function renderIdentityMetadata(identity: GraftIdentity): string {
-  const payload: Record<string, unknown> = {
-    sourceSessionId: identity.sourceSessionId,
-    boundarySeq: identity.boundarySeq,
-    generation: identity.generation,
-  }
-  if (identity.cwd !== undefined && identity.cwd.length > 0) payload.cwd = identity.cwd
-  if (identity.at !== undefined && identity.at.length > 0) payload.at = identity.at
-  return `<!-- ${IDENTITY_METADATA_MARKER}: ${JSON.stringify(payload)} -->`
-}
-
-/** Read the provenance back out of a message (or any text that carries the block). */
-export function parseIdentityMetadata(text: string): GraftIdentity | undefined {
-  if (typeof text !== 'string') return undefined
-  const match = new RegExp(`<!--\\s*${IDENTITY_METADATA_MARKER}:\\s*(\\{.*?\\})\\s*-->`, 'u').exec(text)
-  if (match === null) return undefined
-  try {
-    const parsed = JSON.parse(match[1]) as Record<string, unknown>
-    const sourceSessionId = typeof parsed.sourceSessionId === 'string' ? parsed.sourceSessionId : ''
-    const boundarySeq = Number(parsed.boundarySeq)
-    const generation = Number(parsed.generation)
-    if (sourceSessionId.length === 0 || !Number.isFinite(boundarySeq) || !Number.isFinite(generation)) return undefined
-    return {
-      sourceSessionId,
-      boundarySeq,
-      generation,
-      ...(typeof parsed.cwd === 'string' && parsed.cwd.length > 0 ? { cwd: parsed.cwd } : {}),
-      ...(typeof parsed.at === 'string' && parsed.at.length > 0 ? { at: parsed.at } : {}),
-    }
-  } catch {
-    // A malformed block is "no metadata", never a crash on the read path.
-    return undefined
-  }
-}
-
-function goalMessage(
-  cwd: string,
-  goal: string,
-  phase: string,
-  messageId: string,
-  sourceSessionId: string,
-  hasWorkspaceFiles = false,
-  constraints: readonly string[] = [],
-  /** v0.13: the workspace boundary block, already rendered ('' = guard disabled). */
-  redlineBlock = '',
-  /**
-   * v0.14: the chain depth of this target. Injected so the model can SEE that it
-   * is itself a migration product — the chain failure mode ("a target grafts
-   * again because it was created") is invisible to a session that does not know
-   * it is generation 2.
-   */
-  generation = 1,
-  /** v0.21 P1: the boundary the tape was cut at, for the identity metadata. */
-  boundarySeqForIdentity = 0,
-): Record<string, any> {
-  // v7.0 B4: read as a continuation, not as a handoff notice.
-  //
-  // v6.x opened with "【系统交接】上一段对话因为上下文满载，已经由系统安全接管
-  // 到这里。" and closed with "请顺接前文的思路直接继续，不必从头开始，也不必
-  // 复述这段说明。" Between them sat three more lines explaining the mechanism
-  // (where you are, that records still exist, that a file block is below).
-  //
-  // Every one of those lines describes the HANDOFF rather than the WORK. The
-  // target that reads them starts by orienting itself to a system event; the
-  // target that reads only what the user last said and what is still open starts
-  // by answering it. The acceptance criterion is "looks like a continuous
-  // conversation, not an outline" — a preamble about being relocated is the
-  // single largest source of outline-ness in the whole injection.
-  //
-  // What replaces it: the workspace as a fact (one line, because the model must
-  // resolve relative paths), the current goal as the user's own words, and the
-  // constraints. Nothing addresses the reader about the migration itself.
-  // v7.3.1: do not call this "当前要做的事" (the thing to do NOW).
-  //
-  // Measured on the live desktop. A source session had asked the agent to look up
-  // jet hub, then spent five turns finishing that work (4 of 5 todos completed).
-  // The goal extractor correctly captured the ORIGINAL request, but the label
-  // promised it was current:
-  //
-  //   当前要做的事：帮我看看jet hub这个插件最新版本，以及找个…插件市场
-  //   [Task Status]  … [x] 升级… [x] 安装… [x] 配置… [x] 启用… [ ] 重启后验证
-  //   [pending]      我接下来需要立刻执行：重启 DSH 后验证 Discover 页…
-  //
-  // The target read a task that was already DONE as its assignment and re-ran the
-  // research; the user's report was "the new session behaves like re-learning the
-  // content". The information to do otherwise was present — the label contradicted
-  // it.
-  //
-  // "这个会话的任务" states the session's task without asserting it is next. The
-  // next action is the pending state's job, and it always speaks in the present:
-  // "我接下来需要立刻执行：<open todo>". One owner per claim.
-  const lines = [
-    `工作目录 ${cwd}。`,
-    '',
-    `这个会话的任务：${goal}`,
-    '',
-    `graft_generation: ${generation}（第 ${generation} 代迁移产物${generation === 1 ? '：由原始会话直接切片' : ''}）`,
-  ]
-  // v0.21 P1: the IDENTITY METADATA, in the PendingState.
-  //
-  // Why this is worth a block of its own: the pipeline has always carried the chain
-  // depth as PROSE ("graft_generation: 3（第 3 代迁移产物）") and the source id in a
-  // sentence, and neither survives a machine reader. When a target turns out to be
-  // poisoned — the tape carried the wrong error, the boundary was wrong, the
-  // constraints were inherited from a session that no longer exists — the questions
-  // are exact: WHICH session, WHICH boundary seq, WHICH generation. Answering them
-  // from prose means a human re-reading a log; answering them from a machine-readable
-  // line means `graft_read_result` can be pointed at the exact coordinates.
-  //
-  // Deliberately HTML-comment shaped so it renders as nothing in a UI, and
-  // deliberately one line so a reader can grep it.
-  lines.push('', renderIdentityMetadata({ sourceSessionId, boundarySeq: boundarySeqForIdentity, generation, cwd }))
-  // v0.14 CHAIN GUARD: state the re-graft prohibition in the durable channel too.
-  // The tool layer refuses it (see autoGraftIfNeeded); saying it here is what stops
-  // the model from *asking* for a slice on its very first turn.
-  if (generation >= 1) {
-    lines.push(
-      `迁移纪律：本会话完成前 ${GRAFT_CHAIN_GRACE_TURNS} 轮之前不得再触发切片；先把手上的任务推进到明确的停泊点，再考虑交接。`,
-    )
-  }
-  // v7.0 C1: constraints live HERE, not in the system head.
-  //
-  // The host replaces surface node 0 with its own rendered prompt on the
-  // target's first live step (SystemPromptProjection.project). A constraint
-  // block appended to the system message therefore survived only until the
-  // model's first request — the defence existed in the log and was dead by the
-  // time anything read it. A `user/message` is never rewritten that way.
-  //
-  // The enumeration is deliberately mechanical: the failure mode this guards
-  // against is a model that summarises "the main constraints" and silently
-  // drops the one it was about to violate.
-  if (constraints.length > 0) {
-    lines.push(
-      '',
-      'HARD CONSTRAINTS（从源会话用户消息中抽取，逐条有效，不可协商）:',
-      ...constraints.map((constraint, index) => `${index + 1}. [ ] ${constraint}`),
-      '',
-      'If asked about constraints or progress, you MUST enumerate every single item above without skipping or summarizing.',
-    )
-  }
-  if (sourceSessionId.length > 0) {
-    // Stated as a capability, not as an apology for having lost context:
-    // earlier turns are indexed above by seq, and this is where the full text
-    // lives. One line, no reassurance.
-    lines.push('', `更早的原文在源会话 ${sourceSessionId}，按上面索引里的 seq 用 graft_read_result 取。`)
-  }
-  if (hasWorkspaceFiles) {
-    lines.push('', '写过/改过的文件见下方 [Workspace Files]，不需要重新列目录。')
-  }
-  // v0.13 GUARD: the durable copy of the workspace boundary.
-  //
-  // The system head is a throwaway node — the host overwrites it on the target's
-  // first live step — so a red line parked there never reaches the model. This
-  // user/message does, and it is the same channel the HARD CONSTRAINTS use.
-  if (redlineBlock.length > 0) lines.push('', redlineBlock)
-  return {
-    id: messageId,
-    role: 'user',
-    content: [{ type: 'text', text: lines.join('\n') }],
-    // v7.0 P5: marked, so a later graft never reads this back as a real user
-    // turn. Without it, generation 2 replays generation 1's copy of the
-    // conversation, and each hop moves further from what was actually said.
-    source: { kind: GRAFT_REPLAY_SOURCE_KIND },
-  }
-}
-
-/**
- * v5.2 标题清洗：提取到的"目标"有时是整段 JSON 或带方括号的原始载荷。
- * 那种标题在侧边栏里不可读，直接回退成时间戳形式。
- */
-/**
- * v6.1: the sidebar title must distinguish two migrations of the same source.
- *
- * Two targets created from one session produced byte-identical titles, so the
- * second looked like it had vanished from the sidebar — it was there, hiding
- * under the first one's name. A per-target suffix makes them distinguishable.
- */
-function sessionTitleForGoal(goal: string, targetSessionId?: string): string {
-  // v7.0: callers reach this with a possibly-absent goal (a report field that
-  // was not populated, a legacy caller). Coercing here keeps the sidebar title
-  // safe without every call site guarding the same thing.
-  const normalized = String(goal ?? '').replace(/\s+/gu, ' ').trim()
-  const stamp = new Date().toISOString().slice(5, 16).replace('T', ' ')
-  // v6.0：宁可回退到时间戳，也绝不让半个 JSON 括号出现在侧边栏。
-  const looksStructured =
-    normalized.length === 0 ||
-    /[{}[\]"]/u.test(normalized) ||
-    /"kind"\s*:/u.test(normalized) ||
-    /kind\s*:\s*persistent/u.test(normalized) ||
-    /persistent-capability-seed/u.test(normalized) ||
-    /^[\[{]/.test(normalized)
-  // The id tail is what makes two targets of one source distinct.
-  const suffix =
-    typeof targetSessionId === 'string' && targetSessionId.length > 6
-      ? ` · ${targetSessionId.slice(-6).replace(/^[-_]+/u, '')}`
-      : ''
-  if (looksStructured) return `[接续] ${stamp}${suffix}`
-  const head = Array.from(normalized).slice(0, 18).join('')
-  return `[接续] ${head || '会话交接'}${suffix}`
-}
-
-/**
- * v7.0 C1: the system head must carry NOTHING that has to survive.
- *
- * Verified against DSH source (`dsh-agent-loop`, `SystemPromptProjection`):
- *
- *   project(rendered, { inHistory, startsSeries }) {
- *     const head = nodes[0]
- *     if (!inHistory || startsSeries || rendered.length === 0) {
- *       const updates = nodes.slice(1).filter(n => n.text !== '').map(n => replace(n.seq, ''))
- *       if (head.text !== rendered) updates.push(replace(head.seq, rendered))   // <-- node 0 REPLACED
- *       return updates
- *     }
- *   }
- *
- * So on the target's first live step the host overwrites surface node 0 with its
- * own rendered system prompt, and clears any extra system nodes. Anything grafted
- * into the system head — including the HARD CONSTRAINTS block this file used to
- * append there — is destroyed before the model ever reads it.
- *
- * The schema forces the choice: `system/message` must source `kind: 'system-prompt'`,
- * and `deriveMessages()` emits it as `role: 'system'`, so it can never ride along
- * as a durable user turn. The only structure that survives is node 0 holding a
- * throwaway marker, with every payload moved to non-system surfaces.
- *
- * Constraints now travel in the goal `user/message` (see goalMessage), which the
- * host does not rewrite.
- */
-function systemMessage(
-  text: string,
-  skeletonTurn: number,
-  skeletonStep: number,
-  messageId: string,
-): Record<string, any> {
-  return {
-    turn: skeletonTurn,
-    step: skeletonStep,
-    message: {
-      id: messageId,
-      role: 'system',
-      content: [{ type: 'text', text }],
-      source: { kind: 'system-prompt' },
-    },
-  }
-}
-
-function assistantMessage(
-  text: string,
-  source: GraftSource,
-  skeletonTurn: number,
-  skeletonStep: number,
-  messageId: string,
-): Record<string, any> {
-  return {
-    turn: skeletonTurn,
-    step: skeletonStep,
-    message: {
-      id: messageId,
-      role: 'assistant',
-      content: [{ type: 'text', text }],
-      source,
-    },
-    // v2.1: synthetic or rewritten text has no model stream. Empty is the
-    // value both the seed and restore gates accept; copying a source stream
-    // would make content and stream disagree.
-    stream: [],
-  }
-}
-
-function assertLogOnly(event: SessionEventLike, type: string): void {
-  if (event.surfaceOp !== undefined) {
-    throw graftError('RED_LINE_SKELETON_SURFACE', `${type} must not carry surfaceOp`)
-  }
-  if (event.sourceEventSeqs !== undefined) {
-    throw graftError('RED_LINE_SKELETON_SURFACE', `${type} must not carry sourceEventSeqs`)
-  }
-}
-
-function assertMessageSurface(event: SessionEventLike, type: string): void {
-  if (event.surfaceOp !== 'append') {
-    throw graftError('RED_LINE_MESSAGE_SURFACE', `${type} must carry { surfaceOp: 'append' }`)
-  }
-  if (type === 'assistant/message' && event.sourceEventSeqs !== undefined) {
-    throw graftError('RED_LINE_ASSISTANT_SOURCE_EVENTS', 'assistant/message must not carry sourceEventSeqs')
-  }
-}
-
-/**
- * v0.32 (0.2.2 P0): build the tape as plain `SessionEvent` objects.
- *
- * DSH 0.2.2 moved `Session.append()` behind the store lifecycle: `prepare()`
- * returns a session that is read-only until `enter()` + `announce()` publish it,
- * and appending before that throws `cannot append outside a SessionStore`.
- *
- * This plugin must keep the target COLD. Publishing it into the live store would
- * make a later `agents.resume()` collide with the live entry (see the client
- * announcement note in `graftSliceAndInjectUnlocked`), and an unannounced entry
- * is exactly the half-live target that broke DSH restart recovery before.
- *
- * So the tape is materialised from the PUBLIC event contract instead: events are
- * contiguous from seq 0, a surface event carries `surfaceOp: 'append'`, and a
- * log-only event carries neither surface field. That is the same shape the old
- * `Session.append()` produced; only the store-owned writer is gone.
- */
-function materializeTape(
-  events: ReadonlyArray<{ type: string; data: Record<string, any>; surface: boolean }>,
-  createdAt: number,
-): SessionEventLike[] {
-  return events.map((item, index) => {
-    const event: SessionEventLike = {
-      type: item.type,
-      seq: index,
-      time: createdAt + index,
-      data: item.data,
-      ...(item.surface ? { surfaceOp: 'append' as const } : {}),
-    }
-    if (!item.surface) {
-      assertLogOnly(event, item.type)
-      return event
-    }
-    assertMessageSurface(event, item.type)
-    if (item.type === 'system/message') {
-      if (event.sourceEventSeqs !== undefined) {
-        throw graftError('RED_LINE_SYSTEM_SOURCE_EVENTS', 'system/message must not carry sourceEventSeqs')
-      }
-      if (event.data?.message?.role !== 'system') {
-        throw graftError('RED_LINE_SYSTEM_ROLE', 'system/message data.message.role must be system')
-      }
-      if (event.data?.message?.source?.kind !== 'system-prompt') {
-        throw graftError('RED_LINE_SYSTEM_SOURCE', 'system/message source.kind must be system-prompt')
-      }
-      if (!Array.isArray(event.data?.message?.content) || event.data.message.content.length === 0) {
-        throw graftError('RED_LINE_SYSTEM_CONTENT', 'system/message must have non-empty content')
-      }
-      return event
-    }
-    if (item.type === 'assistant/message') {
-      if (!Array.isArray(event.data?.stream) || event.data.stream.length !== 0) {
-        throw graftError('RED_LINE_ASSISTANT_STREAM', 'assistant/message stream must be []')
-      }
-      if (event.data?.message?.role !== 'assistant') {
-        throw graftError('RED_LINE_ASSISTANT_ROLE', 'assistant/message data.message.role must be assistant')
-      }
-      const sourceKind = event.data?.message?.source?.kind
-      if (typeof sourceKind !== 'string' || sourceKind.length === 0 || sourceKind === 'plugin') {
-        throw graftError('RED_LINE_SOURCE_KIND', 'assistant/message source.kind must be producer-owned, not plugin')
-      }
-    }
-    return event
-  })
-}
-
-function sourceForReport(source: GraftSource): GraftSource {
-  const copy: GraftSource = { kind: source.kind }
-  if (source.provider !== undefined) copy.provider = source.provider
-  if (source.model !== undefined) copy.model = source.model
-  return copy
-}
-
-/**
- * A handoff session is a new top-level session, never a subagent/fork child.
- * The real v4 header names the parent `parentSession`; older drafts used
- * `parentSessionId`, and `lineage` is checked defensively for compatibility.
- */
-function assertTopLevelHeader(header: SessionHeaderLike): void {
-  const candidate = header as any
-  const hasLineage =
-    candidate.parentSession !== undefined ||
-    candidate.parentSessionId !== undefined ||
-    candidate.lineage !== undefined ||
-    candidate.origin === 'subagent' ||
-    (typeof candidate.delegationDepth === 'number' && candidate.delegationDepth !== 0)
-  if (hasLineage) {
-    throw graftError('LINEAGE_NOT_EMPTY', 'GRAFT_ERROR: lineage must be empty')
-  }
-  if (candidate.isSeeded !== false) {
-    throw graftError('SEEDED_HEADER', 'GRAFT_ERROR: migrated header must be unseeded')
-  }
-}
-
-/** Build the full event list in memory and enforce every red line before any I/O. */
-function injectionSource(plan: GraftPlan, settings: Required<GraftConfig>): GraftSource {
-  if (plan.sourceTemplate.kind === 'model') return plan.sourceTemplate
-  // DSH's runtime validator requires injected assistant messages to carry a
-  // model source. Sources that contain no assistant turn (for example a
-  // single-turn RULER haystack) fall back to the configured extractor model.
-  return {
-    kind: 'model',
-    provider: settings.constraintProvider || 'deepseek-account',
-    model: settings.constraintModel || 'deepseek-flash',
-  }
-}
-
-/**
- * v5.2: the runtime knobs DSH itself records as durable intent.
- *
- * These are NOT `request/header`. A `request/header` is one model call's epoch
- * header: copying it into another session forges a request that never happened
- * and corrupts restore. The events below are what DSH appends when the user
- * changes a knob, and every one of them is folded by a registered projection:
- *
- *   model/selection    -> api-session-controller `modelSelection`
- *   permission/preset  -> permission-presets `permissions`
- *   sandbox/mode       -> permission-presets `permissions`
- *   approval/policy    -> permission-presets `permissions`
- *
- * Writing them at seed time makes the target resume with the source's chosen
- * model and permission posture, using the same mechanism the UI uses.
- */
-export interface RuntimeIntent {
-  model?: { provider: string; model: string; reasoningEffort?: string }
-  permission?: { preset: string }
-  sandbox?: { mode: string }
-  approval?: { policy: string }
-}
-
-export function extractRuntimeIntent(events: readonly SessionEventLike[]): RuntimeIntent {
-  const intent: RuntimeIntent = {}
-  for (const event of events) {
-    if (event.type === 'model/selection') {
-      const provider = event.data?.provider
-      const model = event.data?.model
-      if (typeof provider === 'string' && provider.length > 0 && typeof model === 'string' && model.length > 0) {
-        intent.model = {
-          provider,
-          model,
-          ...(typeof event.data?.reasoningEffort === 'string' && event.data.reasoningEffort.length > 0
-            ? { reasoningEffort: event.data.reasoningEffort }
-            : {}),
-        }
-      }
-      continue
-    }
-    if (event.type === 'permission/preset') {
-      if (typeof event.data?.preset === 'string' && event.data.preset.length > 0) intent.permission = { preset: event.data.preset }
-      continue
-    }
-    if (event.type === 'sandbox/mode') {
-      if (typeof event.data?.mode === 'string' && event.data.mode.length > 0) intent.sandbox = { mode: event.data.mode }
-      continue
-    }
-    if (event.type === 'approval/policy') {
-      if (typeof event.data?.policy === 'string' && event.data.policy.length > 0) intent.approval = { policy: event.data.policy }
-    }
-  }
-  return intent
-}
-
-function buildInjectionEvents(
-  plan: GraftPlan,
-  settings: Required<GraftConfig>,
-  newSessionId: string,
-  sourceSessionId: string,
-  runtimeIntent?: RuntimeIntent,
-  /** v7.0 P1-1: the SOURCE log, scanned for an active `goal/change` to carry. */
-  goalSourceEvents?: readonly SessionEventLike[],
-): Array<{
-  type: string
-  data: Record<string, any>
-  surface: boolean
-}> {
-  const turn = settings.skeletonTurn
-  const step = settings.skeletonStep
-  if (!Number.isSafeInteger(turn) || turn < 0) throw graftError('INVALID_CONFIG', 'skeletonTurn must be a non-negative safe integer')
-  if (!Number.isSafeInteger(step) || step < 0) throw graftError('INVALID_CONFIG', 'skeletonStep must be a non-negative safe integer')
-  if (plan.chunks.length === 0) throw graftError('EMPTY_PLAN', 'injection plan contains no assistant chunks')
-
-  const events: Array<{ type: string; data: Record<string, any>; surface: boolean }> = []
-  // v0.13 GUARD: rendered once, used in both channels (see workspaceRedline).
-  const redlineBlock = settings.workspaceRedline ? workspaceRedline(plan.cwd) : ''
-  events.push({ type: 'turn/start', data: { turn }, surface: false })
-  events.push({ type: 'step/start', data: { turn, step }, surface: false })
-  // v4 restore requires the first surface node to be a protected system head.
-  // Appending the resumed agent's system prompt after user/assistant nodes is
-  // rejected with "system/message requires a protected first surface head".
-  //
-  // v7.0 C1: this node is a throwaway. The host replaces it on the target's
-  // first live step, so no constraint or instruction is placed here.
-  events.push({
-    type: 'system/message',
-    data: systemMessage(redlineBlock.length > 0 ? migrationSystemPrompt(plan.cwd) : MIGRATION_SYSTEM_PROMPT, turn, step, `graft-${newSessionId}-system`),
-    surface: true,
-  })
-  events.push({
-    type: 'user/message',
-    data: goalMessage(
-      plan.cwd,
-      plan.goal,
-      plan.phase,
-      `graft-${newSessionId}-goal`,
-      sourceSessionId,
-      plan.workspaceFiles.length > 0,
-      plan.constraints,
-      redlineBlock,
-      plan.generation,
-      // v0.21 P1: the boundary seq travels in the identity metadata, so a later
-      // reader can re-cut from the exact origin instead of hunting for it.
-      Number(plan.boundary?.boundarySeq ?? 0),
-    ),
-    surface: true,
-  })
-  // A durable, human-readable title for the sidebar. Log-only: it is not a
-  // surface event, so it cannot affect the protected system head.
-  events.push({
-    type: 'session/title',
-    data: {
-      title: sessionTitleForGoal(plan.goal, newSessionId),
-      // v7.3 CRITICAL: an EMPTY `messageSeqs` requires `source.kind: 'user'`.
-      //
-      // Verified against the host's own v3→v4 validator
-      // (`dsh-session-format-v3-to-v4`, `titleSources`):
-      //
-      //   if (event.type === "session/title"
-      //       && references.length === 0 !== (data.source.kind === "user"))
-      //     throw new SessionFormatError(
-      //       "session/title messageSeqs must be empty exactly for a user title")
-      //
-      //   for (const value of references) {
-      //     const source = events[seq]
-      //     if (seen.has(seq) || source?.type !== "user/message"
-      //         || source.data.source.kind !== "user")
-      //       throw new SessionFormatError(
-      //         "… messageSeqs must cite distinct earlier human user/message events")
-      //   }
-      //
-      // A graft target contains NO human user message — its only user/message is
-      // the plugin-authored goal (`plugin:graft-replay`). So there is no seq this
-      // title could legally cite, and the ONLY valid shape is empty refs paired
-      // with `kind: 'user'`. Writing `kind: 'fallback'` here produced a title the
-      // host refuses to load, which made EVERY target unopenable: 285 corrupt
-      // sessions in the live store before this was found.
-      messageSeqs: [],
-      source: { kind: 'user' },
-    },
-    surface: false,
-  })
-  for (const [index, chunk] of plan.chunks.entries()) {
-    events.push({
-      type: 'assistant/message',
-      data: assistantMessage(
-        chunk.text,
-        injectionSource(plan, settings),
-        turn,
-        step,
-        `graft-${newSessionId}-${index}`,
-      ),
-      surface: true,
-    })
-  }
-  // v7.0 P9: the wake directive is gone.
-  //
-  // v6.0 appended a final assistant block: "系统强制指令：不要复述上文，不要总结
-  // 你读到了什么，也不要描述你打算怎么做。立刻根据上面「接下来我需要……」那一句，
-  // 调用相应工具执行第一个动作。"
-  //
-  // It was written for a tape that read as a work log, where the model needed to
-  // be told not to summarise it. The tape is now a replay of 【用户】/【我】
-  // turns, so the natural next token IS a reply to the last user message — the
-  // directive has nothing left to correct.
-  //
-  // What it still does is cost: it occupies the recency position that belongs to
-  // the conversation, and it announces "you are reading a system document",
-  // which is precisely the outline feel the replay was built to remove. The
-  // natural-language nudge now lives at the end of the pending state, inside the
-  // assistant's own voice.
-  events.push({ type: 'step/end', data: { turn, step }, surface: false })
-  events.push({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } }, surface: false })
-  // Runtime intent last, after the closed turn, exactly where DSH writes it:
-  // these are log-only knob records folded by the modelSelection/permissions
-  // projections, never a forged model request.
-  if (runtimeIntent !== undefined) {
-    if (runtimeIntent.permission !== undefined) {
-      events.push({ type: 'permission/preset', data: runtimeIntent.permission, surface: false })
-    }
-    if (runtimeIntent.sandbox !== undefined) {
-      events.push({ type: 'sandbox/mode', data: runtimeIntent.sandbox, surface: false })
-    }
-    if (runtimeIntent.approval !== undefined) {
-      events.push({ type: 'approval/policy', data: runtimeIntent.approval, surface: false })
-    }
-    if (runtimeIntent.model !== undefined) {
-      events.push({ type: 'model/selection', data: runtimeIntent.model, surface: false })
-    }
-  }
-  // v7.0 P1-1: carry the source's active goal across the migration.
-  //
-  // A DSH goal is not external state — it is a `goal/change` EVENT appended to
-  // the session log (verified in `dsh-goal`: `agent.session.append("goal/change",
-  // change)`). The graft slices the log up to the last `turn/end` and copies only
-  // SURFACE events, so every `goal/change` — being log-only and typically written
-  // outside the retained window — is dropped. The target then resumes with no
-  // active goal even though the source had one.
-  //
-  // The event shape is copied verbatim from the source's newest change record,
-  // with `updatedAt` advanced so the target's own clock ordering holds. The
-  // projection reads the latest `goal/change` per session, so appending one here
-  // establishes the goal for the target without touching the goal service.
-  const goalChange = extractActiveGoalChange(goalSourceEvents ?? [])
-  if (goalChange !== undefined) {
-    events.push({ type: 'goal/change', data: goalChange, surface: false })
-  }
-  return events
-}
-
-function assertColdLog(
-  cold: SessionLogSnapshotLike,
-  cwd: string,
-  expectedTypes: readonly string[],
-  skeletonTurn: number,
-  skeletonStep: number,
-): void {
-  if (Number(cold.inheritedEventCount ?? 0) !== 0) {
-    throw graftError('COLD_READ_MISMATCH', `cold-read inheritedEventCount is ${String(cold.inheritedEventCount)}, expected 0`)
-  }
-  if (cold.session?.cwd !== cwd) {
-    throw graftError(
-      'COLD_READ_MISMATCH',
-      `cold-read cwd ${JSON.stringify(cold.session?.cwd)} is not the exact source cwd ${JSON.stringify(cwd)}`,
-    )
-  }
-  assertTopLevelHeader(cold.session)
-  const events = Array.isArray(cold.events) ? cold.events : []
-  if (events.length !== expectedTypes.length) {
-    throw graftError(
-      'COLD_READ_MISMATCH',
-      `cold-read event count ${events.length} does not match written count ${expectedTypes.length}`,
-    )
-  }
-  for (const [index, event] of events.entries()) {
-    if (Number(event.seq) !== index) {
-      throw graftError('COLD_READ_MISMATCH', `cold-read event ${index} has seq ${String(event.seq)}`)
-    }
-    if (event.type !== expectedTypes[index]) {
-      throw graftError(
-        'COLD_READ_MISMATCH',
-        `cold-read event ${index} is ${event.type}, expected ${expectedTypes[index]}`,
-      )
-    }
-    if (event.type === 'tool/result') {
-      throw graftError('RED_LINE_TOOL_RESULT', 'cold-read log contains a standalone tool/result')
-    }
-    if (event.type === 'turn/start') {
-      if (event.surfaceOp !== undefined || event.sourceEventSeqs !== undefined) {
-        throw graftError('RED_LINE_SKELETON_SURFACE', 'turn/start carries surface metadata in the cold-read log')
-      }
-      if (event.data?.turn !== skeletonTurn) {
-        throw graftError('COLD_READ_MISMATCH', `turn/start has turn ${String(event.data?.turn)}, expected ${skeletonTurn}`)
-      }
-      continue
-    }
-    if (event.type === 'step/start') {
-      if (event.surfaceOp !== undefined || event.sourceEventSeqs !== undefined) {
-        throw graftError('RED_LINE_SKELETON_SURFACE', 'step/start carries surface metadata in the cold-read log')
-      }
-      if (event.data?.turn !== skeletonTurn || event.data?.step !== skeletonStep) {
-        throw graftError('COLD_READ_MISMATCH', 'step/start does not match the configured skeleton')
-      }
-      continue
-    }
-    if (event.type === 'step/end') {
-      if (event.surfaceOp !== undefined || event.sourceEventSeqs !== undefined) {
-        throw graftError('RED_LINE_SKELETON_SURFACE', 'step/end carries surface metadata in the cold-read log')
-      }
-      if (event.data?.turn !== skeletonTurn || event.data?.step !== skeletonStep) {
-        throw graftError('COLD_READ_MISMATCH', 'step/end does not match the configured skeleton')
-      }
-      continue
-    }
-    if (event.type === 'turn/end') {
-      if (event.surfaceOp !== undefined || event.sourceEventSeqs !== undefined) {
-        throw graftError('RED_LINE_SKELETON_SURFACE', 'turn/end carries surface metadata in the cold-read log')
-      }
-      if (event.data?.turn !== skeletonTurn) {
-        throw graftError('COLD_READ_MISMATCH', 'turn/end does not match the configured skeleton')
-      }
-      continue
-    }
-    if (event.type === 'system/message') {
-      if (event.surfaceOp !== 'append') {
-        throw graftError('RED_LINE_MESSAGE_SURFACE', 'system/message is not an append surface event')
-      }
-      if (event.sourceEventSeqs !== undefined) {
-        throw graftError('RED_LINE_SYSTEM_SOURCE_EVENTS', 'system/message carries sourceEventSeqs')
-      }
-      if (event.data?.turn !== skeletonTurn || event.data?.step !== skeletonStep) {
-        throw graftError('COLD_READ_MISMATCH', 'system/message does not match the open skeleton step')
-      }
-      if (event.data?.message?.role !== 'system') {
-        throw graftError('RED_LINE_SYSTEM_ROLE', 'system/message data.message.role is not system')
-      }
-      if (event.data?.message?.source?.kind !== 'system-prompt') {
-        throw graftError('RED_LINE_SYSTEM_SOURCE', 'system/message source.kind is not system-prompt')
-      }
-      continue
-    }
-    if (event.type === 'session/title') {
-      if (event.surfaceOp !== undefined || event.sourceEventSeqs !== undefined) {
-        throw graftError('RED_LINE_TITLE_SURFACE', 'session/title must not carry surface metadata')
-      }
-      if (typeof event.data?.title !== 'string' || event.data.title.length === 0) {
-        throw graftError('RED_LINE_TITLE_EMPTY', 'session/title must carry a non-empty title')
-      }
-      // v7.3 CRITICAL: enforce the host's real title rule.
-      //
-      // The cold-log validator checked only "non-empty" and "no surface metadata",
-      // which is why 285 corrupt targets passed 181 tests and were then rejected by
-      // the host on load. The rule, copied from
-      // `dsh-session-format-v3-to-v4/titleSources`:
-      //
-      //   empty messageSeqs  <=>  source.kind === 'user'
-      //   non-empty          =>  every seq cites an EARLIER user/message whose
-      //                          source.kind === 'user' (a human message)
-      //
-      // A graft target has no human message, so the only valid shape is empty refs
-      // with `kind: 'user'`. Checking it here makes a regression fail locally
-      // instead of producing a session the host cannot open.
-      const titleRefs = Array.isArray(event.data?.messageSeqs) ? event.data.messageSeqs : []
-      const titleSourceKind =
-        typeof event.data?.source?.kind === 'string' ? event.data.source.kind : undefined
-      if ((titleRefs.length === 0) !== (titleSourceKind === 'user')) {
-        throw graftError(
-          'RED_LINE_TITLE_SOURCE',
-          'session/title messageSeqs must be empty exactly for a user title (empty refs require source.kind "user")',
-        )
-      }
-      if (titleRefs.length > 0) {
-        const seenTitleRefs = new Set<number>()
-        for (const value of titleRefs) {
-          const refSeq = Number(value)
-          if (!Number.isSafeInteger(refSeq) || refSeq >= Number(event.seq)) {
-            throw graftError('RED_LINE_TITLE_REF', `session/title cites seq ${String(value)}, which is not earlier`)
-          }
-          if (seenTitleRefs.has(refSeq)) {
-            throw graftError('RED_LINE_TITLE_REF', `session/title cites seq ${refSeq} twice`)
-          }
-          seenTitleRefs.add(refSeq)
-          const cited = events.find((candidate) => Number(candidate.seq) === refSeq)
-          if (cited === undefined || cited.type !== 'user/message') {
-            throw graftError('RED_LINE_TITLE_REF', `session/title cites seq ${refSeq}, which is not a user/message`)
-          }
-          if (cited.data?.source?.kind !== 'user') {
-            throw graftError(
-              'RED_LINE_TITLE_REF',
-              `session/title cites seq ${refSeq}, whose source.kind is not "user" (not a human message)`,
-            )
-          }
-        }
-      }
-      continue
-    }
-    if (event.type === 'user/message') {
-      if (event.surfaceOp !== 'append') {
-        throw graftError('RED_LINE_MESSAGE_SURFACE', 'user/message is not an append surface event')
-      }
-      continue
-    }
-    if (
-      event.type === 'model/selection' ||
-      event.type === 'permission/preset' ||
-      event.type === 'sandbox/mode' ||
-      event.type === 'approval/policy' ||
-      event.type === 'goal/change'
-    ) {
-      // Runtime-intent knobs and the carried goal: log-only, folded by their
-      // projections. They must never carry surface metadata.
-      if (event.surfaceOp !== undefined || event.sourceEventSeqs !== undefined) {
-        throw graftError('RED_LINE_SKELETON_SURFACE', `${event.type} must not carry surface metadata`)
-      }
-      continue
-    }
-    if (event.type === 'assistant/message') {
-      if (event.surfaceOp !== 'append') {
-        throw graftError('RED_LINE_MESSAGE_SURFACE', 'assistant/message is not an append surface event')
-      }
-      if (event.sourceEventSeqs !== undefined) {
-        throw graftError('RED_LINE_ASSISTANT_SOURCE_EVENTS', 'assistant/message carries sourceEventSeqs')
-      }
-      if (!Array.isArray(event.data?.stream) || event.data.stream.length !== 0) {
-        throw graftError('RED_LINE_ASSISTANT_STREAM', 'assistant/message stream is not []')
-      }
-      if (event.data?.turn !== skeletonTurn || event.data?.step !== skeletonStep) {
-        throw graftError('COLD_READ_MISMATCH', 'assistant/message does not match the open skeleton step')
-      }
-      const kind = event.data?.message?.source?.kind
-      if (typeof kind !== 'string' || kind.length === 0 || kind === 'plugin') {
-        throw graftError('RED_LINE_SOURCE_KIND', 'assistant/message source is not producer-owned')
-      }
-    }
-  }
-
-  const surfaceEvents = events.filter(
-    (event) => event.type === 'system/message' || event.type === 'user/message' || event.type === 'assistant/message',
-  )
-  if (surfaceEvents[0]?.type !== 'system/message') {
-    throw graftError('RED_LINE_SYSTEM_HEAD', 'the first surface event must be a system/message')
-  }
-}
-
-/**
- * v7.0 P1-1: the newest `goal/change` record from a source log, if any.
- *
- * Only a change that leaves an ACTIVE goal is carried: a `clear`/`complete`
- * operation at the tail means the source had no goal, and copying it would
- * resurrect one the user already finished.
- */
-function extractActiveGoalChange(events: readonly SessionEventLike[]): Record<string, unknown> | undefined {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event?.type !== 'goal/change') continue
-    const data = event.data
-    if (!isRecord(data)) return undefined
-    const operation = typeof data.operation === 'string' ? data.operation : ''
-    // A terminal record means "there is no goal any more".
-    if (/^(clear|complete|abandon|block)$/iu.test(operation)) return undefined
-    const goal = data.goal
-    if (!isRecord(goal)) return undefined
-    const objective = goal.objective
-    if (typeof objective !== 'string' || objective.trim().length === 0) return undefined
-    // Copy the record as-is and refresh the mutation time: the goal service
-    // clamps backward wall-clock movement, so an older `updatedAt` on a newer
-    // event would be rejected as a stale mutation.
-    return {
-      ...data,
-      updatedAt: Math.max(
-        Date.now(),
-        typeof data.updatedAt === 'number' ? data.updatedAt : 0,
-      ),
-    }
-  }
-  return undefined
-}
 
 
 // ===========================================================================
@@ -7361,7 +5991,6 @@ let constraintSectionsPath = join(PLUGIN_DIR, '.graft-constraint-sections.json')
  * Without this, generation 2 creates generation 3 before the user has typed
  * anything, and each hop buries the original intent one level deeper.
  */
-const GRAFT_CHAIN_GRACE_TURNS = 2
 
 // v1.3: the audit entry type and its one-line formatter live in src/utils/logger.ts.
 
@@ -8054,72 +6683,6 @@ function persistRetiredStore(ctx: PluginContextLike, remove: readonly string[] =
  * one; this minimal prompt supplies the head without copying the source
  * runtime context.
  */
-/**
- * v7.0 P2-1: the system prompt must describe the pointers that actually exist.
- *
- * The old second line taught the model to look for
- * `[tool name=xx seq=YY expand_result(...)]` — the v5.2 bracketed form. Since
- * v6.0 the tape writes first-person recollections instead:
- *
- *   （回顾：刚才我已经调用 write 完成了这一步，结果已折叠…读 seq=1234）
- *
- * So the instruction described a shape that appears nowhere in the injected
- * history. A literal-minded model either never recognises a pointer (and then
- * fabricates the missing output) or keeps hunting for a bracket that is not
- * there. The rule survives; only its example is corrected to the real form, and
- * both forms are named so a legacy tape still matches.
- *
- * What is deliberately NOT here: anything that must survive. The host replaces
- * surface node 0 on the target's first live step (v7.0 C1), so constraints and
- * goals live in the goal `user/message`, not in this prompt.
- */
-const MIGRATION_SYSTEM_PROMPT = [
-  'You are a helpful assistant continuing a migrated coding session. Follow the injected goal and history.',
-  // v7.4 P4-1（方案 B）: the tape now writes compact runs, e.g.
-  //   - pwsh(seq=364,372,380) · read(seq=398)
-  // One line per contiguous run of the same tool; the seqs are in time order,
-  // "!" marks the call that came back as an error, "(unavailable here)" means
-  // the target does not have that tool mounted. The legacy shapes are still
-  // named so an older tape still matches.
-  'Tool output is folded into compact pointer lines such as "- pwsh(seq=364,372,380) · read(seq=398)" — one line per contiguous run of the same tool, seqs in time order; a "!" after a seq means that call came back as an error, and "(unavailable here)" means the tool is not mounted in this session. Older tapes may use the long form "（回顾：…）" or the bracketed form [tool name=xx seq=YY]; both mean the same thing. When you need the actual output behind one of those seq numbers to make a decision, call graft_read_result(sourceSessionId, seq). NEVER guess or fabricate a tool result.',
-  'Do NOT read the source session log directly via shell or other tools unless graft_read_result fails. Use graft_read_result to fetch pointer contents.',
-  'If asked about constraints or progress, you MUST enumerate every single item without skipping or summarizing.',
-  "If you encounter a 'SetNamedSecurityInfoW failed' error, the workspace is in restricted mode. Ask the user to run with danger-full-access or use non-destructive read-only tools.",
-].join('\n\n')
-
-/**
- * v0.13 GUARD: the workspace boundary, stated as a red line.
- *
- * WHY IT EXISTS (measured live, from the post-mortem of a handoff storm)
- *
- * A migrated session was asked about a file it could not find in its own tree. With
- * no explicit boundary it did what a general-purpose agent does: it widened the
- * search — the profile directory, `AppData`, then the drive roots — turn after turn,
- * and produced confident summaries of a filesystem it had merely listed. Nothing in
- * the injected tape said where "here" ended, so "look harder" was unbounded.
- *
- * The tape already names exactly one working directory, so the cheapest correct
- * answer is to state it, together with what to do INSTEAD of widening: look in the
- * current directory, or ask. The path is interpolated from the session log header
- * (`plan.cwd`), never from model output, so it cannot be talked out of the boundary.
- *
- * It is injected twice on purpose: in the migration system prompt, and in the goal
- * `user/message`. The host replaces surface node 0 with its own rendered prompt on
- * the target's first live step (see `systemMessage`), so a guard that only lives in
- * the system head is dead before the model reads it.
- */
-export function workspaceRedline(cwd: string): string {
-  const root = typeof cwd === 'string' && cwd.trim().length > 0 ? cwd.trim() : '(工作目录未记录)'
-  return [
-    `【红线警告】你的工作目录严格限定为 ${root}。严禁执行任何针对 C 盘、AppData 或全局根目录的搜索（如 rg /）。如果遇到找不到文件的情况，请只在当前目录下用 ls 或 dir 查找。`,
-    '同一路径被拒绝或找不到之后，不要换写法重试、不要向外层目录扩散搜索、不要凭目录列表猜测文件内容；请把结论和缺口报告给用户。',
-  ].join('\n')
-}
-
-/** The migration system node: the base instruction plus the workspace boundary. */
-export function migrationSystemPrompt(cwd: string): string {
-  return [MIGRATION_SYSTEM_PROMPT, workspaceRedline(cwd)].join('\n\n')
-}
 
 function persistTransferredStore(ctx: PluginContextLike, remove: readonly string[] = [], strict = false): void {
   try {
@@ -8245,6 +6808,12 @@ export function resetRetiredSessions(): void {
   // fires against a session the reset just un-retired.
   pendingIgnitions.clear()
   rollbackNoticed.clear()
+  /**
+   * v7.8: the QUEUE must be cleared with the ledger. A queued notice that outlived its reset would be
+   * delivered into whatever session next reuses that id — a stale "your migration failed" arriving in
+   * an unrelated conversation is worse than not arriving at all.
+   */
+  rollbackNotices.clear()
   // v0.22: the per-target admission marks are session state too. A reset that kept
   // them would make the next attempt on a reused target id a silent no-op.
   ignitionAdmissions.clear()
@@ -9178,47 +7747,49 @@ async function graftSliceAndInjectUnlocked(
       return typeof fromHeader === 'string' && fromHeader.length > 0 ? String(fromHeader) : undefined
     })()
 
-    // Phase 3: prepare a detached zero-inheritance session. This is the same
-    // primitive sessions.create() calls internally, but it does not enter the
-    // live store; a later agents.resume() can therefore open it for write.
-    const prepared = ctx.sessions.prepare(newId, {
-      meta: { cwd: plan.cwd, ...(sourceAgentPreset === undefined ? {} : { agentPreset: sourceAgentPreset }) },
-    })
-    if (ctx.sessions.get(newId) !== undefined) {
-      throw graftError('SESSION_LEAKED_LIVE', `session ${newId} unexpectedly entered the live store`)
-    }
-    if (prepared.header.cwd !== plan.cwd) {
-      throw graftError('CWD_MISMATCH', 'prepared session cwd is not the exact source cwd')
-    }
-    assertTopLevelHeader(prepared.header)
+    /**
+     * v7.7 — THE DURABLE WRITE GOES THROUGH `dsh-paradise`.
+     *
+     * WHAT THIS REPLACES: `ctx.sessions.prepare` + `sessionPersistence.create` + `handle.append` +
+     * `handle.flush` + `handle.close`, plus the local rollback on failure. Those five calls are the
+     * PHYSICAL layer — the exact set of host facts that the 彼岸层 exists to own so that two plugins
+     * cannot drift apart on them.
+     *
+     * WHAT DID NOT MOVE, AND WHY
+     *
+     *   - THE TAPE ITSELF. `buildInjectionEvents` decides what a handoff SAYS: the replayed history,
+     *     the task board, the constraints, the identity metadata. That is graft's policy, not a host
+     *     fact — so the tape travels INTO the layer as `tape`, and the layer writes it verbatim after
+     *     running its own shape validation.
+     *   - THE PRE-WRITE VALIDATION. `assertColdLog` stays here and still runs FIRST. It is stricter than
+     *     the protocol (it checks `sourceEventSeqs`, the assistant-echo stream shape, the skeleton
+     *     numbering this plugin was configured with). The layer's validator is the floor; graft's is the
+     *     ceiling, and a tape must clear both.
+     *   - THE JOURNAL. `writeGraftTxn` is graft's own crash-recovery record: it says which source was
+     *     migrating so the next start can mark a target instead of presenting it as usable. The layer
+     *     knows nothing about source sessions being retired.
+     */
+    const prepared = { header: undefined as any }
 
-    // Phase 3: BUILD AND VALIDATE IN MEMORY, before touching durable storage.
-    //
-    // v7.4 P0-1a, the real fix. The previous order was create → append → flush →
-    // verify, and the verify step had no cleanup. Cleanup cannot save it either:
-    // the host's `SessionPersistence` contract exposes only `create`/`open`/
-    // `flush`/`stat`/`list` — there is NO delete, so `discardPartialTarget` can
-    // only log "the id stays reserved". An artifact that failed verification
-    // would therefore stay on disk forever, listed but unopenable.
-    //
-    // The only reliable guarantee is that an invalid tape never gets written. The
-    // whole tape is materialised in memory (see `materializeTape`), run through
-    // the SAME `assertColdLog` the reader uses, and only then handed to the
-    // persistence layer.
-    // v0.32 P0 (DSH 0.2.2): the prepared session is read-only; appending to it is
-    // what raised `cannot append outside a SessionStore`. Materialise the tape
-    // from the public event contract and keep the target COLD. Persistence below
-    // is still the only writer: `sessionPersistence.create` + `handle.append`.
-    const headerCreatedAt = Number(prepared.header.createdAt)
-    const snapshot = materializeTape(events, Number.isFinite(headerCreatedAt) ? headerCreatedAt : Date.now())
+    const headerCreatedAt = Number.isFinite(Number(raw?.session?.createdAt)) ? Number(raw.session.createdAt) : Date.now()
+    const snapshot = materializeTape(events, headerCreatedAt)
     if (snapshot.length !== events.length) {
       throw graftError('APPEND_COUNT_MISMATCH', `materialised tape has ${snapshot.length} events, expected ${events.length}`)
     }
-    // Pre-write validation. Same function the cold reader uses, same rules: an
-    // invalid title, a broken turn/step skeleton, or a stray surface op fails HERE,
-    // while the cost of failing is zero.
+    // Pre-write validation, BEFORE the layer reserves anything. Failing here costs nothing.
+    //
+    // v7.7: the synthetic session must describe the header the layer is about to CREATE, not a
+    // stub. `assertColdLog` re-checks the whole log shape including `assertTopLevelHeader` — which
+    // requires `isSeeded === false` and no lineage. An earlier stub carrying only `cwd` therefore
+    // failed this assertion on EVERY migration with `SEEDED_HEADER`, before a single byte was
+    // written. The two facts asserted here are exactly the two the layer also enforces at
+    // `prepare`: this is a brand-new top-level session with zero inherited events.
     assertColdLog(
-      { inheritedEventCount: 0, session: prepared.header, events: snapshot },
+      {
+        inheritedEventCount: 0,
+        session: { id: newId, cwd: plan.cwd, createdAt: headerCreatedAt, isSeeded: false },
+        events: snapshot,
+      } as any,
       plan.cwd,
       types,
       settings.skeletonTurn,
@@ -9227,84 +7798,80 @@ async function graftSliceAndInjectUnlocked(
 
     // v7.4 P0-2: journal the intent BEFORE reserving the id.
     //
-    // Write-ahead is what makes recovery possible: a process killed right after
-    // `create()` has a record saying which source was migrating and that a target
-    // may exist, so the next start can mark it instead of presenting it as usable.
+    // Write-ahead is what makes recovery possible: a process killed right after the write has a record
+    // saying which source was migrating and that a target may exist, so the next start can mark it
+    // instead of presenting it as usable.
     writeGraftTxn(ctx, {
       sourceSessionId: sourceId,
       targetSessionId: newId,
       state: 'PREPARING',
-      stage: 'persistence.create',
+      stage: 'paradise.create',
       updatedAt: new Date().toISOString(),
     })
 
-    // Phase 3 + 4: only now take write ownership and make it durable.
-    const handle = await persistence.create(prepared.header, { inheritedEventCount: 0, ...(signal === undefined ? {} : { signal }) })
-    let failed: unknown
-    try {
-      await handle.append(snapshot)
-      // The spec's ctx.sessions.flush() is a live-store barrier; a detached
-      // prepared session is rejected by liveEntryFor(). The handle flush is the
-      // durability barrier for this artifact and close() releases the writer
-      // ownership so a later resume can open it.
-      await handle.flush()
-      await handle.close()
-      writeGraftTxn(ctx, {
-        sourceSessionId: sourceId,
-        targetSessionId: newId,
-        state: 'TARGET_FLUSHED',
-        stage: 'persistence.flush',
-        updatedAt: new Date().toISOString(),
-      })
-    } catch (error) {
-      failed = error
-      try {
-        await handle.close()
-      } catch {
-        // Preserve the primary failure.
-      }
-      // v7.0 P0-4: a failed flush must not leave a half-written target behind.
-      //
-      // `create()` reserves the id immediately, so by the time `append` or
-      // `flush` throws, a header — and possibly a partial event log — is already
-      // on disk under the target's name. Since `retireSource` runs later, the
-      // source stays alive, but the target id is now OCCUPIED by a corrupt
-      // artifact. The user sees a session in the sidebar that cannot resume, and
-      // a retry with the same id fails with SESSION_EXISTS.
-      //
-      // The host exposes no `delete` on SessionPersistence, so cleanup is
-      // best-effort and layered:
-      //   1. `discardPrepared` (if the store offers it) drops the reservation.
-      //   2. `persistence.remove`/`delete` (if a backend offers one) removes the
-      //      artifact.
-      //   3. The prepared session is detached, so dropping the in-memory handle
-      //      is enough to keep it out of the live store.
-      // Whatever refuses to go is reported, because a silent failure here is how
-      // a phantom session survives a migration that claimed to fail.
-      // v7.2: mark the wreckage BEFORE trying to remove it.
-      //
-      // Cleanup is best-effort (the host exposes no delete on SessionPersistence),
-      // so a failed target can survive. When it does, it must not look resumable:
-      // a `[损坏]` title and a breadcrumb are what stop a user from opening it and
-      // concluding the migration "half worked".
-      //
-      // Order matters — mark first, then discard. If the process dies between the
-      // two, the mark is what remains, which is the safe direction.
-      //
-      // v7.4 P0-2: the breadcrumb is now a real transaction record (see
-      // `.txn/`), so recovery after a restart is possible instead of merely
-      // informative.
-      markTargetBroken(ctx, newId, String((error as any)?.message ?? error), {
-        sourceSessionId: sourceId,
-        stage: 'persistence.flush',
-      })
-      await discardPartialTarget(ctx, newId)
-      throw error
-    } finally {
-      if (failed === undefined) {
-        // close() already ran on the success path; this is intentionally empty.
-      }
+    /* ── the write itself: ONE call into the layer ─────────────────────────── */
+    const paradise = await ensureParadiseWrite(ctx)
+    if (!paradise.ok || paradise.session === undefined) {
+      throw graftError('PARADISE_WRITE_UNAVAILABLE', `${PARADISE_WRITE_MISSING_CONSEQUENCE}（${paradise.reason}）`)
     }
+    const created = await paradise.session.create({
+      cwd: plan.cwd,
+      title: plan.title ?? `[切片] ${sourceId}`,
+      id: newId,
+      /** The tape travels as CONTENT. The layer owns the shape, the seq/time, and the write. */
+      tape: events.map((seed: any) => ({
+        type: String(seed.type),
+        data: seed.data as Record<string, any>,
+        surface: seed.surface === true,
+      })),
+      /** The effective preset is carried by the source's LAST `agent-preset/selected` event. */
+      ...(sourceAgentPreset === undefined ? {} : { inheritFrom: sourceId }),
+      /**
+       * PUBLISHING STAYS HERE, and it is a deliberate division of labour.
+       *
+       * The layer can attach a session to its workspace group and emit `api-session/added`; so can this
+       * plugin, and it must — its receipt reports `workspace.id`, its refusal is a warning rather than a
+       * failed stage, and the source's `[已转移]` marker is written around the same moment. Leaving the
+       * layer's default on announced every target twice and attached it twice.
+       *
+       * So the caller that OWNS the announcement says so, instead of both halves doing it and hoping the
+       * duplicate is invisible in the sidebar.
+       */
+      publish: false,
+    })
+    if (!created.ok || created.session === undefined) {
+      /**
+       * A FAILED WRITE MUST NOT LOOK LIKE A HALF-WRITTEN ONE. The layer has already removed (or marked)
+       * whatever it reserved, so this only has to journal the failure and re-throw — the previous
+       * `discardPartialTarget` call is now the layer's job, and it verifies the absence with `stat`
+       * instead of hoping.
+       */
+      markTargetBroken(ctx, newId, String(created.error?.message ?? 'write failed'), {
+        sourceSessionId: sourceId,
+        stage: `paradise.${created.stage}`,
+      })
+      throw graftError(
+        created.error?.code ?? 'PARADISE_CREATE_FAILED',
+        `切片写入失败@${created.stage}：${created.error?.message ?? '未知原因'}`,
+      )
+    }
+    // The layer reports whether the cold read confirmed its own write. graft's own verify below is the
+    // stricter, plugin-specific one that additionally checks the skeleton numbering it configured.
+    const layerVerified = created.verified === true
+    const layerWarnings: string[] = Array.isArray(created.warnings) ? created.warnings : []
+    plan.warnings.push(...layerWarnings)
+
+    writeGraftTxn(ctx, {
+      sourceSessionId: sourceId,
+      targetSessionId: newId,
+      state: 'TARGET_FLUSHED',
+      stage: 'paradise.flush',
+      updatedAt: new Date().toISOString(),
+    })
+    // `prepared` is kept only for the fields read further down (`header.createdAt`); the layer owns the
+    // real header now.
+    prepared.header = { id: newId, cwd: plan.cwd, createdAt: headerCreatedAt }
+    void layerVerified
 
     // Phase 4: cold-read verification of what was ACTUALLY persisted.
     //
@@ -9331,7 +7898,19 @@ async function graftSliceAndInjectUnlocked(
           sourceSessionId: sourceId,
           stage: 'cold-read',
         })
-        await discardPartialTarget(ctx, newId)
+        /**
+         * v7.7 — THE ROLLBACK GOES THROUGH THE LAYER.
+         *
+         * THE ORDER IS THE SAFETY: the mark above is written FIRST, so a process that dies between
+         * these two steps leaves wreckage that cannot be mistaken for a usable session. The layer's
+         * `deleteSession` then removes (or, if the host exposes no delete, re-marks) the artifact and
+         * reports whether the absence was VERIFIED with `stat` — a claim this plugin used to make by
+         * hoping.
+         *
+         * `void` is deliberate: a failed rollback must not replace the primary error. Losing the
+         * original cold-read failure would leave a reader debugging the cleanup instead of the cause.
+         */
+        void rollbackTargetViaLayer(ctx, newId, `冷读校验失败：${String((error as any)?.message ?? error)}`)
         throw error
       }
     }
@@ -9510,7 +8089,7 @@ async function graftSliceAndInjectUnlocked(
     // the host has not opened); what must never happen is the LAST attempt failing
     // while the source stays retired. That is the double-blind state, and it is
     // handled below and in `resumePendingIgnitions`.
-    let ignition = await attemptIgnition(ctx, settings, sourceId, newId)
+    let ignition = await attemptIgnition(ctx, settings, sourceId, newId, { cwd: plan.cwd })
     // The queue records the attempt; if this single call already exhausted the
     // budget (e.g. the timeout path is instant), roll back now rather than leaving
     // the user blocked until the next activation.
@@ -10166,6 +8745,56 @@ export function recoverGraftTransactions(ctx: PluginContextLike): { scanned: num
  * hidden — the caller already throws the original error, and a phantom session
  * is the kind of thing that only surfaces days later as a mysterious ENOENT.
  */
+/**
+ * v7.7 — roll back a target through the write layer, and NEVER replace the caller's error.
+ *
+ * The layer's `deleteSession` is the only rollback that can say "verified absent": it discards the
+ * reservation, removes what it can, re-marks what it cannot, and answers with the `stat` result. The
+ * older `discardPartialTarget` tried three methods and reported which ones threw — it could not tell
+ * "removed" from "attempted".
+ *
+ * TWO THINGS ARE STILL THIS PLUGIN'S:
+ *
+ *   1. The ORDER. `markTargetBroken` ran before this call (see the cold-read catch), and the layer's
+ *      own marking runs after the removal attempt. A crash in between therefore leaves a marked
+ *      artifact, never a silent one.
+ *   2. The DECISION TO IGNORE THE RESULT. A failed rollback must not mask the failure that caused it,
+ *      so every outcome becomes a log line and the primary error keeps propagating.
+ *
+ * A missing layer is not an excuse to skip cleanup: resolution failures fall back to the old
+ * best-effort path, which is the pre-v7.7 behaviour rather than a new failure mode.
+ */
+async function rollbackTargetViaLayer(ctx: PluginContextLike, targetId: string, why: string): Promise<void> {
+  try {
+    const paradise = await ensureParadiseWrite(ctx)
+    if (!paradise.ok || typeof paradise.deletes !== 'function') {
+      await discardPartialTarget(ctx, targetId)
+      return
+    }
+    const rolled = await paradise.deletes(ctx, targetId, why)
+    try {
+      ctx.logger?.warn?.(
+        rolled.removed
+          ? `[dsh-graft-slice] rolled back failed target ${targetId} (${rolled.verified}${rolled.notes.length === 0 ? '' : `, ${rolled.notes.join(', ')}`})`
+          : rolled.marked
+            ? `[dsh-graft-slice] failed target ${targetId} could not be removed; it was MARKED so it cannot resume`
+            : `[dsh-graft-slice] failed target ${targetId} could not be removed and could not be marked (${rolled.notes.join(', ') || 'no delete API on this host'})`,
+      )
+    } catch {
+      // Logging must not replace the primary failure.
+    }
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] rollback of ${targetId} failed via the layer (${String((error as any)?.message ?? error)}); falling back to the local path`,
+      )
+    } catch {
+      // Same.
+    }
+    await discardPartialTarget(ctx, targetId)
+  }
+}
+
 async function discardPartialTarget(ctx: PluginContextLike, targetId: string): Promise<void> {
   const notes: string[] = []
   const persistence = (() => {
@@ -12560,6 +11189,20 @@ async function appendTransitionCard(
       const merged = takeDraftMerge(agentId, base)
       const messages = merged === undefined ? base : [...base, ...merged.messages]
       const extra = takePendingConstraintMessages(agentId)
+      /**
+       * v7.8 — THE ROLLBACK NOTICE RIDES THIS SAME CHANNEL.
+       *
+       * `rollbackFailedIgnition` used to write a `developer/message` with `{ turn: 0, step: 0 }` into
+       * the source's log. That is not a real round and the host's resume-time format validation rejects
+       * it — on the SOURCE session, the one the user is still working in. So the notice is queued
+       * instead, and delivered here: `messages` reach the model without touching the persisted
+       * lifecycle, consume no step, and cannot produce a format violation because nothing is written.
+       *
+       * Positioned right after `extra` on purpose: both are one-shot system notes to the model, and a
+       * reader looking for "what does this plugin tell the session" finds them together.
+       */
+      const rollbackExtra = takeRollbackNotice(agentId)
+      const rollbackMessages = rollbackExtra === undefined ? [] : [rollbackExtra]
       // v7.5: the node-plan hint rides the same channel (and the same discipline:
       // once, quiet, non-blocking).
       const planExtra = takePlanNudge(ctx, agentId, payload?.messages)
@@ -12588,7 +11231,16 @@ async function appendTransitionCard(
       // Never in the same step as the nudge: the model just received its one
       // chance and has not had the time to act on it.
       const urgentExtra = modelExtra.length > 0 ? [] : takeWatermarkEscalation(stableCtx, agentId, payload)
-      const appended = [...guardMessages, ...extra, ...planExtra, ...modelExtra, ...urgentExtra]
+      const appended = [...guardMessages, ...extra, ...rollbackMessages, ...planExtra, ...modelExtra, ...urgentExtra]
+      /**
+       * THE EMPTY CASE MEANS "NOTHING TO SAY", AND THE ROLLBACK NOTICE COUNTS AS SOMETHING.
+       *
+       * `appended.length === 0` returns the decision untouched — a fast path for the overwhelmingly
+       * common turn where this plugin adds nothing. `rollbackMessages` is therefore part of the SAME
+       * array: folding it in anywhere else (or appending it after this check) would deliver the notice
+       * only on turns where some OTHER feature also fired, which is a notice that arrives at the wrong
+       * time or never.
+       */
       if (appended.length === 0) return merged === undefined ? decision : { ...decision, messages }
       return { ...decision, messages: [...messages, ...appended] }
     }
@@ -14022,4 +12674,79 @@ export function debugLastRecovery(): { scanned: number; rolledBack: string[] } |
 
 export function debugStorePaths(): { txnDir: string; prepared: string; retired: string } {
   return { txnDir: txnDirPath, prepared: preparedStorePath, retired: retiredStorePath }
+}
+
+/**
+ * WIRE `core/ignition.ts` TO THIS FILE'S STATE — at the END of the module, where every declaration exists.
+ *
+ * THREE THINGS ABOUT THIS THAT ARE NOT STYLE
+ *
+ *  1. IT MUST BE AT THE BOTTOM. `graftTargets` (~line 9870), `pendingGraftSources` and `pendingConfirms`
+ *     are declared thousands of lines below `configureRetiredStore`. Building the deps object up there
+ *     would read those bindings before initialisation — a temporal-dead-zone crash that the bundler turns
+ *     from a build error into a runtime one.
+ *
+ *  2. IT REGISTERS A RESOLVER, NOT A VALUE. The module asks for the state on each use, so a test that
+ *     imports `igniteTargetSession` and calls it WITHOUT running `apply()` still gets the real maps
+ *     instead of a private fallback. That distinction is load-bearing: with a fallback, the per-target
+ *     admission guard and the retry's "grown past its seed" check both silently degrade, and the suite
+ *     catches it as a warm target being prompted twice.
+ *
+ *  3. THE PATHS ARE THUNKS. `configureRetiredStore` reassigns `retiredStorePath` /
+ *     `transferredStorePath` whenever a profile or `dataDir` is resolved, and a test re-configures to a
+ *     fresh directory mid-suite. A snapshot would roll back into the PREVIOUS profile's ledger — the
+ *     source left retired on disk while the in-memory set was cleared, which is the double-blind state
+ *     the rollback exists to end.
+ */
+setIgnitionDepsResolver(
+  (): IgnitionDeps => ({
+    admissions: ignitionAdmissions,
+    pending: pendingIgnitions,
+    pendingPath: () => pendingIgnitionPath,
+    targets: graftTargets as unknown as Map<string, { seedEvents?: number }>,
+    retired: retiredSessions,
+    transferred: transferredSessions as unknown as Map<string, unknown>,
+    autoGraftStates: autoGraftStates as unknown as Map<string, string>,
+    autoGraftInFlight: autoGraftInFlight as unknown as Map<string, unknown>,
+    pendingGraftSources: pendingGraftSources as unknown as Map<string, unknown>,
+    pendingConfirms: pendingConfirms as unknown as Map<string, unknown>,
+    retiredStorePath: () => retiredStorePath,
+    transferredStorePath: () => transferredStorePath,
+    rollbackNoticed,
+    rollbackNotices,
+    audit: (entry) => appendGraftAudit(entry as unknown as GraftAuditEntry),
+    logWarn: (message) => {
+      try {
+        storeCtx?.logger?.warn?.(message)
+      } catch {
+        // Logging must never change a migration outcome.
+      }
+    },
+  }),
+)
+
+/**
+ * The read-only views the test suite imports.
+ *
+ * NOT re-exported from `core/ignition.ts` because the maps they expose are declared HERE — the module
+ * only reaches them through the resolver. A caller inspecting the queue is inspecting THIS plugin's
+ * state, so the accessors belong to this file.
+ */
+export function getPendingIgnitions(): ReadonlyMap<string, PendingIgnition> {
+  return pendingIgnitions
+}
+
+/** Has THIS target been admitted an ignition prompt in this process? */
+export function hasIgnitionAdmission(targetId: string): boolean {
+  return ignitionAdmissions.has(targetId)
+}
+
+/** Record that a prompt was admitted for THIS target (never for another one). */
+export function markIgnitionAdmission(targetId: string, promptChars: number): void {
+  ignitionAdmissions.set(targetId, { at: Date.now(), promptChars })
+}
+
+/** Test/diagnostic view: the admissions recorded in this process, per target. */
+export function getIgnitionAdmissions(): ReadonlyMap<string, { at: number; promptChars: number }> {
+  return ignitionAdmissions
 }

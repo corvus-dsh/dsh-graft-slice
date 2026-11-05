@@ -1,0 +1,726 @@
+export const IGNITION_MARKER = '[dsh-graft-slice 点火]'
+
+/**
+ * v0.20: the wake-up says WHICH part of the tape to act on.
+ *
+ * v0.19 woke the target but left it to work out that the replayed history is
+ * context, not assignment. A model handed a tape of a debugging session will often
+ * start by re-reading the last stack trace — the very thing the slimming removed
+ * from the board. So the prompt names the board as the instruction source and the
+ * tape as evidence, and explicitly relieves the target of the old log's temporary
+ * errors.
+ *
+ * Kept in sync with `BOARD_TRAILER` on purpose, but stated in both places: the
+ * ignition prompt is the FIRST thing the target reads, and the board is what it
+ * re-reads every turn. Either one alone leaves a gap.
+ */
+export const DEFAULT_IGNITION_PROMPT =
+  `${IGNITION_MARKER} 你刚刚完成了一次物理切片：上一段会话的上下文已经交接给你，` +
+  '交接看板（交接任务看板 / PendingState）在工作区与历史里。' +
+  '旧会话的历史执行日志和临时错误无需理会，它们只作为回读证据保留；' +
+  '请直接执行看板中「⏭️ 待开始」里的待办项，不要复述交接过程，也不要重新调研已经完成的部分。'
+
+export interface IgnitionResult {
+  /** The channel was available and a call was made. */
+  attempted: boolean
+  ok: boolean
+  channel?: string
+  promptChars?: number
+  reason?: string
+  /** True when the target's own log already carried the ignition prompt. */
+  alreadyIgnited?: true
+}
+
+export interface PendingIgnition {
+  targetId: string
+  sourceSessionId: string
+  at: number
+  attempts: number
+}
+
+/** How many activation rounds a failed ignition is retried before giving up. */
+export const IGNITION_MAX_ATTEMPTS = 3
+/** A prompt that has not been admitted in this long is retried next activation. */
+const IGNITION_TIMEOUT_MS = 20_000
+
+// `PLUGIN_DIR` is declared further down, so this path is resolved lazily: reading
+// it at module-evaluation time would throw before the module finished loading.
+let pendingIgnitionPath = ''
+
+function ignitionPath(): string {
+  return pendingIgnitionPath.length > 0 ? pendingIgnitionPath : join(PLUGIN_DIR, '.graft-pending-ignition.json')
+}
+
+const pendingIgnitions = new Map<string, PendingIgnition>()
+/**
+ * v0.21: sources already told about a rollback, in this process.
+ *
+ * Both the single-shot path and the queue path can reach the rollback for the same
+ * migration; without this, the user gets the same notice twice and reads it as two
+ * separate failures.
+ */
+const rollbackNoticed = new Set<string>()
+
+export function buildIgnitionPrompt(settings: Pick<Required<GraftConfig>, 'ignitionPrompt'>): string {
+  const custom = settings.ignitionPrompt.trim()
+  if (custom.length === 0) return DEFAULT_IGNITION_PROMPT
+  return custom.startsWith(IGNITION_MARKER) ? custom : `${IGNITION_MARKER} ${custom}`
+}
+
+/** Is this user message the plugin's own ignition, rather than something a human typed? */
+export function isIgnitionText(text: string): boolean {
+  return typeof text === 'string' && text.trimStart().startsWith(IGNITION_MARKER)
+}
+
+export function loadPendingIgnitions(ctx: PluginContextLike | undefined): void {
+  try {
+    for (const value of readJsonArray(ignitionPath())) {
+      if (!isRecord(value)) continue
+      const targetId = typeof value.targetId === 'string' ? value.targetId : ''
+      if (targetId.length === 0) continue
+      pendingIgnitions.set(targetId, {
+        targetId,
+        sourceSessionId: typeof value.sourceSessionId === 'string' ? value.sourceSessionId : '',
+        at: Number(value.at ?? 0),
+        attempts: Number(value.attempts ?? 0),
+      })
+    }
+  } catch (error) {
+    try {
+      ctx?.logger?.warn?.(`[dsh-graft-slice] cannot read ${ignitionPath()}: ${String((error as any)?.message ?? error)}`)
+    } catch {
+      // Logging must not block activation.
+    }
+  }
+}
+
+function persistPendingIgnitions(ctx: PluginContextLike | undefined): void {
+  try {
+    mkdirSync(dirname(ignitionPath()), { recursive: true })
+    writeJsonAtomic(ignitionPath(), [...pendingIgnitions.values()])
+  } catch (error) {
+    try {
+      ctx?.logger?.warn?.(`[dsh-graft-slice] cannot write ${ignitionPath()}: ${String((error as any)?.message ?? error)}`)
+    } catch {
+      // Logging must not change the migration result.
+    }
+  }
+}
+
+export function getPendingIgnitions(): ReadonlyMap<string, PendingIgnition> {
+  return pendingIgnitions
+}
+
+/**
+ * v0.22 P0: per-TARGET ignition bookkeeping, keyed by targetId.
+ *
+ * THE ROUTING BUG THIS PREVENTS
+ *
+ * "Already ignited" used to be decided only by re-reading the target's log. That is
+ * correct but not sufficient: two grafts that finish within the same tick both read
+ * "not ignited" before either prompt lands, so both call `prompt` — and a target that
+ * receives the same instruction twice reads it as two separate turns of user intent.
+ *
+ * Worse, any state shared across targets (a single "last ignited id", a boolean) would
+ * let session A's admission mark session B as already started: A's instruction is
+ * effectively delivered to nobody while B never gets one. So this map is keyed by the
+ * TARGET and every read/write names that key explicitly — there is no code path that
+ * consults ignition state without saying which target it is about.
+ */
+const ignitionAdmissions = new Map<string, { at: number; promptChars: number }>()
+
+/** Has THIS target been admitted an ignition prompt in this process? */
+export function hasIgnitionAdmission(targetId: string): boolean {
+  return ignitionAdmissions.has(targetId)
+}
+
+/** Record that a prompt was admitted for THIS target (never for another one). */
+export function markIgnitionAdmission(targetId: string, promptChars: number): void {
+  ignitionAdmissions.set(targetId, { at: Date.now(), promptChars })
+}
+
+/** Test/diagnostic view: the admissions recorded in this process, per target. */
+export function getIgnitionAdmissions(): ReadonlyMap<string, { at: number; promptChars: number }> {
+  return ignitionAdmissions
+}
+
+/**
+ * Does this error mean "that session is not there", as opposed to "I could not read it"?
+ *
+ * 0.2.2's Remote error code is `session/not-found` — hyphenated — so the old
+ * `/not found/` test missed the exact case it was written for.
+ */
+const SESSION_MISSING = /session\/not[\s_-]?found|not[\s_-]found|enoent|no such/iu
+
+/** Does the target's own log already carry the ignition prompt? */
+async function alreadyIgnited(ctx: PluginContextLike, targetId: string): Promise<boolean> {
+  // The in-process admission is checked FIRST: it is the only signal that covers the
+  // window between "prompt accepted" and "prompt visible in the target's log".
+  if (ignitionAdmissions.has(targetId)) return true
+  try {
+    const raw = await ctx.sessionQuery.readSession(targetId)
+    const events = Array.isArray((raw as any)?.events) ? ((raw as any).events as SessionEventLike[]) : []
+    for (const event of events) {
+      if (event?.type !== 'user/message') continue
+      if (isIgnitionText(textOfMessage(event.data))) return true
+    }
+    return false
+  } catch (error) {
+    const message = String((error as any)?.message ?? error)
+    // Two different failures, two different answers:
+    //  - the session does not exist -> it was certainly not ignited; prompt (the
+    //    resume inside `prompt` is what creates the live agent);
+    //  - anything else (transient I/O, a service proxy that refuses reads) -> UNKNOWN.
+    //
+    // v0.32 P0: an unknown used to return `true`, i.e. "already ignited". That turned a
+    // failed READ into a reported SUCCESS, so the queue entry was deleted and the target
+    // was never woken — the silent no-op this module promises never to produce. (It also
+    // explains a real `ignite … ok (already ignited)` audit line for a target whose log
+    // had no ignition event: the not-found test did not match `session/not-found`, the
+    // Remote's hyphenated code.) Unknown must now be reported as a failure so the
+    // durable intent survives to the next activation.
+    if (SESSION_MISSING.test(message)) return false
+    throw new Error(`cannot read target log: ${message}`)
+  }
+}
+
+/**
+ * v0.19: the one call that turns a durable artifact into a running worker.
+ *
+ * Channels are tried in order and REPORTED: `sessionController.prompt` is the Host
+ * service (what the composer uses); `remote.session.prompt` is the same operation
+ * through the generated Remote namespace, for a composition where only that face is
+ * mounted. No channel means the capability is absent, which is reported as such —
+ * never as a silent no-op.
+ */
+/**
+ * v0.32 P0 — THE 0.2.2 SIGNAL CONTRACT, WHICH v0.31 VIOLATED.
+ *
+ * In 0.2.2-rc.1 `sessionController.prompt(request, signal)` takes the AbortSignal as a
+ * REQUIRED second argument and touches it on the first line
+ * (`signal.throwIfAborted()`, for caller cancellation before prompt admission).
+ * v0.31 passed `undefined` there, so every ignition died before the prompt was ever
+ * admitted:
+ *
+ *   sessionController.prompt: Cannot read properties of undefined (reading 'throwIfAborted')
+ *
+ * The target stayed durable and permanently inert, the source was already retired, and
+ * the only trace was one audit line — the "no auto wake-up" the user saw. The signal is
+ * now built for every channel, and its abort is also the timeout, so a prompt that never
+ * settles leaves an ABORTED signal behind instead of a dangling promise race.
+ */
+function ignitionDeadline(): { signal: AbortSignal; release: () => void; expired: Promise<never> } {
+  const controller = new AbortController()
+  let rejectExpired: (error: Error) => void = () => {}
+  const expired = new Promise<never>((_resolve, reject) => {
+    rejectExpired = reject
+  })
+  const timer = setTimeout(() => {
+    const error = new Error(`timeout after ${IGNITION_TIMEOUT_MS}ms`)
+    controller.abort(error)
+    rejectExpired(error)
+  }, IGNITION_TIMEOUT_MS)
+  if (typeof (timer as any).unref === 'function') (timer as any).unref()
+  // The race loser's rejection must not surface as an unhandled one when the prompt
+  // settled first and `release()` cleared the timer.
+  expired.catch(() => {})
+  return { signal: controller.signal, release: () => clearTimeout(timer), expired }
+}
+
+/**
+ * Is the target already RUNNING, as the Host itself defines it?
+ *
+ * Used only on the retry path. A retried ignition must never re-instruct a target that
+ * is already live: either our earlier prompt did land (and its marker is in the log) or
+ * a human opened the target and took over. Prompting again in that window reads to the
+ * target as the same instruction given twice, and treating it as a failure would fire
+ * the rollback that resurrects a retired source.
+ */
+async function targetAlreadyLive(ctx: PluginContextLike, targetId: string): Promise<boolean> {
+  try {
+    const service = (ctx.get as any)?.('sessionController')
+    if (!isRecord(service) || typeof (service as any).state !== 'function') return false
+    const { signal, release } = ignitionDeadline()
+    try {
+      const state = await (service as any).state({ sessionId: targetId }, signal)
+      return isRecord(state) && (state as any).active === true
+    } finally {
+      release()
+    }
+  } catch {
+    // Unknown is not "live": an unknown target still gets its one ignition attempt.
+    return false
+  }
+}
+
+/**
+ * Has the target moved past the tape the slice wrote?
+ *
+ * Only meaningful on the retry path, and only when the mark recorded how many events
+ * the tape had. A cold target that nobody touched still ends exactly at that count.
+ */
+async function targetAlreadyDriven(ctx: PluginContextLike, targetId: string): Promise<boolean> {
+  const mark = graftTargets.get(targetId)
+  if (mark === undefined || typeof mark.seedEvents !== 'number') return false
+  try {
+    const raw = await ctx.sessionQuery.readSession(targetId)
+    const events = Array.isArray((raw as any)?.events) ? ((raw as any).events as unknown[]) : []
+    return events.length > mark.seedEvents
+  } catch {
+    return false
+  }
+}
+
+export async function igniteTargetSession(
+  ctx: PluginContextLike,
+  settings: Required<GraftConfig>,
+  targetId: string,
+  sourceSessionId: string,
+  options: { retry?: boolean } = {},
+): Promise<IgnitionResult> {
+  if (!settings.igniteTarget) return { attempted: false, ok: false, reason: 'igniteTarget=false' }
+  const prompt = buildIgnitionPrompt(settings)
+  // v0.32: the retry path asks the HOST for liveness FIRST, because a target that is
+  // running makes the log read below unreliable (a live log mid-turn can fail replay
+  // validation), and "I could not read it" must not become "it was never woken".
+  if (options.retry === true && (await targetAlreadyLive(ctx, targetId))) {
+    return {
+      attempted: false,
+      ok: true,
+      alreadyIgnited: true,
+      channel: 'sessionController.state',
+      reason: 'target already live',
+      promptChars: prompt.length,
+    }
+  }
+  try {
+    if (await alreadyIgnited(ctx, targetId)) {
+      return { attempted: false, ok: true, alreadyIgnited: true, promptChars: prompt.length }
+    }
+  } catch (error) {
+    // v0.32: an unreadable log is UNKNOWN, and an unknown is reported as a failure so
+    // the queued intent survives — never as "already ignited".
+    return {
+      attempted: false,
+      ok: false,
+      reason: String((error as any)?.message ?? error),
+      promptChars: prompt.length,
+    }
+  }
+  if (options.retry === true && (await targetAlreadyDriven(ctx, targetId))) {
+    return {
+      attempted: false,
+      ok: true,
+      alreadyIgnited: true,
+      channel: 'graft-targets.seedEvents',
+      reason: 'target already driven past its seed',
+      promptChars: prompt.length,
+    }
+  }
+  const request = (): Record<string, unknown> => ({
+    requestId: `graft-ignite-${targetId}-${Date.now().toString(36)}`,
+    sessionId: targetId,
+    mode: settings.ignitionMode,
+    content: [{ type: 'text', text: prompt }],
+  })
+  const channels: Array<[string, (signal: AbortSignal) => Promise<unknown>]> = []
+  const service = (() => {
+    try {
+      return (ctx.get as any)?.('sessionController')
+    } catch {
+      return undefined
+    }
+  })()
+  if (isRecord(service) && typeof (service as any).prompt === 'function') {
+    // v0.32: the signal is the second argument the Host requires, not an optional extra.
+    channels.push(['sessionController.prompt', (signal) => (service as any).prompt(request(), signal)])
+  }
+  const remote = (() => {
+    try {
+      return (ctx.get as any)?.('remote')
+    } catch {
+      return undefined
+    }
+  })()
+  const remoteSession = isRecord(remote) ? (remote as any).session : undefined
+  if (remoteSession !== undefined && typeof remoteSession.prompt === 'function') {
+    channels.push(['remote.session.prompt', (signal) => remoteSession.prompt(request(), signal)])
+  }
+  if (channels.length === 0) {
+    return {
+      attempted: false,
+      ok: false,
+      reason: 'no ignition channel: ctx.sessionController.prompt is not mounted',
+    }
+  }
+  const failures: string[] = []
+  const { signal, release, expired } = ignitionDeadline()
+  try {
+    for (const [label, run] of channels) {
+      try {
+        const settled = await Promise.race([run(signal), expired])
+        const accepted = isRecord(settled) ? (settled as any).accepted !== false : true
+        if (accepted) {
+          // v0.22 P0: record the admission for THIS target before returning, so a second
+          // concurrent attempt cannot slip through the window before the prompt is
+          // visible in the target's own log.
+          markIgnitionAdmission(targetId, prompt.length)
+          return { attempted: true, ok: true, channel: label, promptChars: prompt.length }
+        }
+        failures.push(`${label}: prompt was not accepted`)
+      } catch (error) {
+        failures.push(`${label}: ${describePromptFailure(error, signal)}`)
+      }
+    }
+  } finally {
+    release()
+  }
+  return { attempted: true, ok: false, reason: failures.join(' | '), promptChars: prompt.length }
+}
+
+/**
+ * v0.32: say WHY the prompt died, in the one line the audit keeps.
+ *
+ * A bare `AbortError` hides the interesting case: the Host aborted because the session
+ * was busy or its writer was held, which is retryable, versus our own deadline, which
+ * is not a fact about the target at all.
+ */
+function describePromptFailure(error: unknown, signal: AbortSignal): string {
+  const message = String((error as any)?.message ?? error)
+  if (signal.aborted) {
+    const reason = (signal as any).reason
+    const why = typeof reason === 'string' ? reason : String((reason as any)?.message ?? 'deadline')
+    return `${message} (aborted: ${why})`
+  }
+  return message
+}
+
+/**
+ * v0.19: queue -> ignite -> clear. The durable intent is what makes a crash
+ * between "the target is on disk" and "the target is running" recoverable.
+ */
+export async function attemptIgnition(
+  ctx: PluginContextLike,
+  settings: Required<GraftConfig>,
+  sourceSessionId: string,
+  targetId: string,
+  options: { retry?: boolean } = {},
+): Promise<IgnitionResult> {
+  if (!settings.igniteTarget) return { attempted: false, ok: false, reason: 'igniteTarget=false' }
+  const existing = pendingIgnitions.get(targetId)
+  pendingIgnitions.set(targetId, {
+    targetId,
+    sourceSessionId,
+    at: existing?.at ?? Date.now(),
+    attempts: existing?.attempts ?? 0,
+  })
+  persistPendingIgnitions(ctx)
+  const result = await igniteTargetSession(ctx, settings, targetId, sourceSessionId, options)
+  if (result.ok) {
+    pendingIgnitions.delete(targetId)
+    persistPendingIgnitions(ctx)
+  } else {
+    const entry = pendingIgnitions.get(targetId)
+    if (entry !== undefined) {
+      pendingIgnitions.set(targetId, { ...entry, attempts: entry.attempts + 1 })
+      persistPendingIgnitions(ctx)
+    }
+  }
+  try {
+    appendGraftAudit({
+      at: new Date().toISOString(),
+      kind: result.ok ? 'ignite' : result.attempted ? 'ignite-failed' : 'ignite-skipped',
+      sessionId: targetId,
+      ...(sourceSessionId.length === 0 ? {} : { targetSessionId: sourceSessionId }),
+      detail:
+        `${result.ok ? 'ok' : result.reason ?? 'not attempted'}` +
+        `${result.channel === undefined ? '' : ` via ${result.channel}`}` +
+        `${result.alreadyIgnited === true ? ' (already ignited)' : ''}` +
+        `${result.ok && result.reason !== undefined ? ` (${result.reason})` : ''}`,
+    })
+  } catch {
+    // The audit line is evidence; the migration must not depend on it.
+  }
+  return result
+}
+
+/**
+ * v0.21 P0 — the DOUBLE-BLIND ROLLBACK.
+ *
+ * THE FAILURE THIS PREVENTS, AND WHY IT IS THE WORST ONE
+ *
+ * The migration retires the source BEFORE it ignites the target, because the whole
+ * point is that the user stops typing into a session that is about to be replaced.
+ * So for a window the system is deliberately one-sided: the source is frozen and
+ * the target is the only way forward.
+ *
+ * If the ignition then fails — no channel, a throwing prompt, a 20s timeout, three
+ * activation rounds of the same — that window never closes. The source is retired,
+ * so its pre-step returns `{kind:'reject'}` and the user cannot continue there; the
+ * target is durable but inert, so nothing happens there either. Both sessions are
+ * alive on disk and NEITHER accepts work. That is the double-blind state: not a lost
+ * migration, a lost SESSION.
+ *
+ * So the last resort is an UN-RETIRE: put the source back exactly as it was before
+ * the migration (out of `.retired.json`, out of `.transferred.json`, and out of the
+ * in-memory sets), tell it in its own log why it is back, and let the user retry.
+ *
+ * Deliberately NOT attempted when the target did wake up: a rollback that fires on
+ * a successful ignition would resurrect a session the user has already left, which
+ * is the "two divergent targets" failure the retirement machinery exists to stop.
+ */
+export const ROLLBACK_NOTICE_MARKER = '[dsh-graft-slice 回滚]'
+
+export const ROLLBACK_NOTICE =
+  `${ROLLBACK_NOTICE_MARKER} 由于新会话点火失败，已为您自动回滚到当前会话，请重试切片。`
+
+/**
+ * v0.21 P0: the TRUE un-retire.
+ *
+ * `persistRetiredStore(ctx, [id])` is not enough, and the reason is subtle: the write
+ * path is a read-modify-write that ADOPTS the file's contents back into memory (which
+ * is correct for merging two processes' retirements). So a removal that runs before
+ * the file is rewritten can be undone by that same adopt pass on the next write — the
+ * id comes back from disk and the session is frozen again, durably, on the next
+ * restart. The rollback would look successful in memory and be a no-op on disk.
+ *
+ * This function does the removal in the only order that holds: remove from the file
+ * under the lock, and make the in-memory set agree with the file afterwards.
+ */
+function unRetireDurably(ctx: PluginContextLike, sessionId: string): boolean {
+  let restored = false
+  try {
+    mkdirSync(dirname(retiredStorePath), { recursive: true })
+    withFileLock(retiredStorePath, () => {
+      const remaining = new Set(
+        ledgerArray(retiredStorePath).filter((value): value is string => typeof value === 'string'),
+      )
+      remaining.delete(sessionId)
+      writeLedgerAtomic(retiredStorePath, [...remaining].sort())
+      // The memory set is made to AGREE with the file, not merged into: after an
+      // explicit removal, "the file does not have it" is the authoritative answer.
+      retiredSessions.delete(sessionId)
+      restored = !remaining.has(sessionId)
+    })
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(`[dsh-graft-slice] un-retire write failed for ${sessionId}: ${String((error as any)?.message ?? error)}`)
+    } catch {
+      // Logging must not change the rollback result.
+    }
+    return false
+  }
+  try {
+    mkdirSync(dirname(transferredStorePath), { recursive: true })
+    withFileLock(transferredStorePath, () => {
+      const remaining = { ...(ledgerRecord(transferredStorePath) as Record<string, unknown>) }
+      delete remaining[sessionId]
+      writeLedgerAtomic(transferredStorePath, remaining)
+      transferredSessions.delete(sessionId)
+    })
+  } catch (error) {
+    try {
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] un-retire transfer write failed for ${sessionId}: ${String((error as any)?.message ?? error)}`,
+      )
+    } catch {
+      // Logging must not change the rollback result.
+    }
+  }
+  // Belt and braces for the in-memory gate the pre-step actually reads.
+  //
+  // The pre-step consults FOUR per-session marks, not just the two ledgers: the
+  // retired set, the transferred map, the auto-graft STATE machine, and the deferred
+  // graft queue. Clearing only the ledgers leaves `autoGraftStates === 'done'`, which
+  // returns `reason: 'Transferred'` forever — the session would be un-retired on disk
+  // and still frozen in the running process, which is the same double-blind one layer
+  // down.
+  retiredSessions.delete(sessionId)
+  transferredSessions.delete(sessionId)
+  autoGraftStates.delete(sessionId)
+  autoGraftInFlight.delete(sessionId)
+  pendingGraftSources.delete(sessionId)
+  pendingConfirms.delete(sessionId)
+  // The "this id is a target we created" mark belongs to the TARGET, and a rollback
+  // ends that relationship: the source is a plain session again and must not inherit
+  // the target's grace-window protection.
+  graftTargets.delete(sessionId)
+  return restored || !retiredSessions.has(sessionId)
+}
+
+export interface IgnitionRollback {
+  attempted: boolean
+  sourceRestored: boolean
+  noticeAppended: boolean
+  /** Target left in place and marked, so it is visible but not picked up. */
+  targetId: string
+  reason?: string
+}
+
+/**
+ * v0.21: undo a migration whose target never started.
+ *
+ * Order matters: the ledgers are restored FIRST, because an in-memory-only rollback
+ * dies on the next restart and leaves the user exactly as stuck as before.
+ */
+export async function rollbackFailedIgnition(
+  ctx: PluginContextLike,
+  sourceSessionId: string,
+  targetId: string,
+  reason: string,
+): Promise<IgnitionRollback> {
+  const out: IgnitionRollback = {
+    attempted: true,
+    sourceRestored: false,
+    noticeAppended: false,
+    targetId,
+    reason,
+  }
+  if (sourceSessionId.length === 0) {
+    return { ...out, attempted: false, reason: 'no source session to roll back to' }
+  }
+  try {
+    retiredSessions.delete(sourceSessionId)
+    transferredSessions.delete(sourceSessionId)
+    // v0.21: durable, in the order that survives a restart — see `unRetireDurably`.
+    out.sourceRestored = unRetireDurably(ctx, sourceSessionId)
+  } catch (error) {
+    out.reason = `${reason}; ledger rollback failed: ${String((error as any)?.message ?? error)}`
+  }
+  // Tell the human, in the session they will actually be looking at. A rollback that
+  // is only visible in an audit file reads as "nothing happened, try again" — and
+  // repeating the same failed migration is the wrong next move.
+  //
+  // v0.21: written at most ONCE per source. Both the single-shot path (this call
+  // exhausted the budget) and the queue path (a restart found the budget spent) can
+  // reach here for the same migration, and two identical notices read as two
+  // separate failures.
+  if (rollbackNoticed.has(sourceSessionId)) {
+    out.noticeAppended = true
+  } else {
+    try {
+      const live = ctx.sessions.get(sourceSessionId) as any
+      if (live !== undefined && typeof live.append === 'function') {
+        live.append('developer/message', {
+          turn: 0,
+          step: 0,
+          message: {
+            id: `graft-rollback-${sourceSessionId}-${Date.now().toString(36)}`,
+            role: 'developer',
+            content: [{ type: 'text', text: ROLLBACK_NOTICE }],
+          },
+        })
+        rollbackNoticed.add(sourceSessionId)
+        out.noticeAppended = true
+      }
+    } catch (error) {
+      out.reason = `${out.reason ?? reason}; notice failed: ${String((error as any)?.message ?? error)}`
+    }
+  }
+  // The target stays on disk — it may be perfectly good and just un-wakeable — but it
+  // must not look like the session to continue. A title is visible and survives a
+  // reload; the retirement of the source is what actually stops the split.
+  //
+  // The target is a DURABLE artifact, not a live session: nobody has resumed it, which
+  // is the whole problem. So the mark is appended through sessionPersistence when a
+  // live handle is absent, and a failure to mark is reported rather than hidden.
+  try {
+    const target = ctx.sessions.get(targetId) as any
+    if (target !== undefined && typeof target.append === 'function') {
+      target.append('session/title', {
+        title: `[点火失败] ${targetId}`,
+        messageSeqs: [],
+        source: { kind: 'user' },
+      })
+    } else {
+      const persistence = (ctx.get as any)?.('sessionPersistence')
+      if (isRecord(persistence) && typeof persistence.open === 'function') {
+        const handle = await persistence.open(targetId)
+        if (handle !== undefined && typeof handle.append === 'function') {
+          await handle.append([
+            {
+              type: 'session/title',
+              time: Date.now(),
+              data: { title: `[点火失败] ${targetId}`, messageSeqs: [], source: { kind: 'user' } },
+            },
+          ])
+          if (typeof handle.flush === 'function') await handle.flush()
+          if (typeof handle.close === 'function') await handle.close()
+        }
+      }
+    }
+  } catch {
+    // A missing target is not a rollback failure; the title is cosmetic evidence.
+  }
+  try {
+    appendGraftAudit({
+      at: new Date().toISOString(),
+      kind: 'ignite-rollback',
+      sessionId: sourceSessionId,
+      targetSessionId: targetId,
+      detail: `${reason}; sourceRestored=${out.sourceRestored} noticeAppended=${out.noticeAppended}`,
+    })
+  } catch {
+    // Evidence only.
+  }
+  return out
+}
+
+/**
+ * v0.21: has this target exhausted its ignition budget?
+ *
+ * `IGNITION_MAX_ATTEMPTS` activation rounds is the contract the user asked for (20s
+ * timeout x 3). Kept as a predicate so the rollback decision is testable without
+ * waiting for a timer.
+ */
+export function ignitionExhausted(entry: PendingIgnition | undefined): boolean {
+  return entry !== undefined && entry.attempts >= IGNITION_MAX_ATTEMPTS
+}
+
+export interface IgnitionAttemptWithRollback extends IgnitionResult {
+  /** Present when the attempt exhausted its budget and the source was restored. */
+  rollback?: IgnitionRollback
+}
+
+/**
+ * v0.19: consume the queue — one activation, one attempt per pending target.
+ *
+ * Called at the end of `apply()`. It retries what a crash or a missing channel left
+ * behind, and it GIVES UP after `IGNITION_MAX_ATTEMPTS` instead of retrying forever:
+ * a target nobody can start is a fact to report, not a loop.
+ *
+ * v0.21: giving up now means ROLLING BACK. Before this, "gave up" deleted the queue
+ * entry and left the source retired — the double-blind state, permanently.
+ */
+export async function resumePendingIgnitions(
+  ctx: PluginContextLike,
+  settings: Required<GraftConfig>,
+): Promise<Array<{ targetId: string; ok: boolean; reason?: string; rollback?: IgnitionRollback }>> {
+  const out: Array<{ targetId: string; ok: boolean; reason?: string; rollback?: IgnitionRollback }> = []
+  for (const entry of [...pendingIgnitions.values()]) {
+    if (!settings.igniteTarget) break
+    if (ignitionExhausted(entry)) {
+      pendingIgnitions.delete(entry.targetId)
+      persistPendingIgnitions(ctx)
+      const rollback = await rollbackFailedIgnition(
+        ctx,
+        entry.sourceSessionId,
+        entry.targetId,
+        `gave up after ${entry.attempts} attempts`,
+      )
+      out.push({
+        targetId: entry.targetId,
+        ok: false,
+        reason: `gave up after ${entry.attempts} attempts; rolled back to ${entry.sourceSessionId}`,
+        rollback,
+      })
+      continue
+    }
+    const result = await attemptIgnition(ctx, settings, entry.sourceSessionId, entry.targetId, { retry: true })
+    out.push({ targetId: entry.targetId, ok: result.ok, ...(result.reason === undefined ? {} : { reason: result.reason }) })
+  }
+  return out
+}
+
+/**
+ * v7.0 A1/A2: render one turn as a replay of the real conversation flow.
