@@ -1,5 +1,13 @@
 # dsh-graft-slice
 
+> **里程碑 `v0.9.0-freeze`（2026-11-05）** —— 本项目已进入架构冻结点，用于沉淀副脑插件的前置重构成果。
+>
+> **核心功能**：在源会话最后一个 `turn/end` 处切取高保真磁带，生成零继承、可冷恢复的交接会话；不 fork、不引入 SQLite、不单独注入 `tool/result`。转生后广播 `graft/session-transferred`，由旁路插件自行决定是否跟随。
+>
+> **已完成的重构**：`src/index.ts` 14354 → 13425 行，抽出 5 个内联模块（`utils/serialize`、`utils/logger`、`core/ledger`、`core/watermark`、`core/txn`），行为不变、545 → 542 条测试全绿（6 条副脑测试随代码迁往 `dsh-observer`）。
+>
+> **已知结构性限制**：宿主 `commands.execute` 是广播语义（每次调用必留一行）；第三方客户端没有插件自有 Remote。因此副脑类功能不能靠「客户端命令 + UI 按钮」实现，只能由模型工具或宿主侧动作触发 —— 详见 [副脑插件架构复盘与底层缺陷报告](https://github.com/corvus-dsh/dsh-observer) 同期的复盘文档。
+
 > 兄弟项目：[dsh-memory](https://github.com/corvus-dsh/dsh-memory) —— 能力记忆（SKILL.md / 负知识），与本插件只通过台账文件耦合。
 
 **DSH 日志切片与最小注入插件。** 在源会话最后一个 `turn/end` 处切取高保真磁带，创建一个零继承、可冷恢复的交接会话；不 fork，不引入 SQLite，不单独注入 `tool/result`。
