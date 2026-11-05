@@ -12,3 +12,6 @@ Thumbs.db
 .graft-targets.json
 .graft-constraint-sections.json
 .auto-graft-suppressed.json
+# Runtime audit trail. Written next to the state files; when dataDir falls back to the plugin
+# directory (a wiped profile patch), it lands here — evidence, never source.
+.graft-audit.jsonl
