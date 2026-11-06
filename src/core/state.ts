@@ -286,6 +286,53 @@ export interface PlanNudgeState {
 }
 
 export const planNudgeStates = new Map<string, PlanNudgeState>()
+/**
+ * v1.0.0 P0 — THE ONLY COLLECTION WITHOUT AN EXIT, AND WHY IT NOW HAS TWO.
+ *
+ * The audit flagged this map as the single real leak: `planNudgeStates.set(agentId, …)` on
+ * every pre-step with **no delete anywhere**. Every other session-keyed collection in this
+ * file has at least one delete or clear; this one had none, which is exactly the discipline
+ * breach the audit was describing.
+ *
+ * Two exits, because one is not enough:
+ *
+ *   1. `rememberPlanNudge()` evicts the oldest entry past `PLAN_NUDGE_CAP`. A cap is the
+ *      exit that does not depend on ANY lifecycle event being wired correctly — and there
+ *      are six different places that retire a session in this file. A cleanup attached to
+ *      five of them is a leak that looks fixed.
+ *   2. `forgetPlanNudge()` for callers that DO know a session is gone.
+ *
+ * Map preserves insertion order, so "oldest" is "least recently written" — `remember`
+ * re-inserts on every write, which makes the eviction order match usage rather than
+ * creation. That matters: an actively nudged long-lived session must not be evicted ahead
+ * of a hundred sessions that finished days ago.
+ *
+ * WHY NOT `WeakMap`: the key is a session id string, not an object. A string key in a weak
+ * collection is never collectable, so `WeakMap` would look like a fix and behave like the
+ * leak.
+ */
+export const PLAN_NUDGE_CAP = 500
+
+/** Drop one session's nudge state. Safe on an unknown id. */
+export function forgetPlanNudge(agentId: string): void {
+  planNudgeStates.delete(agentId)
+}
+
+/**
+ * Store a session's nudge state, re-inserting so eviction is LRU, then trim to the cap.
+ * Returns the stored state so callers can keep using the object they passed.
+ */
+export function rememberPlanNudge(agentId: string, state: PlanNudgeState): PlanNudgeState {
+  planNudgeStates.delete(agentId)
+  planNudgeStates.set(agentId, state)
+  while (planNudgeStates.size > PLAN_NUDGE_CAP) {
+    const oldest = planNudgeStates.keys().next().value
+    if (oldest === undefined) break
+    planNudgeStates.delete(oldest)
+  }
+  return state
+}
+
 /** agentId → the `turn` whose model-driven nudge was already sent. */
 export const modelDrivenNudgeTurns = new Map<string, number>()
 

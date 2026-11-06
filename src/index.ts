@@ -144,6 +144,7 @@ import {
   pendingGraftSources,
   pendingIgnitions,
   planNudgeStates,
+  rememberPlanNudge,
   preparedSlices,
   retiredSessions,
   rollbackNotices,
@@ -6034,7 +6035,55 @@ let constraintSectionsPath = join(PLUGIN_DIR, '.graft-constraint-sections.json')
  * never logs. Without this file there is no way to prove after the fact that a
  * nudge fired, at what ratio, or that a lock actually contended. One JSON line
  * per event; the write is locked because two processes may append at once.
+ *
+ * v1.0.0 P0 — ROTATION, because "append-only" was the whole design and nothing bounded it.
+ *
+ * The file only ever grew. `withFileLock` serialises writers but does not care how big the
+ * target is, so a long-lived profile accumulates one line per audit event forever.
+ *
+ * The policy is archive-not-delete: an audit trail whose oldest half is silently dropped is
+ * not an audit trail. Past `GRAFT_AUDIT_ROTATE_BYTES` the active file is RENAMED to a
+ * timestamped sibling and a new active file starts; the newest `GRAFT_AUDIT_KEEP` archives
+ * are kept. Rotation happens INSIDE the lock so two processes cannot both rotate, and its
+ * failure does not stop the append — a rotation bug must not cost evidence.
  */
+export const GRAFT_AUDIT_ROTATE_BYTES = 4 * 1024 * 1024
+export const GRAFT_AUDIT_KEEP = 3
+
+function rotateGraftAudit(path: string): void {
+  let size = 0
+  try {
+    size = statSync(path).size
+  } catch {
+    return
+  }
+  if (size < GRAFT_AUDIT_ROTATE_BYTES) return
+  const base = dirname(path)
+  const name = path.slice(base.length + 1)
+  const stamp = new Date().toISOString().replace(/[:.]/gu, '-')
+  try {
+    renameSync(path, join(base, `${name}.${stamp}`))
+  } catch {
+    // Keep appending to the old file rather than losing the line.
+    return
+  }
+  try {
+    const prefix = `${name}.`
+    const archives = readdirSync(base)
+      .filter((entry) => entry.startsWith(prefix))
+      .sort()
+    for (const entry of archives.slice(0, Math.max(0, archives.length - GRAFT_AUDIT_KEEP))) {
+      try {
+        rmSync(join(base, entry), { force: true })
+      } catch {
+        /* a stuck archive is not worth failing the append */
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
 export function appendGraftAudit(entry: GraftAuditEntry): void {
   const base = dirname(retiredStorePath)
   try {
@@ -6043,6 +6092,8 @@ export function appendGraftAudit(entry: GraftAuditEntry): void {
     withFileLock(
       path,
       () => {
+        /** Rotate inside the lock: two processes must not both rotate the same file. */
+        rotateGraftAudit(path)
         appendFileSync(path, formatAuditLine(entry, process.pid) + '\n', 'utf8')
       },
       { timeoutMs: LOCK_TIMEOUT_MS, staleMs: LOCK_STALE_MS, label: 'audit', silent: true },
@@ -6423,7 +6474,12 @@ function takePlanNudge(
     state.turns += 1
     state.nudged = false
   }
-  planNudgeStates.set(agentId, state)
+  /**
+   * v1.0.0 P0: `rememberPlanNudge` replaces the bare `.set`. It keeps the map under
+   * `PLAN_NUDGE_CAP` by evicting the least-recently-written session. This collection had no
+   * exit at all before — see the note in `core/state.ts`.
+   */
+  rememberPlanNudge(agentId, state)
   if (state.nudged) return []
   if (state.turns - state.lastNudgeTurn < PLAN_NUDGE_COOLDOWN_TURNS) return []
 
@@ -6784,6 +6840,14 @@ export function resetRetiredSessions(): void {
   // v7.6: the per-turn nudge mark is session state too; a reset that kept it
   // would silence the 70% warning for the first turn of the next test.
   modelDrivenNudgeTurns.clear()
+  /**
+   * v1.0.0 P0: the PLAN-NUDGE state is session state for the same reason — and it was the
+   * one collection this reset forgot. A stale entry would carry `turns`/`lastNudgeTurn`
+   * from a finished session into whatever session next reuses the id, so the next plan
+   * reminder could be silently suppressed (or fired far too early). The map also now has a
+   * cap of its own; both exits are documented in `core/state.ts`.
+   */
+  planNudgeStates.clear()
   // v7.9: the escalation/forced-cut marks are session state; a stale mark would
   // inject "水位告急" into an unrelated session and mislabel a planned handover.
   watermarkEscalations.clear()
