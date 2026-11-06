@@ -4955,7 +4955,7 @@ const DELEGATION_NOISE_PATTERN =
  *
  * Measured live: a source session's user message opened with
  *
- *   1. 删除危险脚本：立刻删除 D:\持久层能力架构\repair-log.cjs，绝不能让这个无备份、
+ *   1. 删除危险脚本：立刻删除 D:\workspace\repair-log.cjs，绝不能让这个无备份、
  *      强制覆盖的脚本再跑一次。
  *
  * The extractor kept it — it is imperative, action-shaped, specific and long, so it

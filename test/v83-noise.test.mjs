@@ -24,7 +24,7 @@ import {
 } from '../index.js'
 import { makeCtx, makeSourceLog } from './fake-harness.mjs'
 
-const CWD = 'D:\\持久层能力架构'
+const CWD = 'D:\\workspace'
 
 test('v0.17: a paragraph made only of host paths is replaced by a marker, never silently dropped', () => {
   const text = [
@@ -42,7 +42,7 @@ test('v0.17: a paragraph made only of host paths is replaced by a marker, never 
 })
 
 test('v0.17: a paragraph with host noise AND project work keeps the work, redacting only the tokens', () => {
-  const text = '我改了 D:\\持久层能力架构\\dsh-memory\\src\\store.ts，日志落在 C:\\Users\\xxx\\AppData\\Local\\Temp\\x.log'
+  const text = '我改了 D:\\workspace\\dsh-memory\\src\\store.ts，日志落在 C:\\Users\\xxx\\AppData\\Local\\Temp\\x.log'
   const cleaned = stripHostNoise(text, CWD)
   assert.match(cleaned, /dsh-memory\\src\\store\.ts/u, 'the project path survives — dropping it would lose real work')
   assert.doesNotMatch(cleaned, /C:\\Users/u)
@@ -79,13 +79,18 @@ test('v0.17: a drive-root sweep is folded, but a workspace search is left alone'
   const local = 'PS> rg TODO src/ --line-number\nsrc/index.ts:42: TODO fix'
   assert.equal(stripHostNoise(local, CWD), local, 'a search inside the workspace is ordinary work')
 
-  const sweepWithProject = 'Get-ChildItem -Path C:\\ -Recurse | Select-String D:\\持久层能力架构\\src\\index.ts'
+  const sweepWithProject = 'Get-ChildItem -Path C:\\ -Recurse | Select-String D:\\workspace\\src\\index.ts'
   const kept = stripHostNoise(sweepWithProject, CWD)
-  assert.match(kept, /持久层能力架构/u, 'when the sweep names a file INSIDE this project, the finding is kept')
+  /**
+   * `CWD` is `D:\workspace`, so the assertion names the SAME string the fixture uses. It used to spell the
+   * author's real directory; the rule being tested is "a path inside the project is kept", not "this exact
+   * directory name survives".
+   */
+  assert.match(kept, /workspace/u, 'when the sweep names a file INSIDE this project, the finding is kept')
   assert.doesNotMatch(kept, /C:\\/u, 'and the root it was sweeping is still redacted')
   // A bare project NAME is not a project path: the rule is about paths, and the
   // output of a whole-volume sweep is worthless either way.
-  assert.equal(stripHostNoise('Get-ChildItem -Path C:\\ -Recurse | Select-String 持久层能力架构', CWD), FOLDED_OUTPUT_MARKER)
+  assert.equal(stripHostNoise('Get-ChildItem -Path C:\\ -Recurse | Select-String workspace', CWD), FOLDED_OUTPUT_MARKER)
 })
 
 test('v0.17 ACCEPTANCE: a sliced log carrying AppData produces no such path in the target', async () => {

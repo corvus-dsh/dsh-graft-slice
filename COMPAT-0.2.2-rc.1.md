@@ -116,7 +116,7 @@ sessionController.prompt: Cannot read properties of undefined (reading 'throwIfA
 
 | 时间 (UTC) | kind | target | detail |
 |---|---|---|---|
-| 2026-11-04T11:40:39.599Z | `ignite-failed` | `auto-graft-mw21oowu-e7kcmk` | `sessionController.prompt: Cannot read properties of undefined (reading 'throwIfAborted')` |
+| 2026-11-04T11:40:39.599Z | `ignite-failed` | `session-<example-id>` | `sessionController.prompt: Cannot read properties of undefined (reading 'throwIfAborted')` |
 
 后果是「双盲」的最坏形态：源会话已退休、目标已落盘但**永远静止**，用户在侧边栏看到一个不会自己开工的会话——即用户报告的「未自动唤醒，自动点火失效」。
 

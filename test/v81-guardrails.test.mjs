@@ -47,19 +47,19 @@ test('v0.14 D1: the guard denies every root-wide search and leaves ordinary work
     'Select-String -Path AppData\\**\\*.log -Pattern error',
     'dir /s C:\\',
   ]) {
-    const verdict = scanAgentCommand(command, 'D:\\持久层能力架构')
+    const verdict = scanAgentCommand(command, 'D:\\workspace')
     assert.equal(verdict?.decision, 'deny', `expected a denial for: ${command}`)
     assert.equal(verdict?.code, 'GLOBAL_SEARCH')
     assert.match(String(verdict?.reason), /GLOBAL_SEARCH/u)
     assert.match(String(verdict?.reason), /工作区/u, 'the denial states the boundary it enforced')
   }
   for (const command of BENIGN_COMMANDS) {
-    assert.equal(scanAgentCommand(command, 'D:\\持久层能力架构'), undefined, `expected an allow for: ${command}`)
+    assert.equal(scanAgentCommand(command, 'D:\\workspace'), undefined, `expected an allow for: ${command}`)
   }
 })
 
 test('v0.14 D1: the denial is actionable — it names the alternative, not just the ban', () => {
-  const verdict = scanAgentCommand('rg foo /', 'D:\\持久层能力架构')
+  const verdict = scanAgentCommand('rg foo /', 'D:\\workspace')
   assert.match(String(verdict?.reason), /ls \/ dir/u)
   assert.match(String(verdict?.reason), /询问用户/u)
   assert.match(String(verdict?.reason), /不要换写法重试/u)
@@ -70,7 +70,7 @@ test('v0.14 D1: the denial is actionable — it names the alternative, not just 
 // ---------------------------------------------------------------------------
 
 test('v0.14 D6: recursive deletion is denied when it escapes the workspace', () => {
-  const workspace = 'D:\\持久层能力架构'
+  const workspace = 'D:\\workspace'
   for (const command of [
     'rm -rf /',
     'rm -rf ~',
@@ -86,9 +86,9 @@ test('v0.14 D6: recursive deletion is denied when it escapes the workspace', () 
 })
 
 test('v0.14 D6: confined work is NOT blocked (a guard that blocks ordinary work gets switched off)', () => {
-  const workspace = 'D:\\持久层能力架构'
+  const workspace = 'D:\\workspace'
   assert.equal(scanAgentCommand('Remove-Item -Recurse .\\build', workspace), undefined)
-  assert.equal(scanAgentCommand('Remove-Item -Recurse -Force D:\\持久层能力架构\\dsh-memory\\lib', workspace), undefined)
+  assert.equal(scanAgentCommand('Remove-Item -Recurse -Force D:\\workspace\\dsh-memory\\lib', workspace), undefined)
   assert.equal(scanAgentCommand('rm -rf node_modules', workspace), undefined)
   assert.equal(scanAgentCommand('Remove-Item .\\dist\\bundle.js', workspace), undefined)
   // With no workspace to judge against, only an obvious root/system target denies:
@@ -127,7 +127,7 @@ test('v0.14 D1: commandGuard:false disarms the tool layer (the switch is not dec
   apply(ctx, { commandGuard: false })
   assert.equal(ctx.tools.guards.length, 0)
   assert.equal(
-    scanAgentCommand('rg x /', 'D:\\持久层能力架构')?.decision,
+    scanAgentCommand('rg x /', 'D:\\workspace')?.decision,
     'deny',
     'the scanner itself is unchanged; only its enforcement is off',
   )
@@ -148,13 +148,13 @@ test('v0.14: a denied command leaves an audit line that names what was blocked',
 // ---------------------------------------------------------------------------
 
 test('v0.14 D1: the red line is a system-prompt section AND a one-shot pre-step message', async () => {
-  const log = makeSourceLog({ turns: 3, cwd: 'D:\\持久层能力架构' })
+  const log = makeSourceLog({ turns: 3, cwd: 'D:\\workspace' })
   const ctx = makeCtx({ sourceLog: log })
   apply(ctx, {})
 
   const section = ctx.systemPrompt._render('graft:guard', { session: { id: log.session.id } })
   assert.match(section, /红线（最高优先级/u)
-  assert.match(section, /D:\\持久层能力架构/u)
+  assert.match(section, /D:\\workspace/u)
   assert.match(section, /rm -rf/u)
 
   const payload = { agent: { id: log.session.id }, messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }] }

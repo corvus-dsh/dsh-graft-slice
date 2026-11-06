@@ -10,7 +10,7 @@
 
 | 你的要求 | 落地 |
 |---|---|
-| 加入 profile 依赖管理 | ✅ `dependencies['dsh-paradise'] = 'link:D:/持久层能力架构/dsh-paradise'`，原文件已备份 |
+| 加入 profile 依赖管理 | ✅ `dependencies['dsh-paradise'] = 'link:D:/workspace/dsh-paradise'`，原文件已备份 |
 | 加入 `dsh.profile.bundles` | ✅ 且**排在 `dsh-graft-slice` 之前**（顺序即「层先于消费者加载」） |
 | node_modules 软链接 | ✅ 用 **Junction**（SymbolicLink 需管理员权限，Junction 不需要） |
 
@@ -22,7 +22,7 @@
 graft -> bare specifier: FAIL (ERR_MODULE_NOT_FOUND)
 ```
 
-原因：Node 解析软链时走**真实路径** `D:\持久层能力架构\dsh-graft-slice`，于是去 workspace 根找 `node_modules`。
+原因：Node 解析软链时走**真实路径** `D:\workspace\dsh-graft-slice`，于是去 workspace 根找 `node_modules`。
 
 **所以还必须在 workspace 根建立 `node_modules`**，四个包各一个 Junction。补上后：
 

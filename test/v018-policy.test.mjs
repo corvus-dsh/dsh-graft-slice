@@ -25,7 +25,7 @@ import {
 } from '../index.js'
 import { dispatchPreExecute, makeCtx, makeSourceLog } from './fake-harness.mjs'
 
-const WORKSPACE = 'D:\\持久层能力架构'
+const WORKSPACE = 'D:\\workspace'
 const GLOBAL_SEARCH = `rg pattern ${'/'}`
 const RECURSIVE_DELETE_ROOT = ['Remove-Item', '-Recurse', 'C:\\'].join(' ')
 const RECURSIVE_DELETE_UNPLACED = ['Remove-Item', '-Recurse', 'build'].join(' ')
