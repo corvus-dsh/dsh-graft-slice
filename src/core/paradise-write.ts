@@ -75,8 +75,21 @@ export interface ParadiseSessionLike {
   }>
 }
 
+/**
+ * THE LAYER'S SHAPE, AS A CONTRACT.
+ *
+ * IT USED TO NAME THE HOST. This interface declared `createDshAdapters(ctx)` — the runtime's own factory —
+ * which put a host name inside a plugin that is supposed to depend only on the protocol. The name leaked
+ * from the layer's export list into this plugin's types, and a type is where coupling is easiest to miss:
+ * nothing fails, nothing is slow, it just means "this plugin cannot be read without knowing which host it
+ * targets", which is exactly the independence the protocol layer exists to provide.
+ *
+ * `createAdapters` is the layer's neutral export for the same function. The resolution below accepts BOTH
+ * names, because an older installed layer may only carry the host-flavoured one — and refusing to load a
+ * working layer over a cosmetic rename would be the wrong trade.
+ */
 interface ParadiseLayerLike {
-  createDshAdapters(ctx: any): { name: string; session: ParadiseSessionLike }
+  createAdapters(ctx: any): { name: string; session: ParadiseSessionLike }
   deleteSession(
     ctx: any,
     sessionId: string,
@@ -135,6 +148,46 @@ let primed: ParadiseWriteBinding | null = null
 let resolveInFlight: Promise<ParadiseWriteBinding> | null = null
 
 /**
+ * AN INJECTED ADAPTER PROVIDER — the seam that makes this plugin host-independent.
+ *
+ * WHY `primed` WAS NOT ENOUGH, AND WHY THIS IS A DIFFERENT SLOT
+ *
+ * `primed` answers ONCE and is then consumed, deliberately: a test must not accidentally certify a mock
+ * as shipped behaviour. But a plugin running on a bare machine needs the OPPOSITE — every call, for the
+ * life of the process, must resolve through the adapter the caller handed it. Those are two different
+ * requirements and they cannot share a slot:
+ *
+ *   `primed`        → one answer, then back to real resolution   (a test seam)
+ *   `provider`      → every answer, until cleared                (a deployment choice)
+ *
+ * WHAT THE PLUGIN STILL DOES NOT KNOW: which host the adapter came from, or whether there is a host at
+ * all. It receives the two verbs it calls and nothing else — the same shape it gets from the real layer.
+ * That is what lets `dsh-graft-slice` run under `dsh-paradise`'s raw adapters without a single change to
+ * its migration logic.
+ */
+export type ParadiseWriteProvider = (ctx: any) => ParadiseWriteBinding | null | Promise<ParadiseWriteBinding | null>
+let provider: ParadiseWriteProvider | undefined
+
+/**
+ * Install (or clear) the provider.
+ *
+ * THE CONTRACT IS DELIBERATELY LOOSE: a provider may answer synchronously or not at all (`null` means
+ * "I have no opinion, resolve as usual"). Both matter — a Node test wants a plain object, and a caller
+ * that only handles SOME contexts must not have to fake the rest.
+ */
+export function setParadiseWriteProvider(next: ParadiseWriteProvider | undefined): void {
+  provider = next
+  cached = null
+  cachedFor = null
+  resolveInFlight = null
+}
+
+/** Is a provider installed? Reported by diagnostics so "why is this not using the host" is answerable. */
+export function hasParadiseWriteProvider(): boolean {
+  return provider !== undefined
+}
+
+/**
  * Resolve the layer's write surface for THIS context.
  *
  * Never throws: the caller gets `ok: false` and a reason it can put in an error with a stage.
@@ -150,6 +203,23 @@ let resolveInFlight: Promise<ParadiseWriteBinding> | null = null
  * per context keeps the "resolve once" benefit exactly where it is true.
  */
 export async function ensureParadiseWrite(ctx: any): Promise<ParadiseWriteBinding> {
+  /**
+   * THE INJECTED PROVIDER WINS, EVERY TIME IT ANSWERS.
+   *
+   * Checked BEFORE the primed slot because the two express different intents: a provider is a DEPLOYMENT
+   * decision ("this plugin runs on these adapters"), a prime is a TEST statement ("answer once, then go
+   * back to reality"). A provider that returns `null` declines for THIS context and falls through to the
+   * normal resolution — which is what lets a caller own only some contexts.
+   */
+  if (provider !== undefined) {
+    const answer = await provider(ctx)
+    if (answer !== null) {
+      cached = answer
+      cachedFor = ctx
+      return answer
+    }
+  }
+
   /**
    * THE PRIMED ANSWER WINS FOR THE NEXT CONTEXT, ONCE.
    *

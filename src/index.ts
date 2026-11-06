@@ -27,9 +27,8 @@
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { basename, dirname, join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
-import { fileURLToPath } from 'node:url'
 
 /**
  * v1.3 REFACTOR — stateless helpers live in `src/utils/serialize.ts` and are INLINED
@@ -104,6 +103,60 @@ import {
   withFileLock,
 } from './core/txn.js'
 
+/**
+ * v1.4 — THE PLUGIN'S PRIVATE STATE LIVES IN ONE MODULE (`src/core/state.ts`).
+ *
+ * Every collection here is process-local bookkeeping this plugin owns: the retirement ledgers
+ * mirrored in memory, the auto-graft queue, the goal chain, the constraint carry-over, and the
+ * ignition records. They were declared in this file, thousands of lines apart, which made "what does
+ * this plugin remember?" a question you answered by grepping 12 000 lines.
+ *
+ * DECLARING THEM ELSEWHERE CHANGES NOTHING AT RUNTIME. The bundle inlines every module into one
+ * scope, so these are the same `Map`/`Set` objects either way — same identity, same mutations. What
+ * changes is that the boundary is now a fact of the file layout: exactly one module can name them.
+ *
+ * WHAT DID *NOT* MOVE, AND WHY: the store PATHS (`retiredStorePath`, `txnDirPath`, …). An imported
+ * binding is read-only in the importer, and `configureRetiredStore` REASSIGNS those paths when a
+ * profile is resolved — moving them would silently pin every store to the plugin directory instead of
+ * the profile. Collections are only mutated, never rebound, which is why they are safe to move.
+ */
+import {
+  PLUGIN_DIR,
+  LEFTOVER_CAP,
+  autoGraftInFlight,
+  autoGraftStates,
+  autoGraftSuppressedUntil,
+  constraintsApplied,
+  constraintsInFlight,
+  constraintsReasserted,
+  deferredOverflowTargets,
+  draftPayloads,
+  forcedCutMarks,
+  graftTargets,
+  guardReasserted,
+  ignitionAdmissions,
+  inFlight,
+  leftoverTargets,
+  modelDrivenNudgeTurns,
+  overflowRetries,
+  pendingConfirms,
+  pendingConstraints,
+  pendingGraftSources,
+  pendingIgnitions,
+  planNudgeStates,
+  preparedSlices,
+  retiredSessions,
+  rollbackNotices,
+  rollbackNoticed,
+  targetConstraintSections,
+  taskBoundaryDeferrals,
+  transferredSessions,
+  transitionCards,
+  watermarkEscalated,
+  watermarkEscalations,
+} from './core/state.js'
+import type { GraftTargetMark, LeftoverTarget, PlanNudgeState, PreparedSlice } from './core/state.js'
+
 /** Re-exported: part of the plugin's public surface (tests import it). */
 export { graftError }
 /**
@@ -130,9 +183,10 @@ export type { GraftAuditEntry }
  *     rollback that un-retires a source. All of it reads graft's own state, and none of it means
  *     anything to another plugin.
  *
- * THE STATE DID NOT MOVE. `retiredSessions`, `graftTargets` and the auto-graft maps are shared with the
- * pre-step gate, the transfer machinery and the tool handlers; moving them would mean moving half of
- * this file. The module reaches them through an injected resolver instead — the same one-way shape
+ * THE STATE MOVED TO `src/core/state.ts` LATER, not in this step. v7.6 left the maps here; the v1.4
+ * pass declared them in one module so the plugin's private bookkeeping has a boundary a second plugin
+ * can see at a glance. Nothing about HOW they are reached changed: this file imports them, mutates them,
+ * and `ignition.ts` still receives them through the same injected resolver — the one-way shape
  * `core/txn.ts` uses for its audit sink, for the same reason (the bundler inlines both into one scope,
  * where a reverse import is a temporal-dead-zone crash rather than a build error).
  *
@@ -187,27 +241,14 @@ export {
 export type { IgnitionResult, IgnitionRollback, PendingIgnition }
 
 /**
- * THE IGNITION STATE LIVES HERE; the functions live in `core/ignition.ts`.
+ * THE IGNITION STATE LIVES IN `src/core/state.ts`.
  *
- * These four declarations were inside the block that moved. They stayed behind because code this file
- * still owns reads them: the pre-step gate consults `ignitionAdmissions`, the debug-status tool
- * serialises `pendingIgnitions`, and `configureRetiredStore` resets all of them.
+ * It stayed behind when the ignition FUNCTIONS moved to `core/ignition.ts` in v7.6 because code this
+ * file still owns reads it: the pre-step gate consults `ignitionAdmissions`, the debug-status tool
+ * serialises `pendingIgnitions`, and `configureRetiredStore` resets all of them. The declarations now
+ * live with every other piece of the plugin's private state; this file imports them (see the block at
+ * the top of the module) and `core/ignition.ts` still reaches them through the injected resolver.
  */
-const pendingIgnitions = new Map<string, PendingIgnition>()
-/** Admissions recorded in this process, per TARGET. See the routing note in core/ignition.ts. */
-const ignitionAdmissions = new Map<string, { at: number; promptChars: number }>()
-/** Sources already told about a rollback in this process, so the same notice is written twice. */
-const rollbackNoticed = new Set<string>()
-/**
- * v7.8 — THE ROLLBACK NOTICES WAITING FOR DELIVERY, per source session.
- *
- * Replaces the `live.append('developer/message', { turn: 0, step: 0 })` that used to put the notice
- * into the source's log. That shape is not a real round, and the host's resume-time format validation
- * rejects it; the notice now travels through the pre-step `messages` channel instead, which writes
- * nothing and consumes no step. Lives HERE (not in `core/ignition.ts`) because the pre-step waterfall
- * that delivers it is declared here — same reason every other piece of ignition state does.
- */
-const rollbackNotices = new Map<string, { text: string; at: number; targetId: string }>()
 /** Where the pending-ignition queue is persisted; set by `configureRetiredStore`. */
 let pendingIgnitionPath = ''
 
@@ -281,11 +322,25 @@ export const name = 'dsh-graft-slice'
 import {
   PARADISE_WRITE_MISSING_CONSEQUENCE,
   ensureParadiseWrite,
+  hasParadiseWriteProvider,
   paradiseSpecifiers,
   resetParadiseWriteCache,
+  setParadiseWriteProvider,
   unavailableWriteBinding,
 } from './core/paradise-write.js'
-import type { ParadiseWriteBinding } from './core/paradise-write.js'
+import type { ParadiseWriteBinding, ParadiseWriteProvider } from './core/paradise-write.js'
+
+/**
+ * THE HOST GATEWAY — the seam that lets this plugin run where there is no host.
+ *
+ * Exported from the plugin entry (not only from `core/`) because the consumer that needs it imports the
+ * PLUGIN: a bare-machine runner binds an adapter and then calls the migration entry point. Without this
+ * export it would have to reach into internals, which is how a seam becomes an accident.
+ */
+import { hasHostGateway, resolveGateway, setHostGateway } from './core/host-gateway.js'
+import type { HostGateway } from './core/host-gateway.js'
+export { hasHostGateway, setHostGateway }
+export type { HostGateway }
 
 /**
  * v7.7 — THE BRIDGE'S PUBLIC SURFACE.
@@ -300,11 +355,13 @@ import type { ParadiseWriteBinding } from './core/paradise-write.js'
 export {
   PARADISE_WRITE_MISSING_CONSEQUENCE,
   ensureParadiseWrite,
+  hasParadiseWriteProvider,
   paradiseSpecifiers,
   resetParadiseWriteCache,
+  setParadiseWriteProvider,
   unavailableWriteBinding,
 }
-export type { ParadiseWriteBinding }
+export type { ParadiseWriteBinding, ParadiseWriteProvider }
 
 /**
  * Hard service dependencies. sessionPersistence is required for a durable
@@ -5673,14 +5730,12 @@ export function buildInjectionPlan(
 // Phase 4 — durable write, retirement and fallback read
 // ===========================================================================
 
-const retiredSessions = new Set<string>()
-const transferredSessions = new Map<string, { newSessionId: string; at: number; reason: string }>()
-const autoGraftInFlight = new Set<string>()
-const autoGraftStates = new Map<string, 'idle' | 'grafting' | 'done'>()
-const transitionCards = new Set<string>()
-const inFlight = new Set<string>()
-
-const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url))
+/**
+ * The in-memory mirrors of the ledgers, and the auto-graft queue, are declared in
+ * `src/core/state.ts` and imported at the top of this module. What stays here is the
+ * LOCATION of each store: these are `let` because `configureRetiredStore` reassigns them
+ * once a profile or `dataDir` is resolved, and an imported binding could not be reassigned.
+ */
 let retiredStorePath = join(PLUGIN_DIR, '.retired.json')
 let transferredStorePath = join(PLUGIN_DIR, '.transferred.json')
 /** v7.0: persisted graft-target marks (chain guard + protection across restarts). */
@@ -5843,7 +5898,8 @@ function configureRetiredStore(ctx: PluginContextLike, settings: Required<GraftC
 }
 
 /**
- * v5.2 补丁二：后台 LLM 约束提取。
+ * v5.2 补丁二：后台 LLM 约束提取的载荷形状（`PendingConstraintPayload`）声明在
+ * `src/core/state.ts` —— 与它一起生活的队列也在那里。
  *
  * 迁移关键路径只用正则 FAST_CONSTRAINTS：LLM 调用随源历史增长而变慢，放在
  * 关键路径上会直接推高「触发到看到新会话」的延迟。
@@ -5853,29 +5909,14 @@ function configureRetiredStore(ctx: PluginContextLike, settings: Required<GraftC
  *
  * 失败时保留正则结果，不回滚迁移：约束质量下降是次要问题，迁移已经成功。
  */
-interface PendingConstraintPayload {
-  sourceSessionId: string
-  targetSessionId: string
-  constraints: string[]
-  source: 'llm'
-  extractedAt: number
-}
 
 /**
- * v6.0 补丁一：草稿捕获。
+ * v6.0 补丁一：草稿捕获（`DraftPayload` / `draftPayloads` 同样声明在 `src/core/state.ts`）。
  *
  * 用户在旧会话被拦截的那一瞬间正在输入的内容，不应该凭空消失。
  * 拦截时捕获，写盘；target 第一次收到输入时把草稿和新输入合并成一条，
  * 然后立刻删除——只生效一次。
  */
-interface DraftPayload {
-  sourceSessionId: string
-  targetSessionId: string
-  text: string
-  capturedAt: number
-}
-
-const draftPayloads = new Map<string, DraftPayload>()
 let draftsLoaded = false
 
 /**
@@ -5922,17 +5963,9 @@ export function verifyHardConstraints(
 }
 
 /**
- * v7.0 P0-5: the constraints this plugin keeps rendering into a target's system
- * prompt, keyed by target session id.
- *
- * Separate from `pendingConstraints` (which is a one-shot queued refinement):
- * this map is the durable, every-request source of truth for a target's standing
- * rules. It is in-memory because the goal `user/message` already persists the
- * same list — a restart loses this map and the section renders `''`, while the
- * goal message still carries the constraints, so nothing is lost, only
- * re-hardened once the session is grafted again.
+ * v7.0 P0-5: the constraints this plugin keeps rendering into a target's system prompt are in
+ * `src/core/state.ts` (`targetConstraintSections`); only the PATH below stays here.
  */
-const targetConstraintSections = new Map<string, { constraints: string[]; at: number }>()
 
 /**
  * v7.2: persist the standing-constraint sections.
@@ -6170,40 +6203,23 @@ function loadConstraintSections(ctx: PluginContextLike): void {
 }
 
 /**
- * v7.0 P0-5: sessions that already received the in-band constraint reminder.
- *
- * One per process. The system-prompt section is the durable channel; this is the
- * one-shot fallback for a host (or a start-up ordering) where the section was
- * not registered. Repeating it every step would make a standing rule read like
- * a nag and cost the recency position on every request.
+ * v7.0 P0-5 / v0.14 D1: `constraintsReasserted` and `guardReasserted` are the one-shot
+ * in-band fallbacks for a host where the system-prompt section was not registered. Both
+ * are declared in `src/core/state.ts` now; the rule they encode is unchanged — a standing
+ * rule repeated every step reads like a nag and costs the recency position.
  */
-const constraintsReasserted = new Set<string>()
 
 /**
- * v0.14 D1: sessions that already received the workspace red line through the
- * pre-step `messages` channel. Same discipline as `constraintsReasserted`: the
- * system-prompt section is the durable channel, this is the one-shot in-band
- * fallback for a host where the section could not be registered.
+ * The paths below are the half of this block that CANNOT move to `src/core/state.ts`:
+ * `configureRetiredStore` reassigns every one of them once a profile or `dataDir` is
+ * resolved, and an imported binding is read-only in the importer.
  */
-const guardReasserted = new Set<string>()
-
-const pendingConstraints = new Map<string, PendingConstraintPayload>()
-const constraintsApplied = new Set<string>()
 let pendingConstraintsPath = join(PLUGIN_DIR, '.pending-constraints.json')
 let draftsPath = join(PLUGIN_DIR, '.graft-drafts.json')
 /** v7.4 P1-2: reviewed-but-not-committed slices live here. */
 let preparedStorePath = join(PLUGIN_DIR, '.graft-prepared.json')
-/**
- * v7.4: sessions resumed from retirement, and when their auto-graft grace ends.
- *
- * Without this, "undo the migration" is a two-step loop: resume, speak once, get
- * migrated again. The log does not shrink on resume, so the watermark is still
- * over the ratio the moment the user types.
- */
-const autoGraftSuppressedUntil = new Map<string, number>()
 const AUTO_GRAFT_RESUME_GRACE_MS = 30 * 60_000
 let autoGraftSuppressedPath = join(PLUGIN_DIR, '.auto-graft-suppressed.json')
-const constraintsInFlight = new Set<string>()
 
 function persistPendingConstraints(ctx: PluginContextLike): void {
   try {
@@ -6231,17 +6247,10 @@ function persistPendingConstraints(ctx: PluginContextLike): void {
  * in the next review. Measured on the L1/L2 crash scenarios: after a kill at
  * `TARGET_FLUSHED` the leftover is a complete-looking session with no mark,
  * which is exactly what a user would mistake for the handoff.
+ *
+ * The shape (`LeftoverTarget`), the map (`leftoverTargets`) and `LEFTOVER_CAP` are declared in
+ * `src/core/state.ts`; the persistence below needs the path, so it stays here.
  */
-export interface LeftoverTarget {
-  targetId: string
-  sourceSessionId: string
-  stage: string
-  reason: string
-  at: string
-}
-
-const leftoverTargets = new Map<string, LeftoverTarget>()
-const LEFTOVER_CAP = 20
 
 let leftoversStorePath = join(PLUGIN_DIR, '.graft-leftovers.json')
 
@@ -6391,14 +6400,7 @@ const PLAN_PHASE_TEXT =
   '[系统提示] 请先分析当前任务，制定阶段节点（Phase），并明确每个节点的完成标准，使用 todo_write 保存。'
 const PLAN_NUDGE_COOLDOWN_TURNS = 3
 
-interface PlanNudgeState {
-  userKey: string
-  turns: number
-  nudged: boolean
-  lastNudgeTurn: number
-}
-
-const planNudgeStates = new Map<string, PlanNudgeState>()
+/** `PlanNudgeState` and `planNudgeStates` are declared in `src/core/state.ts`. */
 
 /** How many `1.` / `2.` style steps the user's own text carries. */
 function countNumberedSteps(text: string): number {
@@ -6489,22 +6491,7 @@ const MODEL_DRIVEN_NUDGE_LEAD = '[系统提示] 当前上下文水位已达'
 const MODEL_DRIVEN_NUDGE_BODY =
   '如果你觉得当前任务需要跨阶段进行，请先调用 graft_prepare 查看交接单；确认无误后，调用 graft_slice_and_inject 进行自我切片。'
 
-/** agentId -> the `turn` whose nudge was already sent. */
-const modelDrivenNudgeTurns = new Map<string, number>()
-
-/**
- * v7.9: sessions that were nudged at 70% and kept working anyway.
- *
- * The nudge is advisory, but "advisory" must not mean "ignorable until the
- * process is cut mid-write". After the nudge, the first pre-step proves the model
- * started another step; that step gets ONE hard instruction ("水位告急…切走") and
- * the session is marked. If the model still ignores it, the 75% cutoff runs with
- * the mark, and the target's pending state records that the cut was forced.
- */
-const watermarkEscalations = new Map<string, { at: number; ratio: number; sinceSeq: number }>()
-const watermarkEscalated = new Set<string>()
-const forcedCutMarks = new Map<string, { ratio: number; at: number }>()
-
+/** The nudge/watermark state below is declared in `src/core/state.ts`; only the TEXT stays here. */
 const GRAFT_HANDOVER_TOOLS = new Set(['graft_prepare', 'graft_slice_and_inject', 'graft_commit'])
 
 const WATERMARK_URGENT_TEXT =
@@ -7075,27 +7062,13 @@ export function assertResliceAllowed(sessionId: string, allowReslice: boolean): 
  *                  源会话的最后一个 seq 没有变（否则用户审的是旧切片）。
  *
  * 哈希覆盖 goal / pending-state / 约束 / 每一轮重放文本——也就是用户真正读到的部分。
+ *
+ * The shape and the map (`preparedSlices`) are declared in `src/core/state.ts`; they are re-exported
+ * here because `PreparedSlice` is part of this plugin's public surface and a file move must not
+ * rename or withdraw anything.
  */
-export interface PreparedSlice {
-  preparedId: string
-  sourceSessionId: string
-  targetSessionId: string
-  boundarySeq: number
-  sourceLastSeq: number
-  digest: string
-  createdAt: number
-  goal: string
-  pendingStateText: string
-  constraints: string[]
-  turnCount: number
-  pointerCount: number
-  tapeChars: number
-  review: string
-  /** v7.4: the reviewed chunk bodies, for tail-vs-history comparison at commit. */
-  chunks?: Array<{ kind: string; text: string }>
-}
+export type { LeftoverTarget, PlanNudgeState, PreparedSlice } from './core/state.js'
 
-const preparedSlices = new Map<string, PreparedSlice>()
 /** How long a reviewed slice stays commit-able. */
 const PREPARED_TTL_MS = 30 * 60 * 1000
 
@@ -7568,27 +7541,49 @@ async function graftSliceAndInjectUnlocked(
   }
 
   // Preflight: never overwrite a live or persisted identity.
-  if (ctx.sessions.get(newId) !== undefined) {
-    throw graftError('SESSION_EXISTS', `session ${newId} is already live`)
+  /**
+   * THE PREFLIGHT GOES THROUGH THE GATEWAY, so "is this id taken" has ONE answer on every host.
+   *
+   * WHAT IT REPLACED, and why the replacement is a transcription rather than a redesign: the inline
+   * version asked `ctx.sessions.get(newId)` and then `persistence.stat(newId)`. The default gateway does
+   * exactly that, in that order, with the same guard on `typeof stat === 'function'`.
+   */
+  const gateway = resolveGateway(ctx)
+  if (await gateway.isTaken(newId)) {
+    throw graftError('SESSION_EXISTS', `session ${newId} is already live or already in durable storage`)
   }
-  const persistence = ctx.get('sessionPersistence')
-  if (!isRecord(persistence) || typeof persistence.create !== 'function') {
-    throw graftError(
-      'PERSISTENCE_REQUIRED',
-      'ctx.sessionPersistence is not mounted; a bare ctx.sessions.create session is not durable and cannot be cold-resumed',
-    )
-  }
-  if (typeof persistence.stat === 'function') {
-    const existing = await persistence.stat(newId)
-    if (existing !== undefined && existing !== null) {
-      throw graftError('SESSION_EXISTS', `session ${newId} already exists in durable storage`)
+  /**
+   * THE PERSISTENCE REQUIREMENT IS A PROPERTY OF THE GATEWAY, NOT OF THE PIPELINE.
+   *
+   * It used to be an unconditional check here: `ctx.sessionPersistence` missing meant "refuse". That
+   * check is CORRECT for a host-context gateway (a bare `sessions.create` session is not durable) and
+   * WRONG for a gateway that writes the file itself — it would refuse a deployment that can plainly do
+   * the work. So the requirement moved onto the gateway, where it can be true or false.
+   */
+  if (gateway.writesThroughParadise) {
+    const persistence = ctx.get('sessionPersistence')
+    if (!isRecord(persistence) || typeof persistence.create !== 'function') {
+      throw graftError(
+        'PERSISTENCE_REQUIRED',
+        'ctx.sessionPersistence is not mounted; a bare ctx.sessions.create session is not durable and cannot be cold-resumed',
+      )
     }
   }
 
   inFlight.add(newId)
   try {
     // Phase 1 + 2: read, validate, locate boundary, build tape and plan.
-    const raw = options?.sourceSnapshot ?? await ctx.sessionQuery.readSession(sourceId)
+    /**
+     * THE SOURCE READ GOES THROUGH THE GATEWAY — unless the caller supplied a snapshot.
+     *
+     * `options.sourceSnapshot` bypasses the gateway on purpose: it exists so a caller that ALREADY holds
+     * the log (a retry, a test, a replay) does not re-read it, and routing it through the gateway would
+     * make a caller's own data subject to the gateway's availability.
+     */
+    const raw = options?.sourceSnapshot ?? (await gateway.readLog(sourceId))
+    if (options?.sourceSnapshot === undefined && raw.readable !== true) {
+      throw graftError('SOURCE_UNREADABLE', `源会话 ${sourceId} 的日志读不到（${raw.notes.join('; ') || 'no events'}）`)
+    }
     if (options?.sourceSnapshot !== undefined && raw.session?.id !== sourceId) {
       throw graftError('SOURCE_MISMATCH', 'sourceSnapshot header does not match sourceSessionId')
     }
@@ -7809,36 +7804,84 @@ async function graftSliceAndInjectUnlocked(
       updatedAt: new Date().toISOString(),
     })
 
-    /* ── the write itself: ONE call into the layer ─────────────────────────── */
-    const paradise = await ensureParadiseWrite(ctx)
-    if (!paradise.ok || paradise.session === undefined) {
-      throw graftError('PARADISE_WRITE_UNAVAILABLE', `${PARADISE_WRITE_MISSING_CONSEQUENCE}（${paradise.reason}）`)
-    }
-    const created = await paradise.session.create({
-      cwd: plan.cwd,
-      title: plan.title ?? `[切片] ${sourceId}`,
-      id: newId,
-      /** The tape travels as CONTENT. The layer owns the shape, the seq/time, and the write. */
-      tape: events.map((seed: any) => ({
+    /* ── the write itself: ONE call, through the layer OR through the gateway ── */
+    /**
+     * WHY THERE ARE TWO WRITE PATHS AND NOT ONE.
+     *
+     * The layer's `session.create` is the CORRECT writer inside a host: it owns the tape shape, the seq
+     * numbering, the system head, and the post-write verification, and reimplementing that here would put
+     * a second copy of the host's write rules in a plugin.
+     *
+     * A gateway that writes its own files has none of those concerns — its "session" IS a `.jsonl` file —
+     * and routing it through `ensureParadiseWrite` would make a bare machine depend on the host adapter
+     * it exists to replace. So the gateway says which it needs, and the pipeline obeys.
+     *
+     * WHAT DOES NOT DIFFER: everything after this block. The tape, the boundary, the journal, the cold
+     * verification and the receipt are identical on both paths — which is why the two can be trusted to
+     * mean the same thing.
+     */
+    const created = await (async (): Promise<{ ok: boolean; stage: string; warnings: string[]; session?: { id: string; cwd: string }; error?: { code: string; stage: string; message: string } }> => {
+      const tape = events.map((seed: any) => ({
         type: String(seed.type),
         data: seed.data as Record<string, any>,
         surface: seed.surface === true,
-      })),
-      /** The effective preset is carried by the source's LAST `agent-preset/selected` event. */
-      ...(sourceAgentPreset === undefined ? {} : { inheritFrom: sourceId }),
-      /**
-       * PUBLISHING STAYS HERE, and it is a deliberate division of labour.
-       *
-       * The layer can attach a session to its workspace group and emit `api-session/added`; so can this
-       * plugin, and it must — its receipt reports `workspace.id`, its refusal is a warning rather than a
-       * failed stage, and the source's `[已转移]` marker is written around the same moment. Leaving the
-       * layer's default on announced every target twice and attached it twice.
-       *
-       * So the caller that OWNS the announcement says so, instead of both halves doing it and hoping the
-       * duplicate is invisible in the sidebar.
-       */
-      publish: false,
-    })
+      }))
+      if (!gateway.writesThroughParadise) {
+        if (typeof gateway.writeTarget !== 'function') {
+          return {
+            ok: false,
+            stage: 'gateway.writeTarget',
+            warnings: [],
+            error: {
+              code: 'GATEWAY_CANNOT_WRITE',
+              stage: 'gateway.writeTarget',
+              message: '该网关声明不经过 paradise 写入，却没有提供 writeTarget —— 这是配置错误，不是降级',
+            },
+          }
+        }
+        const written = await gateway.writeTarget({
+          id: newId,
+          cwd: plan.cwd,
+          ...(plan.title === undefined ? {} : { title: plan.title }),
+          events: tape,
+        })
+        return {
+          ok: written.ok,
+          stage: written.stage,
+          warnings: written.warnings,
+          ...(written.ok ? { session: { id: newId, cwd: plan.cwd } } : {}),
+          ...(written.error === undefined ? {} : { error: written.error }),
+        }
+      }
+      const paradise = await ensureParadiseWrite(ctx)
+      if (!paradise.ok || paradise.session === undefined) {
+        return {
+          ok: false,
+          stage: 'paradise.resolve',
+          warnings: [],
+          error: {
+            code: 'PARADISE_WRITE_UNAVAILABLE',
+            stage: 'paradise.resolve',
+            message: `${PARADISE_WRITE_MISSING_CONSEQUENCE}（${paradise.reason}）`,
+          },
+        }
+      }
+      const viaLayer = await paradise.session.create({
+        cwd: plan.cwd,
+        title: plan.title ?? `[切片] ${sourceId}`,
+        id: newId,
+        tape,
+        ...(sourceAgentPreset === undefined ? {} : { inheritFrom: sourceId }),
+        publish: false,
+      })
+      return {
+        ok: viaLayer.ok,
+        stage: viaLayer.stage,
+        warnings: viaLayer.warnings,
+        ...(viaLayer.session === undefined ? {} : { session: viaLayer.session }),
+        ...(viaLayer.error === undefined ? {} : { error: viaLayer.error }),
+      }
+    })()
     if (!created.ok || created.session === undefined) {
       /**
        * A FAILED WRITE MUST NOT LOOK LIKE A HALF-WRITTEN ONE. The layer has already removed (or marked)
@@ -7882,8 +7925,38 @@ async function graftSliceAndInjectUnlocked(
     let verified = false
     if (settings.verifyReadBack) {
       try {
-        const cold = await ctx.sessionQuery.readSession(newId)
-        assertColdLog(cold, plan.cwd, types, settings.skeletonTurn, settings.skeletonStep)
+        /**
+         * THE COLD READ-BACK GOES THROUGH THE GATEWAY TOO.
+         *
+         * THIS IS THE ONE READ THAT PROVES THE WRITE HAPPENED. Routing it through the same seam as the
+         * source read is what makes a bare-machine gateway's verification mean something: it re-reads
+         * the file it just wrote, by the same path, with no host in between.
+         */
+        const cold = await gateway.readLog(newId)
+        /**
+         * THE COMPARISON IS TAPE-TO-TAPE, SO A HEADER MUST BE REMOVED FIRST.
+         *
+         * `types` is derived from the tape (`materializeTape`), and the tape carries EVENTS ONLY — the
+         * header is written separately by whoever owns the file. A reader that includes a `session` event
+         * therefore has ONE MORE than the tape, and comparing them directly reports
+         *
+         *     cold-read event count 10 does not match written count 9
+         *
+         * on a write that was entirely correct.
+         *
+         * THE FIX IS A STRIP, NOT A LOOSER COMPARISON: relaxing the count check would let a lost event
+         * slip through, which is the one thing this verification exists to catch.
+         */
+        const coldEvents = gateway.readLogIncludesHeader === true
+          ? cold.events.filter((event) => event.type !== 'session')
+          : cold.events
+        assertColdLog(
+          { ...cold, events: coldEvents, frameCount: coldEvents.length, framesDecoded: coldEvents.length, eventCount: coldEvents.length } as any,
+          plan.cwd,
+          types,
+          settings.skeletonTurn,
+          settings.skeletonStep,
+        )
         verified = true
         writeGraftTxn(ctx, {
           sourceSessionId: sourceId,
@@ -8028,14 +8101,12 @@ async function graftSliceAndInjectUnlocked(
       // focus API here; a title event is visible in the sidebar and survives
       // a reload, while pre-step blocks further input.
       try {
-        const live = ctx.sessions.get(sourceId) as any
-        if (live !== undefined && typeof live.append === 'function') {
-          live.append('session/title', {
-            title: `[已转移] → ${newId}`,
-            messageSeqs: [],
-            source: { kind: 'user' },
-          })
-        }
+        /**
+         * THE SOURCE MARKER, THROUGH THE GATEWAY. A gateway with no live handles (a bare machine) simply
+         * has nothing to append to — and returns quietly, which is the same outcome as a host whose
+         * session is no longer live.
+         */
+        await gateway.markSourceTransferred?.(sourceId, `[已转移] → ${newId}`)
       } catch (error) {
         plan.warnings.push(`old-session redirect title failed: ${String((error as any)?.message ?? error)}`)
       }
@@ -9026,47 +9097,12 @@ export function checkSafeHarbor(events: readonly SessionEventLike[]): HarborStat
  * Silent migration is the right default, but a user mid-sentence can be
  * startled by a context switch. In 'confirm' mode the watermark only arms a
  * question; the migration itself waits for explicit agreement.
- */
-interface PendingConfirm {
-  targetId: string
-  askedAt: number
-  ratio: number
-}
-
-const pendingConfirms = new Map<string, PendingConfirm>()
-/** v6.3 module 1: sessions that hit a busy step and must retry at turn/end. */
-const pendingGraftSources = new Set<string>()
-
-/**
- * v7.0 P6: sessions whose request overflowed once already.
  *
- * The retry the host performs after a successful recovery must not become a
- * migration loop: if the freshly built tape is itself larger than the window,
- * the retried request overflows again, and a second migration would produce the
- * same tape. One attempt per session is the honest limit — the second overflow
- * is surfaced to the caller instead of being papered over.
+ * The map (`pendingConfirms`), the busy-step retry set (`pendingGraftSources`), the
+ * one-shot overflow guards (`overflowRetries`, `deferredOverflowTargets`) and the
+ * per-session deferral counter (`taskBoundaryDeferrals`) are all declared in
+ * `src/core/state.ts`. Their reasoning is preserved there, next to the declarations.
  */
-const overflowRetries = new Set<string>()
-
-/**
- * v7.0 P6: overflow recoveries that produced a target but deliberately did NOT
- * retire the source.
- *
- * The retry has to run in the source session, so retirement cannot happen
- * before it. These entries are consumed by the source's next `agent/pre-step`,
- * which is the earliest moment the user can be redirected to the target.
- */
-const deferredOverflowTargets = new Map<string, string>()
-
-/**
- * v7.3: per-session count of task-boundary deferrals.
- *
- * The cap exists so a session whose "task" never reaches a clean boundary — an
- * expected failure, a flaky test, a red the user decided to live with — still
- * migrates. Without it, the probe converts "wait for a good moment" into "never
- * move", which is worse than cutting in an awkward place.
- */
-const taskBoundaryDeferrals = new Map<string, number>()
 
 /** The provider failure code that means "this request does not fit". */
 const CONTEXT_WINDOW_EXCEEDED = 'CONTEXT_WINDOW_EXCEEDED'
@@ -9091,45 +9127,11 @@ const CONTEXT_WINDOW_EXCEEDED = 'CONTEXT_WINDOW_EXCEEDED'
  * The guard is deliberately a *generation* counter, not a boolean: a target may
  * legitimately be grafted once more after it has done real work, but it must
  * never be grafted as a direct consequence of being created.
+ *
+ * The mark's SHAPE (`GraftTargetMark`) and the map (`graftTargets`) live in `src/core/state.ts`
+ * with the rest of this plugin's private state. Only the PERSISTENCE below stays here, because
+ * it needs the store paths — which is exactly the split this module is for.
  */
-interface GraftTargetMark {
-  /** The session this target was created from. */
-  sourceSessionId: string
-  /** When the target was created, epoch ms. */
-  createdAt: number
-  /** How many migrations deep this session already is. */
-  generation: number
-  /**
-   * v0.32: how many events the slice itself wrote.
-   *
-   * The retry path needs to tell "this target was never woken" from "somebody already
-   * drove it" — a human opening the session between the failed ignition and the next
-   * start is the common case. Growth past this count is the only evidence the plugin
-   * has, and it is exact: the tape is written contiguously from seq 0 and nothing else
-   * writes to a cold target.
-   */
-  seedEvents?: number
-  /**
-   * v1.0.2 — THE GOAL IN FORCE FOR THIS TARGET, which is not necessarily the one the
-   * chain started with.
-   *
-   * "Never drift" and "never evolve" are not the same rule. A long handoff chain kept
-   * re-seeding the ORIGINAL ask forever, so a target that had legitimately narrowed or
-   * redirected the work was pulled back to a goal nobody wanted any more. The original
-   * ask stays on the board (it is the audit trail); this field is what the target acts on.
-   */
-  currentGoal?: string
-  /**
-   * v1.0.2 — every recorded goal change, oldest first.
-   *
-   * `{ at, from, to, reason }`, appended by `graft_update_goal`. Written down so a new
-   * target can SEE that the goal moved and why, instead of silently inheriting whatever
-   * the previous generation happened to believe.
-   */
-  goalEvolution?: Array<{ at: number; from: string; to: string; reason: string }>
-}
-
-const graftTargets = new Map<string, GraftTargetMark>()
 
 /** Sessions already grafted at least once; a target inherits source generation + 1. */
 function graftGenerationOf(sessionId: string): number {
