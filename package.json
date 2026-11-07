@@ -19,14 +19,6 @@
     "manifest.json",
     "cordis.patch.yml",
     "src/index.ts",
-    "scripts/build.mjs",
-    "scripts/demo.mjs",
-    "scripts/read-session-log.mjs",
-    "scripts/scan-real-logs.mjs",
-    "scripts/validate-real-format.mjs",
-    "scripts/check-docs.mjs",
-    "test",
-    "test/fixtures",
     "locale/*.json",
     "icon.svg",
     "README.md",
@@ -34,8 +26,6 @@
     "LICENSE",
     "RELEASE_NOTES.md",
     "ANALYSIS-BRIEF.md",
-    "scripts/publish.mjs",
-    "scripts/verify-bundle.mjs",
     "ARCHITECTURE.md"
   ],
   "scripts": {
