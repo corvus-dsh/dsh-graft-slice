@@ -123,11 +123,23 @@ export interface ParadiseWriteBinding {
   triggers?: ParadiseSessionLike['trigger']
 }
 
-const PACKAGE_NAME = 'dsh-paradise'
+/**
+ * THE INSTALLED PACKAGE NAME. Scoped since v2.1.0: the registry rejects the bare `dsh-paradise`.
+ *
+ * Kept separate from `SIBLING_DIR` below because the two stopped being the same string when the
+ * package was scoped. Conflating them produced `../@corvus-dsh/dsh-paradise/index.js`, which is not a
+ * directory that exists — the scoped name is a package SPECIFIER, the directory on disk is still
+ * `dsh-paradise`. CI caught that as `PARADISE_WRITE_UNAVAILABLE` on every async test, because in a
+ * CI checkout the sibling probe is the ONLY way to resolve the layer.
+ */
+const PACKAGE_NAME = '@corvus-dsh/dsh-paradise'
+
+/** The directory name, which is NOT the package name. See the note above. */
+const SIBLING_DIR = 'dsh-paradise'
 
 /** The specifiers tried, in order. Exported so a test can assert the resolution order. */
 export function paradiseSpecifiers(): string[] {
-  return [PACKAGE_NAME, `../${PACKAGE_NAME}/index.js`]
+  return [PACKAGE_NAME, `../${SIBLING_DIR}/index.js`]
 }
 
 let cached: ParadiseWriteBinding | null = null
