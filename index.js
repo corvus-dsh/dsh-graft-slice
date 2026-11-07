@@ -108,6 +108,15 @@ function clampRatio(value        , low        , high        )         {
        
                  
                   
+       
+                                                                          
+      
+                                                                                          
+                                                                                          
+                                                                                     
+                                                                              
+       
+                         
                            
                       
                        
@@ -738,6 +747,54 @@ function writeLedgerAtomic(path        , payload         )       {
 const LOCK_SETTLE_MS = 12
 const LOCK_TIMEOUT_MS = 8_000
 const LOCK_STALE_MS = 30_000
+/**
+ * HOW LONG A LOCK IS RESPECTED EVEN WHEN ITS HOLDER LOOKS ALIVE.
+ *
+ * `staleMs` alone is a TIMESTAMP test: "nobody renewed this for 30s, so the holder must be
+ * gone". That inference is false under load. The renewal timer is an ordinary JS timer, so a
+ * holder descheduled past 30s — a blocked event loop, a machine under eight concurrent
+ * writers, a suspended laptop — still holds a perfectly valid lock while its lease looks
+ * abandoned. Stealing it then puts TWO writers inside the critical section, which is the
+ * exact corruption this lock exists to prevent.
+ *
+ * So the pid in the owner file is consulted before stealing: a lock is only stolen when its
+ * holder is PROVABLY gone. This is the same rule `dsh-paradise` uses for its guards
+ * (`SYNC_LEASE_GUARD_STALE_MS` raised 5s → 60s for the same measured reason), tightened here
+ * with an actual liveness probe rather than a bigger number.
+ *
+ * THE HARD CAP, AND WHY IT EXISTS. A pid can be RECYCLED: the real holder died, an unrelated
+ * process got its pid, and the liveness probe now says "alive" forever. Without a cap that
+ * lock would never be reclaimed and every later graft would fail with STATE_LOCK_TIMEOUT —
+ * a permanent outage traded for a transient risk. So past this multiple of `staleMs` the lock
+ * is reclaimed regardless of the probe, and the decision is written to the audit log as
+ * `lock-stale-forced` so it is never silent.
+ */
+const LOCK_FORCED_STEAL_MULTIPLE = 10
+
+/**
+ * Is a process with this pid still running?
+ *
+ * `process.kill(pid, 0)` performs the existence and permission checks without delivering a
+ * signal; `EPERM` means "alive but not ours", which is ALIVE. Treating EPERM as dead is how a
+ * supervisor kills a healthy process — the same reasoning `dsh-paradise`'s `isProcessAlive`
+ * records.
+ *
+ * NAMED `isHolderAlive` AND NOT `isProcessAlive` ON PURPOSE. `index.ts` already exports an
+ * `isProcessAlive`, and the bundler inlines every module into ONE file — a second top-level
+ * declaration with the same name is a duplicate-binding SyntaxError at load, not a shadow.
+ * The two implementations must not drift, so this one only adds the self-pid short-circuit
+ * and otherwise follows the same rule.
+ */
+function isHolderAlive(pid        )          {
+  if (!Number.isFinite(pid) || pid <= 0) return false
+  if (pid === process.pid) return true
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error       )?.code === 'EPERM'
+  }
+}
 
 /**
  * The audit sink, injected by the plugin at load time.
@@ -811,9 +868,9 @@ function acquireFileLock(
       // The lock dir exists; a missing owner file only costs precise stealing.
     }
   }
-  const readOwner = ()                                  => {
+  const readOwner = ()                                                => {
     try {
-      return JSON.parse(readFileSync(ownerFile, 'utf8'))                                   
+      return JSON.parse(readFileSync(ownerFile, 'utf8'))                                                 
     } catch {
       return {}
     }
@@ -862,13 +919,47 @@ function acquireFileLock(
     // Stale detection: a killed process leaves the directory behind, and its lease stops
     // being renewed. Prefer the lease timestamp over the dir mtime, because the dir mtime
     // cannot be renewed without unlinking the lock.
+    //
+    // v2.2.0: A TIMESTAMP IS NOT PROOF OF DEATH. The old rule stole the lock as soon as
+    // `staleMs` elapsed, which under load steals a LIVE holder's lock (the renewal timer is
+    // just a JS timer; a descheduled holder cannot fire it) and puts two writers inside one
+    // critical section. Now the holder's pid is probed first, and a lock is only stolen on
+    // evidence:
+    //
+    //   1. the lease is old AND the holder pid is gone          -> steal (the real crash case)
+    //   2. the lease is old AND no pid recorded at all          -> steal (a record we cannot
+    //                                                              attribute is not a holder we
+    //                                                              can honour)
+    //   3. the lease is ancient (> FORCED_STEAL_MULTIPLE × stale)-> steal regardless, because a
+    //                                                              recycled pid must not deadlock
+    //                                                              the store forever; audited
+    //   4. the lease is old but the holder is alive             -> WAIT. This is the case that
+    //                                                              used to corrupt state.
     try {
       const owner = readOwner()
       const leaseAt = Number.isFinite(Number(owner.at)) ? Number(owner.at) : statSync(lock).mtimeMs
-      if (Date.now() - leaseAt > staleMs) {
-        rmSync(lock, { recursive: true, force: true })
-        audit({ at: new Date().toISOString(), kind: 'lock-stale', file: label, detail: 'stolen after staleMs' })
-        continue
+      const age = Date.now() - leaseAt
+      if (age > staleMs) {
+        const holderPid = Number(owner.pid)
+        const holderKnown = Number.isFinite(holderPid) && holderPid > 0
+        const forced = age > staleMs * LOCK_FORCED_STEAL_MULTIPLE
+        if (forced || !holderKnown || !isHolderAlive(holderPid)) {
+          rmSync(lock, { recursive: true, force: true })
+          audit({
+            at: new Date().toISOString(),
+            kind: forced ? 'lock-stale-forced' : 'lock-stale',
+            file: label,
+            detail: forced
+              ? `stolen after ${Math.round(age)}ms despite pid ${holderPid} looking alive (pid reuse guard)`
+              : holderKnown
+                ? `stolen after ${Math.round(age)}ms; holder pid ${holderPid} is gone`
+                : `stolen after ${Math.round(age)}ms; no holder pid recorded`,
+          })
+          continue
+        }
+        // Evidence says the holder is ALIVE. Wait for it instead of stealing.
+        // (No `continue`: fall through to the timeout check so a wedged holder still
+        // surfaces as STATE_LOCK_TIMEOUT rather than an infinite wait.)
       }
     } catch {
       continue // the holder released between EEXIST and stat: retry immediately
@@ -4031,6 +4122,13 @@ export { graftError }
  * the plugin's public surface must not change because a file moved.
  */
 export { acquireFileLock, withFileLock, sleepSync, lockDirFor, LOCK_STALE_MS, LOCK_TIMEOUT_MS }
+/**
+ * v2.2.0: the audit sink is re-exported so a caller (and a test) can observe WHY a lock was
+ * reclaimed. The stale rule now probes the holder's pid instead of trusting the timestamp,
+ * and the one case where that probe is deliberately overridden (`lock-stale-forced`, after
+ * the pid-reuse cap) must be visible rather than inferred from a missing file.
+ */
+export { setAuditSink }
                                
 
 /**
@@ -4191,6 +4289,21 @@ export const inject = ['tools', 'sessions', 'sessionQuery', 'sessionPersistence'
                               
                                                                                                  
                       
+     
+                                                                          
+    
+                                                                                                      
+                                                                                                       
+                                                                                          
+                                                                                                      
+                                                                                  
+    
+                                                                                              
+                                                                                                    
+    
+                                                                                                   
+     
+                               
      
                                                                       
                                                                                
@@ -4724,6 +4837,27 @@ export function normalizeConfig(config                         )                
   const input = isRecord(config) ? config : {}
   return {
     recentTurns: asFiniteInteger(input.recentTurns, 5, 'recentTurns'),
+    /**
+     * v2.2.0 (audit F1): RECORD WHETHER THE COUNT WAS ASKED FOR OR DEFAULTED.
+     *
+     * `input.recentTurns` being present and finite looks like the whole test, and it is not —
+     * because `normalizeConfig` is called MORE THAN ONCE on the same value. `apply()` normalizes
+     * the operator's config and passes it down; `buildInjectionPlan` then calls `normalizeConfig`
+     * again on that result, at which point the DEFAULT it wrote (5) is indistinguishable from a
+     * value the operator named, and everything downstream treats it as explicit.
+     *
+     * So an already-normalized input is recognized and its verdict CARRIED OVER, instead of being
+     * re-derived. The marker is `recentTurnsExplicit` itself: it exists only on normalized configs.
+     * Without this, `apply()` with no `recentTurns` at all would report "explicit" and the adaptive
+     * depth would stop working for everybody.
+     *
+     * The rule stated plainly: EXPLICITNESS IS A PROPERTY OF THE CALLER'S INPUT, and it must survive
+     * being passed through this function more than once.
+     */
+    recentTurnsExplicit:
+      input.recentTurnsExplicit !== undefined
+        ? input.recentTurnsExplicit === true
+        : input.recentTurns !== undefined && Number.isFinite(Number(input.recentTurns)),
     adaptiveDepth: input.adaptiveDepth === undefined ? true : input.adaptiveDepth === true,
     adaptiveDepthMin: asFiniteInteger(input.adaptiveDepthMin, 3, 'adaptiveDepthMin'),
     adaptiveDepthMax: asFiniteInteger(input.adaptiveDepthMax, 8, 'adaptiveDepthMax'),
@@ -8773,7 +8907,36 @@ export function calculateAdaptiveDepth(
     }
   }
 
-  const turns = Math.max(1, windowTurns)
+  /**
+   * ── AUDIT F2: THE DENOMINATOR IS THE WINDOW'S ACTUAL TURN COUNT, NOT THE CONSTANT 6 ────────────
+   *
+   * WHAT WAS WRONG. `windowTurns` is the WINDOW SIZE — an upper bound on how far back to look. The
+   * code then divided by it unconditionally:
+   *
+   *     const turns = Math.max(1, windowTurns)   // always 6
+   *     const callsPerTurn = toolCalls / turns
+   *
+   * For a session with fewer than six turns, `window` holds fewer turns than the divisor claims,
+   * so density is under-reported by the ratio. Measured with a log of a constant 3 tool calls per
+   * turn, varying only the total:
+   *
+   *     2 turns  -> "1.0 tool calls/turn"  (should be 3.0)  -> depth 5, treated as BALANCED
+   *     6 turns  -> "3.0 tool calls/turn"  (correct)        -> depth 0, treated as DEBUG
+   *     12 turns -> "3.0 tool calls/turn"  (correct)
+   *
+   * THE CONSEQUENCE IS BACKWARDS. A short session is the one whose every message matters most,
+   * and it was the one getting the LOOSEST boundary, because its density was under-reported into
+   * the "generation-shaped" bucket.
+   *
+   * Fix: count the turn starts INSIDE the window that was actually sliced. `Math.max(1, …)` stays,
+   * because a window with tool calls but no turn/start event is still one unit of work rather than
+   * a division by zero.
+   */
+  let windowTurnCount = 0
+  for (const event of window) {
+    if (event.type === 'turn/start') windowTurnCount += 1
+  }
+  const turns = Math.max(1, windowTurnCount)
   const callsPerTurn = toolCalls / turns
   const errorRatio = toolResults === 0 ? 0 : toolErrors / toolResults
   const codeRatio = assistantChars === 0 ? 0 : codeChars / assistantChars
@@ -9001,9 +9164,40 @@ export function buildInjectionPlan(
         : `clean stopping point (${boundaryState.reason}) → replay nothing; the index holds every pointer`,
     }
   })()
+  /**
+   * ── AUDIT F1: AN EXPLICIT COUNT IS AN INSTRUCTION, NOT A GUESS TO REFINE ────────────────────────
+   *
+   * WHAT WAS WRONG. This used to be:
+   *
+   *     tierDecision === undefined
+   *       ? { ...settings, recentTurns: adaptive.depth }     // unconditional
+   *       : { ...settings, recentTurns: tierDecision.depth }
+   *
+   * `settings.recentTurns` — a documented field, present in `cordis.patch.yml` with its own comment
+   * — was replaced by a SHAPE-BASED GUESS with no notice and no way to tell. Measured on three source
+   * lengths with recentTurns = 1 / 2 / 5: byte-identical tapes every time.
+   *
+   * WHY IT LOOKED FINE IN TESTS. `adaptiveDepth=false` makes `adaptive.depth` fall back to
+   * `settings.recentTurns`, at which point the override is an identity. So the parameter "worked"
+   * only when the operator turned off the very feature that ignores it.
+   *
+   * THE PRECEDENCE, NOW STATED AS THREE EXPLICIT CASES — each override is an OPT-IN:
+   *
+   *   1. `autoAdaptiveTier` is ON. It defaults to FALSE, so turning it on is a deliberate act, and it
+   *      reads task state (a fact) rather than conversation shape (a guess). It wins, as before.
+   *   2. `recentTurns` was EXPLICITLY set. The operator named a number; no heuristic refines it.
+   *   3. Neither — then `adaptiveDepth` decides, which is exactly what "I did not say" should mean.
+   *
+   * Note that case 1 outranking case 2 is the pre-existing, documented contract (a v7.4 test pins
+   * it): two deliberate opt-ins, where the more specific one wins. The bug being fixed was the
+   * DEFAULT heuristic silently outranking an explicit value — not the precedence itself.
+   */
+  const explicitTurns = settings.recentTurnsExplicit === true
   const effectiveSettings =
     tierDecision === undefined
-      ? { ...settings, recentTurns: adaptive.depth }
+      ? explicitTurns
+        ? { ...settings, recentTurns: settings.recentTurns }
+        : { ...settings, recentTurns: adaptive.depth }
       : { ...settings, recentTurns: tierDecision.depth }
   // v0.23 P2: resolve the workspace BEFORE building the tape, so the card's
   // verification section describes the project the source was working in. Reading it

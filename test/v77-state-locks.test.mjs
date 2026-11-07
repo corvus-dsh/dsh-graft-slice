@@ -17,13 +17,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readFileSync, utimesSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { apply, getTransferredSessions, resetRetiredSessions, readLedgerPayload } from '../index.js'
-import { acquireFileLock } from '../index.js'
+import { acquireFileLock, setAuditSink } from '../index.js'
 import { dispatchPreStep, makeCtx, makeSourceLog } from './fake-harness.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -145,4 +145,80 @@ test('v7.7: a crashed holder is stolen, not waited on forever', () => {
   const release = acquireFileLock(target, { timeoutMs: 5000, staleMs: 1000, silent: true })
   release()
   assert.ok(Date.now() - started < 2000, 'a stale lock must be stolen immediately, not waited out')
+})
+
+/**
+ * v2.2.0 — A TIMESTAMP IS NOT PROOF OF DEATH.
+ *
+ * The failure this pins: the stale rule used to be `now - leaseAt > staleMs`, and nothing else.
+ * The lease is renewed by a `setInterval`, which is an ordinary JS timer — so a holder whose event
+ * loop is blocked (eight concurrent writers, a loaded machine, a suspended laptop) cannot fire it,
+ * its lease ages past `staleMs`, and a WAITER steals a lock that is still being held. Two writers
+ * then enter the same read-modify-write, which is the exact corruption the lock exists to prevent.
+ *
+ * The holder's pid is in the owner record and costs one `process.kill(pid, 0)` to check. So the
+ * rule is: steal only on EVIDENCE that the holder is gone.
+ *
+ * Note the age chosen below: `staleMs` (1000) < age (3000) < forced-steal cap (staleMs x 10). Inside
+ * that window a live holder must be respected. Past the cap the lock is reclaimed anyway (see the
+ * pid-reuse test), because a recycled pid must not wedge the store forever.
+ */
+test('v2.2.0: a lock whose holder is ALIVE is not stolen, however old its lease looks', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-graft-alive-'))
+  const target = join(dir, 'state.json')
+  const lock = `${target}.lock`
+
+  mkdirSync(lock)
+  // A lease that has NOT been renewed for 3s, owned by a pid that is definitely alive: our own.
+  // This is the descheduled-holder shape, not the crashed-holder shape.
+  writeFileSync(
+    join(lock, 'owner'),
+    JSON.stringify({ token: 'other-holder', pid: process.pid, at: Date.now() - 3000 }),
+    'utf8',
+  )
+
+  const started = Date.now()
+  assert.throws(
+    () => acquireFileLock(target, { timeoutMs: 250, staleMs: 1000, silent: true }),
+    /could not acquire/u,
+    'the lock must NOT be stolen while its holder is alive — stealing it puts two writers inside',
+  )
+  assert.ok(Date.now() - started >= 200, 'it must WAIT for the live holder rather than steal')
+
+  // The holder is still there: nothing was removed on our behalf.
+  assert.ok(existsSync(lock), 'the live holder\'s lock directory must survive')
+  assert.ok(existsSync(join(lock, 'owner')), 'the live holder\'s owner record must survive')
+})
+
+/**
+ * The OTHER direction, and the reason a bare liveness probe is not enough.
+ *
+ * A pid can be recycled: the real holder dies, an unrelated process inherits its pid, and the probe
+ * then answers "alive" forever. With no cap that lock would never be reclaimed and every later graft
+ * would die on `STATE_LOCK_TIMEOUT` — a permanent outage traded for a transient risk. So past
+ * `staleMs x LOCK_FORCED_STEAL_MULTIPLE` the lock is reclaimed regardless, and the audit line says
+ * so (`lock-stale-forced`), because a forced reclaim must never be silent.
+ */
+test('v2.2.0: a recycled-pid lock is still reclaimed past the hard cap, and the reclaim is audited', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-graft-recycled-'))
+  const target = join(dir, 'state.json')
+  const lock = `${target}.lock`
+
+  mkdirSync(lock)
+  writeFileSync(
+    join(lock, 'owner'),
+    JSON.stringify({ token: 'recycled', pid: process.pid, at: Date.now() - 30_000 }),
+    'utf8',
+  )
+
+  const kinds = []
+  setAuditSink((entry) => kinds.push(entry.kind))
+  try {
+    const release = acquireFileLock(target, { timeoutMs: 2000, staleMs: 1000, silent: true })
+    release()
+  } finally {
+    setAuditSink(undefined)
+  }
+
+  assert.ok(kinds.includes('lock-stale-forced'), `a forced reclaim must be audited; saw ${kinds.join(',')}`)
 })

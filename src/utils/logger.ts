@@ -12,6 +12,15 @@ export interface GraftAuditEntry {
   kind:
     | 'lock-wait'
     | 'lock-stale'
+    /**
+     * v2.2.0: a lock reclaimed even though its holder's pid looked ALIVE.
+     *
+     * A pid can be recycled, so liveness cannot be trusted forever — without a hard cap a
+     * recycled pid would wedge the store permanently. This kind exists so that reclaim is
+     * NEVER silent: a `lock-stale-forced` line in the audit is the evidence that the
+     * pid-liveness rule was overridden and a human should look at the timing.
+     */
+    | 'lock-stale-forced'
     | 'lock-owner-mismatch'
     | 'lock-reclaimed'
     | 'command-blocked'

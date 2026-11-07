@@ -165,6 +165,13 @@ export { graftError }
  * the plugin's public surface must not change because a file moved.
  */
 export { acquireFileLock, withFileLock, sleepSync, lockDirFor, LOCK_STALE_MS, LOCK_TIMEOUT_MS }
+/**
+ * v2.2.0: the audit sink is re-exported so a caller (and a test) can observe WHY a lock was
+ * reclaimed. The stale rule now probes the holder's pid instead of trusting the timestamp,
+ * and the one case where that probe is deliberately overridden (`lock-stale-forced`, after
+ * the pid-reuse cap) must be visible rather than inferred from a missing file.
+ */
+export { setAuditSink }
 export type { GraftAuditEntry }
 
 /**
@@ -378,6 +385,21 @@ export const inject = ['tools', 'sessions', 'sessionQuery', 'sessionPersistence'
 export interface GraftConfig {
   /** Number of trailing turns kept verbatim. Default 5 (used only when adaptiveDepth is off). */
   recentTurns?: number
+  /**
+   * v2.2.0 (audit F1): whether the operator EXPLICITLY set `recentTurns`.
+   *
+   * WHY A SEPARATE FLAG. `normalizeConfig` fills absent fields with defaults, so by the time the tape
+   * is built, `recentTurns: 5` is indistinguishable from "the operator asked for 5". The adaptive path
+   * used that ambiguity to overwrite the value unconditionally, which made the documented
+   * `recentTurns` configuration a no-op. Measured: the same source sliced with recentTurns = 1, 2 and
+   * 5 produced byte-identical tapes, because `adaptive.depth` replaced all three.
+   *
+   * A default is a FALLBACK, not an instruction. "Nobody said" and "somebody said 5" must not
+   * collapse into one value, so the distinction is recorded here instead of being re-derived later.
+   *
+   * NOT a public knob for callers: they set `recentTurns`; this is filled in by `normalizeConfig`.
+   */
+  recentTurnsExplicit?: boolean
   /**
    * v6.3: choose the retained-turn count from the source's own shape.
    * Debug-heavy sessions keep more verbatim turns; prose-heavy ones keep fewer
@@ -912,6 +934,27 @@ export function normalizeConfig(config: GraftConfig | undefined): Required<Graft
   const input = isRecord(config) ? config : {}
   return {
     recentTurns: asFiniteInteger(input.recentTurns, 5, 'recentTurns'),
+    /**
+     * v2.2.0 (audit F1): RECORD WHETHER THE COUNT WAS ASKED FOR OR DEFAULTED.
+     *
+     * `input.recentTurns` being present and finite looks like the whole test, and it is not —
+     * because `normalizeConfig` is called MORE THAN ONCE on the same value. `apply()` normalizes
+     * the operator's config and passes it down; `buildInjectionPlan` then calls `normalizeConfig`
+     * again on that result, at which point the DEFAULT it wrote (5) is indistinguishable from a
+     * value the operator named, and everything downstream treats it as explicit.
+     *
+     * So an already-normalized input is recognized and its verdict CARRIED OVER, instead of being
+     * re-derived. The marker is `recentTurnsExplicit` itself: it exists only on normalized configs.
+     * Without this, `apply()` with no `recentTurns` at all would report "explicit" and the adaptive
+     * depth would stop working for everybody.
+     *
+     * The rule stated plainly: EXPLICITNESS IS A PROPERTY OF THE CALLER'S INPUT, and it must survive
+     * being passed through this function more than once.
+     */
+    recentTurnsExplicit:
+      input.recentTurnsExplicit !== undefined
+        ? input.recentTurnsExplicit === true
+        : input.recentTurns !== undefined && Number.isFinite(Number(input.recentTurns)),
     adaptiveDepth: input.adaptiveDepth === undefined ? true : input.adaptiveDepth === true,
     adaptiveDepthMin: asFiniteInteger(input.adaptiveDepthMin, 3, 'adaptiveDepthMin'),
     adaptiveDepthMax: asFiniteInteger(input.adaptiveDepthMax, 8, 'adaptiveDepthMax'),
@@ -4961,7 +5004,36 @@ export function calculateAdaptiveDepth(
     }
   }
 
-  const turns = Math.max(1, windowTurns)
+  /**
+   * ── AUDIT F2: THE DENOMINATOR IS THE WINDOW'S ACTUAL TURN COUNT, NOT THE CONSTANT 6 ────────────
+   *
+   * WHAT WAS WRONG. `windowTurns` is the WINDOW SIZE — an upper bound on how far back to look. The
+   * code then divided by it unconditionally:
+   *
+   *     const turns = Math.max(1, windowTurns)   // always 6
+   *     const callsPerTurn = toolCalls / turns
+   *
+   * For a session with fewer than six turns, `window` holds fewer turns than the divisor claims,
+   * so density is under-reported by the ratio. Measured with a log of a constant 3 tool calls per
+   * turn, varying only the total:
+   *
+   *     2 turns  -> "1.0 tool calls/turn"  (should be 3.0)  -> depth 5, treated as BALANCED
+   *     6 turns  -> "3.0 tool calls/turn"  (correct)        -> depth 0, treated as DEBUG
+   *     12 turns -> "3.0 tool calls/turn"  (correct)
+   *
+   * THE CONSEQUENCE IS BACKWARDS. A short session is the one whose every message matters most,
+   * and it was the one getting the LOOSEST boundary, because its density was under-reported into
+   * the "generation-shaped" bucket.
+   *
+   * Fix: count the turn starts INSIDE the window that was actually sliced. `Math.max(1, …)` stays,
+   * because a window with tool calls but no turn/start event is still one unit of work rather than
+   * a division by zero.
+   */
+  let windowTurnCount = 0
+  for (const event of window) {
+    if (event.type === 'turn/start') windowTurnCount += 1
+  }
+  const turns = Math.max(1, windowTurnCount)
   const callsPerTurn = toolCalls / turns
   const errorRatio = toolResults === 0 ? 0 : toolErrors / toolResults
   const codeRatio = assistantChars === 0 ? 0 : codeChars / assistantChars
@@ -5189,9 +5261,40 @@ export function buildInjectionPlan(
         : `clean stopping point (${boundaryState.reason}) → replay nothing; the index holds every pointer`,
     }
   })()
+  /**
+   * ── AUDIT F1: AN EXPLICIT COUNT IS AN INSTRUCTION, NOT A GUESS TO REFINE ────────────────────────
+   *
+   * WHAT WAS WRONG. This used to be:
+   *
+   *     tierDecision === undefined
+   *       ? { ...settings, recentTurns: adaptive.depth }     // unconditional
+   *       : { ...settings, recentTurns: tierDecision.depth }
+   *
+   * `settings.recentTurns` — a documented field, present in `cordis.patch.yml` with its own comment
+   * — was replaced by a SHAPE-BASED GUESS with no notice and no way to tell. Measured on three source
+   * lengths with recentTurns = 1 / 2 / 5: byte-identical tapes every time.
+   *
+   * WHY IT LOOKED FINE IN TESTS. `adaptiveDepth=false` makes `adaptive.depth` fall back to
+   * `settings.recentTurns`, at which point the override is an identity. So the parameter "worked"
+   * only when the operator turned off the very feature that ignores it.
+   *
+   * THE PRECEDENCE, NOW STATED AS THREE EXPLICIT CASES — each override is an OPT-IN:
+   *
+   *   1. `autoAdaptiveTier` is ON. It defaults to FALSE, so turning it on is a deliberate act, and it
+   *      reads task state (a fact) rather than conversation shape (a guess). It wins, as before.
+   *   2. `recentTurns` was EXPLICITLY set. The operator named a number; no heuristic refines it.
+   *   3. Neither — then `adaptiveDepth` decides, which is exactly what "I did not say" should mean.
+   *
+   * Note that case 1 outranking case 2 is the pre-existing, documented contract (a v7.4 test pins
+   * it): two deliberate opt-ins, where the more specific one wins. The bug being fixed was the
+   * DEFAULT heuristic silently outranking an explicit value — not the precedence itself.
+   */
+  const explicitTurns = settings.recentTurnsExplicit === true
   const effectiveSettings =
     tierDecision === undefined
-      ? { ...settings, recentTurns: adaptive.depth }
+      ? explicitTurns
+        ? { ...settings, recentTurns: settings.recentTurns }
+        : { ...settings, recentTurns: adaptive.depth }
       : { ...settings, recentTurns: tierDecision.depth }
   // v0.23 P2: resolve the workspace BEFORE building the tape, so the card's
   // verification section describes the project the source was working in. Reading it
