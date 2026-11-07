@@ -80,7 +80,7 @@ npm 上的 `dsh-memory` 和 `dsh-observer` 这两个名字已被第三方注册�
 >
 > **核心功能**：在源会话最后一个 `turn/end` 处切取高保真磁带，生成零继承、可冷恢复的交接会话；不 fork、不引入 SQLite、不单独注入 `tool/result`。转生后广播 `graft/session-transferred`，由旁路插件自行决定是否跟随。
 >
-> **已完成的重构**：`src/index.ts` 14354 → 13425 行，抽出 5 个内联模块（`utils/serialize`、`utils/logger`、`core/ledger`、`core/watermark`、`core/txn`），行为不变、545 → 542 条测试全绿（6 条副脑测试随代码迁往 `dsh-observer`）。
+> **已完成的重构**：`src/index.ts` 14354 → 13425 行，抽出 5 个内联模块（`utils/serialize`、`utils/logger`、`core/ledger`、`core/watermark`、`core/txn`），行为不变、545 → 542 条测试全绿（historical：v1.3 重构时的数量）（6 条副脑测试随代码迁往 `dsh-observer`）。
 >
 > **已知结构性限制**：宿主 `commands.execute` 是广播语义（每次调用必留一行）；第三方客户端没有插件自有 Remote。因此副脑类功能不能靠「客户端命令 + UI 按钮」实现，只能由模型工具或宿主侧动作触发 —— 详见 [副脑插件架构复盘与底层缺陷报告](https://github.com/corvus-dsh/dsh-observer) 同期的复盘文档。
 
@@ -760,7 +760,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 545 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch、v0.19 语义瘦身/物理点火、v0.20 任务看板、v7.8 回滚通知改走 pre-step messages |
+| `test/*.test.mjs` | 559 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch、v0.19 语义瘦身/物理点火、v0.20 任务看板、v7.8 回滚通知改走 pre-step messages |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -1427,7 +1427,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 545 个测试
+# 2) 559 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）
