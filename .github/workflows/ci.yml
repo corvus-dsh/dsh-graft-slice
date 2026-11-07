@@ -36,10 +36,20 @@ jobs:
         #
         # `dsh-paradise` is a sibling repository, so it is checked out BESIDE this one: the same
         # layout the workspace uses locally, so CI and a developer machine resolve it identically.
+        #
+        # ⚠️ The checkout path MUST stay INSIDE this job's workspace. `actions/checkout` refuses a
+        # destination it cannot prove is under `$GITHUB_WORKSPACE`:
+        #
+        #   Repository path '/home/runner/work/dsh-graft-slice/dsh-paradise-checkout'
+        #   is not under '/home/runner/work/dsh-graft-slice/dsh-graft-slice'
+        #
+        # So it lands in a staging directory inside the workspace and the next step MOVES it out to
+        # the sibling position. `mv` is a plain filesystem rename — the runner user owns the parent
+        # directory — so the layout the probe wants is reached without asking checkout to leave home.
         uses: actions/checkout@v4
         with:
           repository: corvus-dsh/dsh-paradise
-          path: ../dsh-paradise-checkout
+          path: .siblings/dsh-paradise
 
       - name: Check out the sibling the panel tests render against
         # The panel-render tests load `dsh-memory/client.js` to prove this plugin's cells draw against
@@ -48,15 +58,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: corvus-dsh/dsh-memory
-          path: ../dsh-memory-checkout
+          path: .siblings/dsh-memory
 
       - name: Place the siblings where the probes expect them
         # Both lookups use the DIRECTORY NAME (the repo name), not the scoped package name: this
         # workspace lays repos side by side by repo name, and the probes follow that layout.
         run: |
           set -e
-          mv ../dsh-paradise-checkout ../dsh-paradise
-          mv ../dsh-memory-checkout ../dsh-memory
+          mv .siblings/dsh-paradise ../dsh-paradise
+          mv .siblings/dsh-memory ../dsh-memory
+          rm -rf .siblings
           node -e "console.log('paradise at', require('node:fs').realpathSync('../dsh-paradise/index.js'))"
           node -e "console.log('memory at', require('node:fs').realpathSync('../dsh-memory/client.js'))"
 
@@ -67,12 +78,34 @@ jobs:
         run: npm run build
 
       - name: The build must not leave the committed artifact stale
+        # WHY `git diff --exit-code` AND NOT `git status --porcelain`
+        #
+        # `git status` answers "does the file differ from what the stat cache remembers", and with
+        # `core.autocrlf=true` (the default on a Windows clone) it can answer YES for a file whose
+        # CONTENT is byte-identical to the committed blob — git wants to convert the worktree file to
+        # CRLF "the next time it touches it", and reports the pending conversion as a modification.
+        #
+        # Measured on a fresh clone of this repo: after `npm run build`, `git hash-object index.js`
+        # equals the committed blob exactly, `git diff --exit-code` exits 0 — and `git status
+        # --porcelain` still prints ` M index.js`. A staleness gate built on `status` would fail a
+        # perfectly current artifact on every Windows machine.
+        #
+        # `git diff --exit-code` compares content after the repo's configured filters, which is the
+        # same normalization `git status` applies — so it agrees with `status` on real edits but not
+        # on pending-EOL noise. That is exactly the discrimination this gate needs.
+        #
+        # ⚠️ DO NOT "fix" this by pinning `core.autocrlf=false`. That disables the normalization
+        # instead of relying on it, and on a worktree with CRLF bytes it turns pure EOL churn into a
+        # whole-file diff. Measured on dsh-memory: `lib/index.js` has 1664 CR bytes in the worktree,
+        # plain `git diff` exits 0, and `git -c core.autocrlf=false diff` reports 7 files changed /
+        # 7674 insertions / 7674 deletions of NOTHING.
         run: |
-          if [ -n "$(git status --porcelain -- index.js)" ]; then
+          if ! git diff --exit-code -- index.js; then
             echo "::error::The build changed committed artifacts. Run 'npm run build' and commit the result."
             git --no-pager diff --stat -- index.js
             exit 1
           fi
+          echo "ok: index.js matches the committed artifact"
 
       - name: Syntax-check the shipped entry point
         run: node --check index.js
