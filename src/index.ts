@@ -6757,14 +6757,51 @@ function takePlanNudge(
  *     ceiling the hard cutoff runs and never reaches this code.
  */
 const MODEL_DRIVEN_NUDGE_LEAD = '[系统提示] 当前上下文水位已达'
+
+/**
+ * ── AUDIT ROUND 3 (P0-1/P0-3): THE NUDGE NOW SAYS WHAT TO PASS, AND WHERE TO GET IT ─────────────
+ *
+ * THE DEADLOCK THIS REMOVES. The old body said "call graft_prepare, then graft_slice_and_inject" and
+ * stopped there. Both tools then demanded a `sourceSessionId` the model had no way to obtain, so the
+ * measured behaviour was: the model went looking for something id-shaped, found an OLD session id
+ * quoted inside a stored skill, passed it, and **sliced the wrong conversation successfully**. A loud
+ * failure would have been strictly better.
+ *
+ * Three facts are now stated that were previously left to inference:
+ *
+ *   1. THE TOOLS CAN BE CALLED WITH NO ARGUMENTS. `graft_prepare()` means "prepare a slice of THIS
+ *      session", which is what the nudge intends. Saying so removes the search entirely.
+ *   2. IF AN ID IS WANTED ANYWAY, `graft_debug_status` RETURNS IT. That tool resolved the calling
+ *      session all along; it just never printed it. Belt and braces, so the model has a reliable
+ *      source even if it decides to pass one explicitly.
+ *   3. 70–75% IS THE ONLY SELF-DRIVEN WINDOW. Above it the plugin force-migrates on its own. Without
+ *      this, "you have time" and "you are about to be cut off" are indistinguishable — and a model
+ *      that believes the second will do something hasty at a bad stopping point.
+ */
 const MODEL_DRIVEN_NUDGE_BODY =
-  '如果你觉得当前任务需要跨阶段进行，请先调用 graft_prepare 查看交接单；确认无误后，调用 graft_slice_and_inject 进行自我切片。'
+  '如果你觉得当前任务需要跨阶段进行，请先调用 graft_prepare 查看交接单（**不需要任何参数**，省略 sourceSessionId 即表示"切本会话"）；' +
+  '确认无误后，调用 graft_slice_and_inject 完成切片（同样可以不传参数）。' +
+  '若确实需要显式指定会话 id，用 graft_debug_status 查询——它的输出里有 sessionId，' +
+  '**不要凭记忆或从别的会话里抄一个 id**，那会切走别人的会话。'
 
 /** The nudge/watermark state below is declared in `src/core/state.ts`; only the TEXT stays here. */
 const GRAFT_HANDOVER_TOOLS = new Set(['graft_prepare', 'graft_slice_and_inject', 'graft_commit'])
 
+/**
+ * ── AUDIT ROUND 3 (P0-3): THE ESCALATION NOW NAMES THE WINDOW AND THE CALL SHAPE ────────────────
+ *
+ * Additions, each earning its place:
+ *   - "这是留给你的最后一个窗口" states the boundary. The hard cutoff is automatic and the model is
+ *     not told about it anywhere else, so silence here reads as "no deadline".
+ *   - the explicit no-argument call shape, because at 71% there is no budget for the model to
+ *     rediscover the signature or to go hunting for an id.
+ */
 const WATERMARK_URGENT_TEXT =
-  '水位告急：70% 预警后你又开始了新的工具调用。请立刻调用 graft_prepare 和 graft_slice_and_inject 切走，不要开始新的工具调用。'
+  '水位告急：70% 预警后你又开始了新的工具调用。请立刻切走，不要开始新的工具调用——' +
+  '直接调用 graft_prepare 查看交接单（不传参数即可，省略 sourceSessionId 表示切本会话），' +
+  '再用 graft_slice_and_inject 完成切片（同样可不传参数）。' +
+  '这是模型自驱的最后窗口：再往上会被系统强制迁移，届时你正在写的这一步会直接丢失。' +
+  '如果确实要显式传会话 id，先用 graft_debug_status 查，不要猜。'
 
 function takeWatermarkEscalation(ctx: PluginContextLike, agentId: string, payload: any): any[] {
   const pending = watermarkEscalations.get(agentId)
@@ -8874,6 +8911,45 @@ function autoTargetId(settings: Required<GraftConfig>): string {
   return `${settings.autoGraftIdPrefix}-${suffix}`
 }
 
+/**
+ * ── AUDIT ROUND 3 (P0-1): THE CALLING SESSION IS THE DEFAULT SOURCE ─────────────────────────────
+ *
+ * WHAT WAS WRONG, AND WHY IT WAS WORSE THAN A FAILURE.
+ *
+ * `graft_prepare` and `graft_slice_and_inject` required `sourceSessionId`, and the watermark nudge
+ * told the model to call them. But NOTHING ever told the model its own session id — no tool returned
+ * it, and the transcript does not contain it. So the model had to guess, and the measured outcome
+ * was the dangerous one:
+ *
+ *     graft_prepare({})                        -> INVALID_ARGUMENT (blocked)
+ *     graft_prepare({sourceSessionId:"current"}) -> session "current" not found
+ *     graft_prepare({sourceSessionId:"auto-graft-mw21oowu-e7kcmk"}) -> SUCCEEDED
+ *
+ * That third id was scraped out of a stored skill's text — someone else's OLD session. The slice
+ * succeeded and handed over the WRONG CONVERSATION, with no error anywhere. A silent wrong answer
+ * beats a loud failure at being harmful.
+ *
+ * WHY THIS IS THE FIX AND NOT A NEW FEATURE: `graft_debug_status` ALREADY resolved exactly this way
+ * (`:12786-12791` used `exec.agent.id`), so the correct pattern existed in the same file and simply
+ * was not shared. Extracting it here is what makes the two call sites agree with the one that worked.
+ *
+ * THE ORDER IS DELIBERATE: explicit argument first (a caller may legitimately name another session —
+ * that is how one session repairs another), then the calling agent. An empty result is a NAMED
+ * refusal rather than a guess, because guessing is the failure being removed.
+ */
+function resolveSourceSessionId(explicit: unknown, exec: any): string {
+  if (typeof explicit === 'string' && explicit.trim().length > 0) return explicit.trim()
+  const calling = exec?.agent?.id
+  if (typeof calling === 'string' && calling.trim().length > 0) return calling.trim()
+  return ''
+}
+
+/** The calling session id, or '' when the host did not supply one. Used where only the caller makes sense. */
+function callingSessionId(exec: any): string {
+  const calling = exec?.agent?.id
+  return typeof calling === 'string' ? calling.trim() : ''
+}
+
 // ===========================================================================
 // v7.4 P0-2: the graft transaction journal
 // ===========================================================================
@@ -10275,6 +10351,28 @@ export function collectDebugStatus(input: DebugStatusInput): Record<string, unkn
   const section = input.section ?? 'all'
   const settings = input.settings
   const out: Record<string, unknown> = { ok: true, section }
+
+  /**
+   * ── AUDIT ROUND 3 (P0-1, the "how does the model learn its own id" half) ───────────────────────
+   *
+   * The caller's session id is reported AT THE TOP LEVEL, because it is the answer to the question
+   * the watermark nudge creates and the transcript cannot answer: "which session am I?".
+   *
+   * `collectDebugStatus` ALREADY RECEIVED this value (the tool resolved it from `exec.agent.id`) and
+   * simply never printed it — so the one tool that knew the answer kept it to itself, and the model
+   * went looking in stored skills for something id-shaped. Measured consequence: a slice of a
+   * different, older session, with no error.
+   *
+   * `resolvedFrom` is stated so a reader can tell "the host told us" from "an explicit argument was
+   * passed" — those differ when a session is inspecting ANOTHER session on purpose.
+   */
+  if (input.sessionId !== undefined && input.sessionId.length > 0) {
+    out.sessionId = input.sessionId
+    out.sessionIdHint =
+      'This is the session this tool call came from. Pass it as sourceSessionId to graft_prepare / ' +
+      'graft_slice_and_inject when you mean "slice THIS session" — do not guess an id from memory ' +
+      'or from a stored skill, and do not pass an id recorded in another session.'
+  }
 
   if (section === 'all' || section === 'watermark') {
     const watermark = input.watermark
@@ -12164,11 +12262,28 @@ async function appendTransitionCard(
       properties: {
         sourceSessionId: {
           type: 'string',
-          description: 'Finished source session id. Its last turn must be closed by turn/end.',
+          /**
+           * AUDIT ROUND 3 (P0-1): the default is stated, and it is the ONLY default that can be
+           * correct here. The model cannot know its own session id from the transcript, so requiring
+           * it forced a guess — and the measured guess was a DIFFERENT, OLDER session, which sliced
+           * the wrong conversation with no error. Omitting it now means "this session".
+           */
+          description:
+            'Finished source session id. **Default: the session calling this tool.** Pass an explicit ' +
+            'id only to slice a DIFFERENT session (e.g. repairing another one).',
         },
         newSessionId: {
           type: 'string',
-          description: 'New session id to create. Must not be live or persisted already; must differ from the source.',
+          /**
+           * AUDIT ROUND 3 (P0-2): optional, and generated the same way `autoGraft` generates it.
+           *
+           * `graft_prepare` has always accepted an omitted target ("one is generated when omitted"),
+           * so requiring one here made the two tools disagree about the same decision — and forced
+           * the model to invent an id for no reason.
+           */
+          description:
+            'New session id to create. Optional — one is generated (same scheme as autoGraft) when ' +
+            'omitted. Must not be live or persisted already; must differ from the source.',
         },
         allowReslice: {
           type: 'boolean',
@@ -12177,7 +12292,7 @@ async function appendTransitionCard(
             're-slicing a handed-off conversation is how two divergent targets appear.',
         },
       },
-      required: ['sourceSessionId', 'newSessionId'],
+      required: [],
       additionalProperties: false,
     },
     output: {
@@ -12225,13 +12340,30 @@ async function appendTransitionCard(
     },
     execute: async (args: any, exec: any) => {
       if (!isRecord(args)) throw graftError('INVALID_ARGUMENT', 'arguments must be an object')
-      const sourceSessionId = asNonEmptyString(args.sourceSessionId, 'sourceSessionId')
+      /**
+       * AUDIT ROUND 3 (P0-1/P0-2): both ids now have the right defaults, and neither is a guess.
+       *
+       * The refusal is NAMED and says what to do, because the failure this replaces was a silent
+       * wrong slice — a loud empty-argument error is strictly better than a successful slice of
+       * somebody else's conversation.
+       */
+      const sourceSessionId = resolveSourceSessionId(args.sourceSessionId, exec)
+      if (sourceSessionId.length === 0) {
+        throw graftError(
+          'INVALID_ARGUMENT',
+          'sourceSessionId 缺失且宿主没有提供当前会话 id；请显式传入 sourceSessionId（可用 graft_debug_status 查询当前会话 id）',
+        )
+      }
+      const newSessionId =
+        typeof args.newSessionId === 'string' && args.newSessionId.trim().length > 0
+          ? args.newSessionId.trim()
+          : autoTargetId(settings)
       assertResliceAllowed(sourceSessionId, args.allowReslice === true)
       return graftSliceAndInject(
         ctx,
         settings,
         sourceSessionId,
-        asNonEmptyString(args.newSessionId, 'newSessionId'),
+        newSessionId,
         exec?.signal,
         {
           // v7.3.1: the calling agent is the tool-availability scope of last
@@ -12325,7 +12457,12 @@ async function appendTransitionCard(
       properties: {
         sourceSessionId: {
           type: 'string',
-          description: 'The session whose log should be sliced.',
+          /**
+           * AUDIT ROUND 3 (P0-1): this is the tool the watermark nudge tells the model to call, and
+           * it used to demand an id the model had no way to obtain. See `resolveSourceSessionId`.
+           */
+          description:
+            'The session whose log should be sliced. **Default: the session calling this tool.**',
         },
         targetSessionId: {
           type: 'string',
@@ -12338,7 +12475,7 @@ async function appendTransitionCard(
             're-slicing a handed-off conversation is how two divergent targets appear.',
         },
       },
-      required: ['sourceSessionId'],
+      required: [],
       additionalProperties: false,
     },
     output: {
@@ -12363,9 +12500,15 @@ async function appendTransitionCard(
         { type: 'text', text: String(value?.review ?? 'prepared') },
       ],
     },
-    execute: async (args: any) => {
+    execute: async (args: any, exec: any) => {
       if (!isRecord(args)) throw graftError('INVALID_ARGUMENT', 'arguments must be an object')
-      const sourceSessionId = asNonEmptyString(args.sourceSessionId, 'sourceSessionId')
+      const sourceSessionId = resolveSourceSessionId(args.sourceSessionId, exec)
+      if (sourceSessionId.length === 0) {
+        throw graftError(
+          'INVALID_ARGUMENT',
+          'sourceSessionId 缺失且宿主没有提供当前会话 id；请显式传入 sourceSessionId（可用 graft_debug_status 查询当前会话 id）',
+        )
+      }
       assertResliceAllowed(sourceSessionId, args.allowReslice === true)
       return prepareSlice(
         ctx,
