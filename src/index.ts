@@ -6872,8 +6872,9 @@ function takeModelDrivenNudge(
   if (modelDrivenNudgeTurns.get(agentId) === turnKey) return []
   modelDrivenNudgeTurns.set(agentId, turnKey)
   const pct = Math.min(99, Math.max(1, Math.round(watermark.ratio * 100)))
-  // Evidence: pre-step messages are never written to the session log, so the
-  // audit line is the only durable proof that the nudge fired and at what ratio.
+  // Evidence: a pre-step message reaches the log only as an anonymous
+  // `user/message` (its provenance rides in `source.kind`, not in the text), so
+  // the audit line is the durable proof of WHICH nudge fired and at what ratio.
   appendGraftAudit({
     at: new Date().toISOString(),
     kind: 'model-nudge',
@@ -10987,9 +10988,13 @@ function takeDraftMerge(agentId: string, messages: unknown): { messages: any[] }
 /**
  * Inject queued constraints into the target exactly once.
  *
- * The message goes in as `developer/message` — a system-level instruction the
- * UI renders as context, not as conversation — so the user's next prompt is
- * not preceded by a wall of policy text they did not write.
+ * The message travels through pre-step `messages` as a USER-role message with a
+ * `[系统提示]` header. That is a host constraint, not a style choice: DSH records
+ * every pre-step message as a `user/message` event and its validator requires the
+ * event type and the message role to agree, so a `developer` role here throws
+ * `developer/message and developer role must occur together` and kills the step.
+ * A real `developer/message` event can only be written directly, against an open
+ * turn/step — which is the write this pre-step channel exists to avoid.
  */
 /**
  * v5.2 补丁二：把后台提取的约束注入 target 的下一轮。
@@ -11268,10 +11273,14 @@ async function appendTransitionCard(
        * unavailable: an older host without `systemPrompt.section`, or a process
        * that started before this plugin registered it.
        *
-       * It is a `developer/message` delivered through pre-step `messages`, which
-       * is the one channel that reaches the model without touching the log (and
-       * therefore without consuming a step number — writing an event here would
-       * collide with the v4 step ordering, the bug that once corrupted a log).
+       * It travels as a user-role `[系统提示]` message through pre-step `messages`.
+       * That channel is the one place a listener can reach the model without
+       * writing an event (and therefore without consuming a step number — writing
+       * one here would collide with the v4 step ordering, the bug that once
+       * corrupted a log). The role is FORCED: DSH records every pre-step message
+       * as `user/message`, and its validator requires type and role to agree, so
+       * a `developer` role here throws `developer/message and developer role must
+       * occur together` and kills the session (measured at seq 1046).
        *
        * Delivered once per session per process, not every step: repeating a
        * standing rule every turn trains the reader to skip it.

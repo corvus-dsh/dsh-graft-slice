@@ -201,6 +201,15 @@ test('v7.0 P0-5: the target re-asserts its constraints in-band exactly once', as
   assert.equal(injected.length, 1, 'the standing reminder must be injected')
   assert.match(injected[0].content[0].text, /硬约束/)
   assert.match(injected[0].content[0].text, /import re/)
+  /**
+   * HOST CONTRACT: DSH records every pre-step message as a `user/message` and checks that the
+   * event type and the role agree. A `developer` role here throws
+   * `developer/message and developer role must occur together` inside the step and kills the
+   * session — measured live at seq 1046 (dsh-memory, same channel). The carrier must be `user`,
+   * and a user-carried system note must say so.
+   */
+  assert.equal(injected[0].role, 'user', 'pre-step messages become user/message; developer would crash the host')
+  assert.match(injected[0].content[0].text, /^\[系统提示\]/u, 'a user-carried system note must announce itself')
   // Marked as plugin-authored, so a later graft never replays it as user intent.
   assert.equal(injected[0].source.kind, GRAFT_REPLAY_SOURCE_KIND)
 

@@ -19,7 +19,13 @@
  * the same implementation, usable from the composer meanwhile.
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-graft-slice',
+  /**
+   * THE REGISTRATION ID MUST BE THE PACKAGE NAME (`@corvus-dsh/dsh-graft-slice`), NOT the short
+   * `dsh-graft-slice` alias. The Host keys boot-graph rows by package.json `name`; any other id is
+   * "loaded without registering", which triggers a fallback re-execution and then
+   * `duplicate factory registration`. See dsh-memory/client.js for the full trace.
+   */
+  id: '@corvus-dsh/dsh-graft-slice',
   /**
    * v0.21: `host` is the THIRD symbol the client sandbox hands the factory.
    *
