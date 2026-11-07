@@ -27,6 +27,39 @@ jobs:
       - name: Show the runtime we are actually testing on
         run: node --version && npm --version
 
+      - name: Check out the layer this plugin writes through
+        # ── WHY A SIBLING CHECKOUT AND NOT A SKIP ────────────────────────────────────────────
+        #
+        # The slice's write path goes THROUGH `dsh-paradise`. Its async tests are the only place that
+        # path is exercised end to end — skipping them when the layer is missing would leave CI green
+        # while never testing the thing this package exists to do.
+        #
+        # `dsh-paradise` is a sibling repository, so it is checked out BESIDE this one: the same
+        # layout the workspace uses locally, so CI and a developer machine resolve it identically.
+        uses: actions/checkout@v4
+        with:
+          repository: corvus-dsh/dsh-paradise
+          path: ../dsh-paradise-checkout
+
+      - name: Check out the sibling the panel tests render against
+        # The panel-render tests load `dsh-memory/client.js` to prove this plugin's cells draw against
+        # a foreign client bundle. Without it those tests fail on ENOENT — and a skip would mean the
+        # render contract is never verified.
+        uses: actions/checkout@v4
+        with:
+          repository: corvus-dsh/dsh-memory
+          path: ../dsh-memory-checkout
+
+      - name: Place the siblings where the probes expect them
+        # Both lookups use the DIRECTORY NAME (the repo name), not the scoped package name: this
+        # workspace lays repos side by side by repo name, and the probes follow that layout.
+        run: |
+          set -e
+          mv ../dsh-paradise-checkout ../dsh-paradise
+          mv ../dsh-memory-checkout ../dsh-memory
+          node -e "console.log('paradise at', require('node:fs').realpathSync('../dsh-paradise/index.js'))"
+          node -e "console.log('memory at', require('node:fs').realpathSync('../dsh-memory/client.js'))"
+
       - name: Install (no dependencies expected)
         run: npm install --no-audit --no-fund
 
