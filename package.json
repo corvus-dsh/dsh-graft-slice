@@ -1,8 +1,8 @@
 {
-  "name": "dsh-graft-slice",
-  "version": "1.0.1",
+  "name": "@corvus-dsh/dsh-graft-slice",
+  "version": "2.1.0",
   "private": false,
-  "description": "DSH open-source ecosystem plugin (topic: dsh-plugin): physical handoff for long sessions: slice a closed log at its last turn/end into a zero-inheritance, cold-resumable session. No fork, no lossy compaction, crash-safe transaction journal.",
+  "description": "星火 OS 切片层 (graft-slice): physical handoff for long sessions: slice a closed log at its last turn/end into a zero-inheritance, cold-resumable session. No fork, no lossy compaction, crash-safe transaction journal. Can carry memory context into the new session.",
   "type": "module",
   "main": "index.js",
   "types": "src/index.ts",

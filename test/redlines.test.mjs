@@ -13,7 +13,15 @@ function read(relative) {
 test('package and manifest declare the plugin identity and permissions', () => {
   const pkg = JSON.parse(read('package.json'))
   const manifest = JSON.parse(read('manifest.json'))
-  assert.equal(pkg.name, 'dsh-graft-slice')
+  /**
+   * v2.1.0: THE NAME IS SCOPED. The assertion used to hard-code `'dsh-graft-slice'`, which encoded
+   * "the package is unscoped" rather than "the package is identifiable". The registry rejects the
+   * bare name, so the package moved to `@corvus-dsh/dsh-graft-slice` — and this line broke even
+   * though nothing about the plugin changed.
+   *
+   * The rule being guarded is AGREEMENT between package.json and manifest.json, not a literal.
+   */
+  assert.match(pkg.name, /^(@[a-z0-9-]+\/)?dsh-graft-slice$/u, 'the package keeps its dsh-graft-slice identity')
   assert.equal(pkg.type, 'module')
   assert.equal(pkg.dsh.bundle.patch, './cordis.patch.yml')
   assert.equal(manifest.name, pkg.name)
@@ -39,9 +47,20 @@ test('package and manifest declare the plugin identity and permissions', () => {
 
 test('cordis patch inserts the plugin row', () => {
   const patch = read('cordis.patch.yml')
+  const pkg = JSON.parse(read('package.json'))
   assert.match(patch, /insert:/)
   assert.match(patch, /id:\s*dsh-graft-slice/)
-  assert.match(patch, /name:\s*dsh-graft-slice/)
+  /**
+   * THE PATCH `name` MUST BE THE PACKAGE `name`, VERBATIM.
+   *
+   * That is the actual contract: the loader resolves `name` as a module path, so a mismatch means
+   * the plugin installs and then fails to load. Asserting the literal `dsh-graft-slice` was a proxy
+   * for that rule which broke the moment the package was scoped.
+   */
+  assert.ok(
+    patch.includes(`name: '${pkg.name}'`) || patch.includes(`name: ${pkg.name}`),
+    `cordis.patch.yml must name the package exactly as package.json does (${pkg.name})`,
+  )
   assert.match(patch, /skeletonTurn:\s*1/)
   assert.match(patch, /skeletonStep:\s*1/)
 })
