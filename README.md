@@ -154,6 +154,18 @@ node scripts/verify-bundle.mjs   # 27 项：bundle 声明 / files 白名单 / ES
 
 ## v0.22.0：跨仓布局契约（`LAYOUT_UNSUPPORTED`）与客户端载荷守卫
 
+**测试专用出口（批次 3 第 1 组）：** 入口导出 185 个名字，按形状算 seam 的 13 个，其中 10 个是测试专用。
+这里锁**子集**而不是全量，标准写明并按比例执行：入口小到能读完就锁全量（observer 16、memory 31），
+入口是巨石就锁 seam 形状子集。`test/v103-seam-inventory.test.mjs` 断言任何 seam 形状的导出都必须已登记，
+并逐个断言仍可调用——**新增 seam 必须是有意动作**。
+
+**一个不是 seam 的反例（这条最值得读）：** `scanAgentCommand` 看着像测试专用，其实**不是**——
+`scripts/check-docs.mjs` 引用它、README 也点名它，它是**文档门禁的契约**。把它当"只给测试用"删掉会让
+文档检查器变红。测试里有一条专门的断言把这个区别钉住（不能把它登记进 seam 清单）。
+
+**待第 2 组删除的三个 seam：** `debugLastLockCleanup` / `debugLastRecovery` / `debugStorePaths`（**完全无消费者**）。
+删它们时必须同步改清单测试——这正是清单锁存在的意义。
+
 - **`.layout.json`（P1-2）**：本插件在台账目录写入 `{layout: 1, producer: 'dsh-graft-slice',
   files: ['.retired.json', '.transferred.json']}`；读取 `dsh-memory` 的存储目录前先校验它的 `.layout.json`
   （memory 侧在激活时写入）。读到不认识的 `layout` → **拒读**并报 `LAYOUT_UNSUPPORTED`；调试面板给出
@@ -773,7 +785,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 587 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch、v0.19 语义瘦身/物理点火、v0.20 任务看板、v7.8 回滚通知改走 pre-step messages、v1.0.6 控制台空闲会话寻址（`session/agent-busy`）与 `api-session/added` 载荷守卫 |
+| `test/*.test.mjs` | 591 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch、v0.19 语义瘦身/物理点火、v0.20 任务看板、v7.8 回滚通知改走 pre-step messages、v1.0.6 控制台空闲会话寻址（`session/agent-busy`）与 `api-session/added` 载荷守卫 |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -1440,7 +1452,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 587 个测试
+# 2) 591 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）

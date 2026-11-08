@@ -4453,6 +4453,33 @@ export {
                              
 
 /** Cordis plugin name. */
+/* ── THE TEST-SEAM SURFACE ────────────────────────────────────────────────────────────────────────
+ *
+ * WHAT THIS IS: exported readers and resets that exist because the TEST SUITES must observe state the
+ * plugin keeps to itself — the retirement/transfer ledgers, the graft-target marks, the ignition
+ * admission table, the workspace snapshot. None of them is a feature and none is called by production
+ * code (`verify-bundle`/`scripts` measure that: see below).
+ *
+ * THE SEAMS THIS MODULE SURFACE PINS (`test/v103-seam-inventory.test.mjs`):
+ *   `getTransferredSessions`, `getRetiredSessions`, `getGraftTargets`, `getPendingIgnitions`,
+ *   `hasIgnitionAdmission`, `markIgnitionAdmission`, `getIgnitionAdmissions`,
+ *   `extractWorkspaceState`, `clearGraftTargetsForTest`, `extractGoalForTest`,
+ *   `resetRetiredSessions`, `resetParadiseWriteCache`,
+ *   plus the three debug readers `debugLastLockCleanup`, `debugLastRecovery`, `debugStorePaths`
+ *   (they have NO consumer at all — 批次 3 第 2 组 removes them; the inventory must be edited then).
+ *
+ * THEY ARE NOT PUBLIC API. A change here is not a breaking change.
+ *
+ * `scanAgentCommand` IS NOT ONE OF THEM, and the distinction is the useful part of this note: it is
+ * referenced by `scripts/check-docs.mjs` and named in README, so it is a DOCS-GATE contract, not a
+ * test seam. Deleting it as "test-only" would break the documentation checker.
+ *
+ * WHY THE LOCK HERE IS A SUBSET: this entry exports 185 names. Pinning all of them would be noise, so
+ * the rule is proportionate and stated: **the full surface is pinned where it is small enough to read
+ * (16 names in dsh-observer, 31 in dsh-memory); the seam-shaped subset is pinned where the entry is a
+ * monolith.** The rule it enforces is the same everywhere: a seam cannot appear by accident, and
+ * giving a test-only export a production-sounding name is what the convention check refuses.
+ */
 export const name = 'dsh-graft-slice'
 
 /**
