@@ -15,3 +15,11 @@ Thumbs.db
 # Runtime audit trail. Written next to the state files; when dataDir falls back to the plugin
 # directory (a wiped profile patch), it lands here — evidence, never source.
 .graft-audit.jsonl
+# The pending-ignition queue: also `<dataDir>/` state, and it was TRACKED until 2026-11-08 (found by
+# `git ls-files`) — so a user's unsent ignition intent could have been committed and shipped. Tests
+# write it under their own temp dirs, and an absent file reads as an empty queue, so untracking it
+# changes nothing except what git sees.
+.graft-pending-ignition.json
+# The cross-plugin layout manifest (P1-2). Written when `configureRetiredStore` resolves the store
+# directory, which is this directory whenever the profile patch points nowhere.
+.layout.json
