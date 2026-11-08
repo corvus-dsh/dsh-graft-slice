@@ -112,6 +112,35 @@ try {
   patchText = ''
 }
 const lines = patchText.split(/\r?\n/u)
+
+/**
+ * A YAML inline scalar, as the Loader's own parser would deliver it.
+ *
+ * ── WHY THIS EXISTS (2026-11-08) ────────────────────────────────────────────────────────────────
+ *
+ * `name: '@corvus-dsh/dsh-graft-slice'` is VALID YAML, and quoting it is the normal way to keep a
+ * leading `@` from being read as a tag. The Loader parses it with a real YAML parser, so the plugin
+ * loaded correctly — while THIS checker compared the raw slice of the line (`'@corvus-dsh/...'`,
+ * quotes included) against `pkg.name` and reported `patch references the package name, not a path`
+ * as a failure. The patch was right and the gate was wrong.
+ *
+ * The ruling was explicit: fix the CHECKER, never the shipped patch. A gate that misreads valid input
+ * is the defect to repair; editing the artifact to satisfy a broken comparison would spread the bug
+ * into the thing users install.
+ *
+ * Scope: inline scalars only, which is all this file reads — single/double quotes, the two YAML
+ * quote escapes, and a trailing comment. A full YAML parse is not worth a dependency here.
+ */
+function yamlScalar(raw) {
+  let value = String(raw).trim()
+  // Only a comment preceded by whitespace is a comment; `a#b` is a scalar in YAML.
+  value = value.replace(/\s+#.*$/u, '').trim()
+  const quoted = /^(['"])([\s\S]*)\1$/u.exec(value)
+  if (quoted === null) return value
+  if (quoted[1] === "'") return quoted[2].replace(/''/gu, "'")
+  return quoted[2].replace(/\\(["\\])/gu, '$1')
+}
+
 const entries = []
 let current = null
 let inInsert = false
@@ -125,21 +154,45 @@ for (const raw of lines) {
   if (!inInsert) continue
   const idMatch = /^\s+-\s+id:\s*(.+)$/u.exec(line)
   if (idMatch) {
-    current = { id: idMatch[1].trim(), name: undefined, config: false }
+    current = { id: yamlScalar(idMatch[1]), name: undefined, config: false }
     entries.push(current)
     continue
   }
   const nameMatch = /^\s+name:\s*(.+)$/u.exec(line)
   if (nameMatch && current !== null) {
-    current.name = nameMatch[1].trim()
+    current.name = yamlScalar(nameMatch[1])
     continue
   }
   if (/^\s+config:\s*$/u.test(line) && current !== null) current.config = true
 }
+/**
+ * Is this a FILESYSTEM PATH rather than a package name?
+ *
+ * ── WHY THE OLD TEST COULD NEVER PASS (2026-11-08) ──────────────────────────────────────────────
+ *
+ * The check was `/[/\\]/.test(name)` — "a package name contains no slash". That was written before the
+ * packages moved under a SCOPE, and a scoped name contains a slash BY DEFINITION:
+ * `@corvus-dsh/dsh-graft-slice`. So the gate reported a failure on a patch that was correct, and the
+ * quotation was only the first of its two reasons for saying so.
+ *
+ * The intent was always "the row names a PACKAGE, not a path". What actually distinguishes them:
+ * a scoped name starts with `@` and has exactly one slash, the scope separator; a path starts with a
+ * dot, a separator, or a drive letter, or contains a backslash at all.
+ */
+function looksLikeFilesystemPath(value) {
+  const name = String(value)
+  if (/^[.]/u.test(name)) return true // ./x, ../x
+  if (/^[/\\]/u.test(name)) return true // /x, \x
+  if (/^[A-Za-z]:[\\/]/u.test(name)) return true // C:\x, C:/x
+  if (name.includes('\\')) return true // any backslash at all
+  if (!name.includes('/')) return false
+  return !/^@[^/]+\/[^/]+$/u.test(name) // a slash is allowed only as the scope separator
+}
+
 check('patch declares at least one insert entry', entries.length > 0, `${entries.length} entr(ies)`)
 check(
   'patch references the package name, not a path',
-  entries.length > 0 && entries.every((entry) => entry.name === pkg.name && !/[\\/]/u.test(entry.name ?? '')),
+  entries.length > 0 && entries.every((entry) => entry.name === pkg.name && !looksLikeFilesystemPath(entry.name ?? '')),
   entries.map((entry) => entry.name ?? '(no name)').join(', '),
 )
 check(
