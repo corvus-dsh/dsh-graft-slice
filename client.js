@@ -376,7 +376,22 @@ window.__ModuleLoader__.load({
        * envelope (`{ items }` vs a bare array vs `{ value: { items } }`), because a wrong
        * guess here costs another round of "读取失败".
        */
-      const listHostSessions = async () => {
+      const listHostSessions = async () => (await listHostSessionRows()).map((row) => row.id)
+
+      /**
+       * v1.0.6 — THE ROWS, NOT JUST THE IDS: `running` IS PART OF THE ADDRESS DECISION.
+       *
+       * Live failure (2026-11-08): every probe answered `session/agent-busy`. That code is raised by
+       * `sessionController.resolveAgent`, whose contract is "resolve OR RESUME one ordinary Session
+       * for another Host API domain" — so it refuses while that Session's agent is mid-turn. The id
+       * was REAL and the panel was addressing a session that was WORKING, which is the normal state
+       * when a human clicks the panel during a run: the panel was unreadable exactly when it was
+       * wanted.
+       *
+       * `sessionController.list()` returns `SessionSummary` rows, and that contract includes
+       * `running`. Reading it is what lets the bridge address a session that can answer.
+       */
+      const listHostSessionRows = async () => {
         const remote = (() => {
           try {
             return ctx.get ? ctx.get('remote') : undefined
@@ -389,8 +404,8 @@ window.__ModuleLoader__.load({
           if (typeof namespace.list !== 'function') continue
           try {
             const reply = await namespace.list({}, undefined)
-            const ids = collectSessionIds(reply)
-            if (ids.length > 0) return ids
+            const rows = collectSessionRows(reply)
+            if (rows.length > 0) return rows
           } catch {
             // Try the next namespace spelling.
           }
@@ -398,22 +413,35 @@ window.__ModuleLoader__.load({
         return []
       }
 
+      /** The ids of sessions the HOST reports as not running — the only ones an agent can be got for. */
+      const listIdleHostSessionIds = async () =>
+        (await listHostSessionRows()).filter((row) => row.running !== true).map((row) => row.id)
+
+      const sessionItemsOf = (reply) => {
+        if (Array.isArray(reply)) return reply
+        if (reply === null || typeof reply !== 'object') return []
+        if (Array.isArray(reply.items)) return reply.items
+        if (reply.value && Array.isArray(reply.value.items)) return reply.value.items
+        if (Array.isArray(reply.sessions)) return reply.sessions
+        return []
+      }
+
       /** Pull `sessionId` strings out of whatever shape the Host answered with. */
-      const collectSessionIds = (reply) => {
-        const items = (() => {
-          if (Array.isArray(reply)) return reply
-          if (reply === null || typeof reply !== 'object') return []
-          if (Array.isArray(reply.items)) return reply.items
-          if (reply.value && Array.isArray(reply.value.items)) return reply.value.items
-          if (Array.isArray(reply.sessions)) return reply.sessions
-          return []
-        })()
-        const ids = []
-        for (const item of items) {
+      const collectSessionIds = (reply) => collectSessionRows(reply).map((row) => row.id)
+
+      /**
+       * `running` is read defensively: a bare string id row carries no state, so it counts as UNKNOWN
+       * (`running: false`). Treating unknown as busy would drop ids the host never denied, and the
+       * host is the one that refuses — so the optimistic reading is the correct one here.
+       */
+      const collectSessionRows = (reply) => {
+        const rows = []
+        for (const item of sessionItemsOf(reply)) {
           const id = typeof item === 'string' ? item : item && typeof item.sessionId === 'string' ? item.sessionId : item && typeof item.id === 'string' ? item.id : ''
-          if (id.length > 0 && !ids.includes(id)) ids.push(id)
+          if (id.length === 0 || rows.some((row) => row.id === id)) continue
+          rows.push({ id, running: item !== null && typeof item === 'object' && item.running === true })
         }
-        return ids
+        return rows
       }
 
       /**
@@ -601,11 +629,26 @@ window.__ModuleLoader__.load({
            */
           /** v1.2: the LIVE id goes first — the placeholder can never pass session/not-found. */
           const explicitChoice = typeof preferredId === 'string' && preferredId.length > 0
-          const candidateIds = explicitChoice
-            ? [targetId, ...(sessionId.length > 0 && sessionId !== targetId ? [sessionId] : [])]
+          /**
+           * v1.0.6 — AND THEN THE IDLE ONES, BECAUSE `session/agent-busy` IS A THIRD CASE.
+           *
+           * Measured 2026-11-08: the preferred id answered `agent-busy` (a REAL session, mid-turn)
+           * and the resolved id answered `not-found` (stale), so the panel had no usable address
+           * while a run was in flight. The human's id still comes first — speculation is only safe
+           * when it is bounded and ordered — and the host-reported IDLE ids come last.
+           */
+          const idleIds = await listIdleHostSessionIds()
+          const orderedIds = explicitChoice
+            ? [targetId, ...(sessionId.length > 0 && sessionId !== targetId ? [sessionId] : []), ...idleIds]
             : sessionId.length > 0 && sessionId !== targetId
-              ? [sessionId, targetId]
-              : [targetId]
+              ? [sessionId, targetId, ...idleIds]
+              : [targetId, ...idleIds]
+          const candidateIds = []
+          for (const candidate of orderedIds) {
+            if (typeof candidate === 'string' && candidate.length > 0 && !candidateIds.includes(candidate)) {
+              candidateIds.push(candidate)
+            }
+          }
           for (const attemptId of candidateIds) {
             for (const shape of ordered) {
               if (shape === undefined) continue
@@ -642,11 +685,22 @@ window.__ModuleLoader__.load({
             failures.push(`host.call(commands.execute): ${String((error && error.message) || error)}`)
           }
         }
+        /**
+         * v1.0.6 — NAME THE REASON WHEN IT IS THE ONE A HUMAN CAN ACT ON.
+         *
+         * Every rejection used to be concatenated, which is why a user saw four error codes and could
+         * not tell that two of them were shapes the host never accepts and another was "that session
+         * is working". `session/agent-busy` is not a defect: it is state, and it has a next action.
+         */
+        const busy = failures.some((failure) => failure.includes('agent-busy'))
         return {
           ok: false,
           via: 'none',
           text:
             `面板无法调用宿主（${failures.length === 0 ? 'remote.commands 与 host.call 都不可用' : failures.join(' | ')}）。\n` +
+            (busy
+              ? '原因：目标会话正在跑一轮，宿主拒绝交出它的 agent（session/agent-busy）。面板需要一个空闲会话——等这一轮结束后点「刷新」，或在上面粘贴另一个空闲会话的 id。\n'
+              : '') +
             'Host 侧功能不受影响：可直接在输入框执行该命令。',
         }
       }
