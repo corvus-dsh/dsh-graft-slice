@@ -1677,11 +1677,6 @@ let D               = fallbackDeps
  */
 let resolver                                  
 
-function setIgnitionDeps(deps              )       {
-  D = deps
-  resolver = undefined
-}
-
 function setIgnitionDepsResolver(fn                    )       {
   resolver = fn
 }
@@ -1738,11 +1733,6 @@ function hostService(ctx     , name        )      {
   return undefined
 }
 
-/** The per-target admission map, as ONE object shared with the owner. */
-function viewAdmissions()                                                   {
-  return state().admissions
-}
-
 /**
  * THE TARGET'S cwd, obtained the way this plugin obtains every cwd: from the session HEADER.
  *
@@ -1776,11 +1766,6 @@ async function resolveTargetCwd(ctx     , targetId        , known         )     
 async function ensureParadiseTrigger(ctx     )                                                      {
   const binding = await ensureParadiseWrite(ctx)
   return binding.ok ? binding.triggers : undefined
-}
-
-/** The durable pending queue, as ONE object shared with the owner. */
-function viewPendingQueue()                               {
-  return state().pending
 }
 
 /**
@@ -7109,29 +7094,6 @@ export function describeUnavailableTool(name        , resultSeq        , isError
  * 行序就是时序；`!` 标记那次调用报了错。单个 seq 的粒度和旧句式完全一样，
  * 需要原文时仍然用 graft_read_result 读。
  */
-/**
- * v7.4b: name how the open-turn carryover was built.
- *
- * The block is not a single message: it is the last paragraph of each step's
- * assistant text (reasoning dropped) plus tool pointers. Saying so is the
- * difference between "I remember what I said" and "I am reading a montage".
- */
-export function carryoverAssemblyNote(carryover                           )         {
-  const paragraphs = carryover.assistantText
-    .trim()
-    .split(/\n{2,}/u)
-    .filter((paragraph) => paragraph.trim().length > 0)
-  if (paragraphs.length === 0) {
-    // v7.4c: the open turn may hold only the user's instruction (watermark hit
-    // before the model answered). Do not claim there is assistant prose.
-    return '（断点块：这一轮尚未结束，源会话还没有产出助手正文）'
-  }
-  if (paragraphs.length < 2) {
-    return '（断点块：这一轮尚未结束，正文取自断点前最后一步）'
-  }
-  return `（断点块：下面 ${paragraphs.length} 段正文按时间拼接自断点前各步的最终段落，不是一条完整消息）`
-}
-
 export function renderPointerLines(items                        )         {
   const runs                                                           = []
   for (const item of [...items].sort((left, right) => left.seq - right.seq)) {
@@ -13060,12 +13022,6 @@ export async function graftReadResult(
 export const PRE_STEP_EVENT = 'agent/pre-step'
 /** Agent event reserved for a later turn-boundary hook. */
 export const TURN_STOPPING_EVENT = 'agent/turn-stopping'
-
-/** Placeholder marker for the optional turn-stopping hook. No logic is attached. */
-export const TURN_STOPPING_PLACEHOLDER = {
-  installed: true,
-  todo: 'connect handoff finalization / retired-set cleanup at the turn boundary later',
-}         
 
 /**
  * Register the tools and hooks.

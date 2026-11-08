@@ -214,11 +214,6 @@ let D: IgnitionDeps = fallbackDeps
  */
 let resolver: (() => IgnitionDeps) | undefined
 
-export function setIgnitionDeps(deps: IgnitionDeps): void {
-  D = deps
-  resolver = undefined
-}
-
 export function setIgnitionDepsResolver(fn: () => IgnitionDeps): void {
   resolver = fn
 }
@@ -275,11 +270,6 @@ function hostService(ctx: any, name: string): any {
   return undefined
 }
 
-/** The per-target admission map, as ONE object shared with the owner. */
-export function viewAdmissions(): Map<string, { at: number; promptChars: number }> {
-  return state().admissions
-}
-
 /**
  * THE TARGET'S cwd, obtained the way this plugin obtains every cwd: from the session HEADER.
  *
@@ -313,11 +303,6 @@ async function resolveTargetCwd(ctx: any, targetId: string, known?: string): Pro
 async function ensureParadiseTrigger(ctx: any): Promise<ParadiseSessionLike['trigger'] | undefined> {
   const binding = await ensureParadiseWrite(ctx)
   return binding.ok ? binding.triggers : undefined
-}
-
-/** The durable pending queue, as ONE object shared with the owner. */
-export function viewPendingQueue(): Map<string, PendingIgnition> {
-  return state().pending
 }
 
 /**
