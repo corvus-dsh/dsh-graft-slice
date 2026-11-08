@@ -83,6 +83,37 @@ export interface SessionLogSnapshotShape {
   [key: string]: any
 }
 
+/**
+ * THE `api-session/added` WIRE SHAPE — the two fields a host can actually resolve a payload by.
+ *
+ * ── P1-3 (audit 2026-11-08) WHY THIS LIVES IN THE HOST-SHAPE LAYER ─────────────────────────────
+ *
+ * This plugin emits `api-session/added` ITSELF, for two kinds of session the host never announces:
+ * a graft target (created through `sessionPersistence` so it stays cold and resumable) and an
+ * archived fork. The event reaches peers through `dsh-api-remotes`, keyed by
+ * `resources: { session: summary => summary.sessionId }`, and the client applies it with
+ * `handleSessionAdded` -> `mergeSummary`.
+ *
+ * The host's `assertJsonArgs` checks only that the payload is JSON-serialisable — NOT that
+ * `sessionId` is a string. A payload with a missing or non-string id therefore throws nowhere: it
+ * arrives at the peer's access-control step as `undefined`, where the row is dropped at best and an
+ * authorisation key is looked up at worst. Nothing local can observe that failure.
+ *
+ * WHICH IS A HOST SHAPE, NOT A POLICY: it is the same class of fact as `assertColdLog` — how the
+ * runtime wants an object shaped, not what this plugin decided to say.
+ *
+ * does NOT reject anything emitted today: the target path builds `sessionId` from a generated id and
+ * `updatedAt` from `Date.now()`; the fork sweep takes both from the session header, and the ONE
+ * value it can carry through as-is is `header.createdAt`, which is why `Number.isFinite` — not
+ * `typeof === 'number'` — is the check that matters here (`NaN` passes the typeof test).
+ */
+export function assertSessionSummary(payload: unknown): payload is { sessionId: string; updatedAt: number } {
+  if (typeof payload !== 'object' || payload === null) return false
+  const summary = payload as { sessionId?: unknown; updatedAt?: unknown }
+  if (typeof summary.sessionId !== 'string' || summary.sessionId.length === 0) return false
+  return typeof summary.updatedAt === 'number' && Number.isFinite(summary.updatedAt)
+}
+
 export const IDENTITY_METADATA_MARKER = 'graft-identity'
 
 export interface GraftIdentity {

@@ -152,6 +152,19 @@ node scripts/verify-bundle.mjs   # 27 项：bundle 声明 / files 白名单 / ES
 
 `cordis.patch.yml` 用**包名**引用（`name: dsh-graft-slice`），不写相对路径——相对路径只在本机成立。
 
+## v0.22.0：跨仓布局契约（`LAYOUT_UNSUPPORTED`）与客户端载荷守卫
+
+- **`.layout.json`（P1-2）**：本插件在台账目录写入 `{layout: 1, producer: 'dsh-graft-slice',
+  files: ['.retired.json', '.transferred.json']}`；读取 `dsh-memory` 的存储目录前先校验它的 `.layout.json`
+  （memory 侧在激活时写入）。读到不认识的 `layout` → **拒读**并报 `LAYOUT_UNSUPPORTED`；调试面板给出
+  `available: false` + 原因，而不是一份看起来"没有记忆"的零计数。缺失标记 = 旧目录，**继续读**。
+- **为什么已经有 epoch 还需要它**：epoch 覆盖的是文件**内容**格式。四个按名字读的文件一旦被改名，
+  读取端一律降级为 `[]`——与"这个工作区什么都没记"同形，静默的零而不是错误。
+- **`api-session/added` 载荷守卫（P1-3）**：冷目标与归档 fork 的会话通告是本插件自己 emit 的（宿主只为
+  已发布会话发这个事件），而宿主的 `assertJsonArgs` 只校验可序列化、**不校验 `sessionId` 是字符串**。
+  两个发出点在 emit 前一律过 `assertSessionSummary`：不合格就记 warning 并跳过，绝不发一个对方的
+  `resources.session` 读不出 key 的载荷。
+
 ## v0.20.0：交接任务看板（Task Board）
 
 v0.19 蒸馏得对，但**渲染成了一段话**。读散文的模型必须自己推导"哪些做完了 / 哪些在跑 / 哪些没开始"，
@@ -760,7 +773,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 566 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch、v0.19 语义瘦身/物理点火、v0.20 任务看板、v7.8 回滚通知改走 pre-step messages |
+| `test/*.test.mjs` | 581 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch、v0.19 语义瘦身/物理点火、v0.20 任务看板、v7.8 回滚通知改走 pre-step messages、v0.22 跨仓布局契约（`LAYOUT_UNSUPPORTED`）与 `api-session/added` 载荷守卫 |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -1427,7 +1440,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 566 个测试
+# 2) 581 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）

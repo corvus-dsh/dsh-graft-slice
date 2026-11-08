@@ -92,6 +92,33 @@ import { LEDGER_EPOCH } from './core/ledger.js'
  * here — `export ... from` would keep a runtime specifier that does not exist.
  */
 export { readLedger, readLedgerPayload, readLedgerEpoch, LEDGER_EPOCH }
+/**
+ * P1-2: the cross-plugin LAYOUT CONTRACT. Re-exported for the same reason as the ledger readers —
+ * the tests import from `index.js`, and the bundler inlines `core/layout.ts`, so a bare export is the
+ * form that survives.
+ */
+import {
+  GRAFT_LEDGER_FILES,
+  GRAFT_LEDGER_LAYOUT_VERSION,
+  LAYOUT_MANIFEST_FILE,
+  LayoutUnsupportedError,
+  MEMORY_LAYOUT_FILES,
+  MEMORY_LAYOUT_VERSION,
+  assertLayoutSupported,
+  readLayoutManifest,
+  writeLayoutManifest,
+} from './core/layout.js'
+export {
+  GRAFT_LEDGER_FILES,
+  GRAFT_LEDGER_LAYOUT_VERSION,
+  LAYOUT_MANIFEST_FILE,
+  LayoutUnsupportedError,
+  MEMORY_LAYOUT_FILES,
+  MEMORY_LAYOUT_VERSION,
+  assertLayoutSupported,
+  readLayoutManifest,
+  writeLayoutManifest,
+}
 import {
   LOCK_SETTLE_MS,
   LOCK_STALE_MS,
@@ -283,6 +310,7 @@ import {
   assertColdLog,
   assertLogOnly,
   assertMessageSurface,
+  assertSessionSummary,
   assertTopLevelHeader,
   buildInjectionEvents,
   extractActiveGoalChange,
@@ -302,6 +330,7 @@ export {
   assertColdLog,
   assertLogOnly,
   assertMessageSurface,
+  assertSessionSummary,
   assertTopLevelHeader,
   buildInjectionEvents,
   extractActiveGoalChange,
@@ -6022,6 +6051,28 @@ function configureRetiredStore(ctx: PluginContextLike, settings: Required<GraftC
   const dataDir = resolved.dir
   storeScope = resolved.scope
   storeCtx = ctx
+  /**
+   * P1-2: PUBLISH THIS DIRECTORY'S LAYOUT, so `dsh-memory` can REFUSE rather than guess.
+   *
+   * That reader opens `.retired.json` and `.transferred.json` by name, and a missing file has always
+   * meant "nothing retired yet" — so a rename HERE would read to it as an empty history, with no
+   * error on either side. `.layout.json` is what turns that silence into a named refusal.
+   *
+   * Written when the store directory is RESOLVED, not on the first ledger write: the contract has to
+   * exist before anyone reads, or the first read of a fresh directory is unversioned by construction.
+   * `writeLayoutManifest` is idempotent by content, so a reload does not touch the directory's mtime.
+   */
+  try {
+    writeLayoutManifest(dataDir, {
+      layout: GRAFT_LEDGER_LAYOUT_VERSION,
+      producer: 'dsh-graft-slice',
+      files: GRAFT_LEDGER_FILES,
+    })
+  } catch {
+    // A directory that cannot be stamped is still usable. The other side then sees an absent
+    // manifest and proceeds — the pre-P1-2 behaviour — which is the safe direction for a failed
+    // marker: refusing to write a ledger because a marker could not be written would be worse.
+  }
   retiredStorePath = join(dataDir, '.retired.json')
   transferredStorePath = join(dataDir, '.transferred.json')
   graftTargetsPath = join(dataDir, '.graft-targets.json')
@@ -8360,7 +8411,7 @@ async function graftSliceAndInjectUnlocked(
       const emit = (ctx as any).emit
       if (typeof emit === 'function') {
         const createdAt = Date.now()
-        emit('api-session/added', {
+        const summary = {
           sessionId: newId,
           // summarizeCold: updatedAt = max(createdAt, metadata.lastPromptAt ?? 0)
           updatedAt: createdAt,
@@ -8369,7 +8420,20 @@ async function graftSliceAndInjectUnlocked(
           running: false,
           blank: false,
           ...(plan.cwd === undefined ? {} : { cwd: plan.cwd }),
-        })
+        }
+        /**
+         * P1-3: the payload is a WIRE CONTRACT with the client (see `core/host-shape.ts`). A summary
+         * the peer cannot key by is SKIPPED AND REPORTED, never emitted — and it is not a graft
+         * failure either: the target is already durable and resumable at this point, so the worst
+         * honest outcome is a reported sidebar gap, not an aborted handoff.
+         */
+        if (!assertSessionSummary(summary)) {
+          plan.warnings.push(
+            `client announcement skipped: unresolvable sessionId/updatedAt (sessionId=${JSON.stringify(summary.sessionId)})`,
+          )
+        } else {
+          emit('api-session/added', summary)
+        }
       }
     } catch (error) {
       plan.warnings.push(`client announcement failed: ${String((error as any)?.message ?? error)}`)
@@ -9903,7 +9967,7 @@ export async function registerArchivedForks(
     await attachSessionToWorkspace(ctx, id, cwd)
     if (typeof emit !== 'function') continue
     try {
-      emit('api-session/added', {
+      const summary = {
         sessionId: id,
         // summarizeCold: updatedAt = max(createdAt, metadata.lastPromptAt ?? 0)
         updatedAt: typeof header?.createdAt === 'number' ? header.createdAt : Date.now(),
@@ -9912,7 +9976,21 @@ export async function registerArchivedForks(
         running: false,
         blank: false,
         ...(cwd === undefined ? {} : { cwd }),
-      })
+      }
+      /**
+       * P1-3: `header.createdAt` is the ONE field this sweep passes through uncoerced, and
+       * `typeof NaN === 'number'` — so a damaged header produces a summary the client's `mergeSummary`
+       * cannot key by. Skip THAT row and keep sweeping: one bad header must not hide every other
+       * archived fork, and it must not be announced as a row that silently fails to appear.
+       */
+      if (!assertSessionSummary(summary)) {
+        ctx.logger?.warn?.(
+          `[dsh-graft-slice] archived fork ${JSON.stringify(id)} not announced: ` +
+            `unresolvable sessionId/updatedAt (updatedAt=${String(summary.updatedAt)})`,
+        )
+        continue
+      }
+      emit('api-session/added', summary)
       announced += 1
     } catch {
       // A refused emit must not abort the sweep.
@@ -10470,6 +10548,31 @@ export function collectMemoryStoreStatus(
   skillsDir: string,
   workspace?: string,
 ): Record<string, unknown> {
+  /**
+   * P1-2: THE LAYOUT GATE RUNS BEFORE ANY FILE IS OPENED.
+   *
+   * `readJsonl` below degrades every unreadable file to `[]`, which is right for a file that is
+   * merely absent and wrong for a directory whose layout changed: the panel would print
+   * `negatives: 0` for a store full of records, and nothing would say why. `.layout.json` — written by
+   * `dsh-memory` at its activation — is the only thing that can tell those two apart.
+   *
+   * A refusal is REPORTED, never thrown out of the tool: this is the read-only debug panel, and
+   * "the other plugin is a layout ahead" must not turn a status call into a failed tool call. The
+   * panel says `available: false` with the reason, which is strictly more informative than the silent
+   * zero it used to print.
+   */
+  try {
+    assertLayoutSupported(memoryDir, { version: MEMORY_LAYOUT_VERSION, producer: 'dsh-memory' })
+  } catch (error) {
+    return {
+      available: false,
+      reason: 'LAYOUT_UNSUPPORTED',
+      detail: String((error as any)?.message ?? error),
+      memoryDir,
+      skillsDir,
+      counts: { skills: 0, negatives: 0, facts: 0, experiences: 0, suggestions: 0 },
+    }
+  }
   const wanted = typeof workspace === 'string' ? workspace.replace(/\\/gu, '/').replace(/\/+$/u, '').toLowerCase() : ''
   const readJsonl = (file: string): Array<Record<string, unknown>> => {
     try {
