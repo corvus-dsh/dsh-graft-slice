@@ -41,7 +41,26 @@ import { ensureParadiseWrite } from './paradise-write.js'
 import type { ParadiseSessionLike } from './paradise-write.js'
 
 /** The prefix every ignition prompt carries. */
+/** Prefix of every ignition prompt. A retry looks for exactly this in the target's log. */
 export const IGNITION_MARKER = '[dsh-graft-slice 点火]'
+
+/**
+ * Every marker this plugin has ever stamped, current first.
+ *
+ * ── P0 (audit 2026-11-08): WHY A LIST AND NOT THE CONSTANT ─────────────────────────────────────
+ *
+ * `dsh-paradise` used to default to `'[dsh-observer 点火]'` — a layer inversion (L1 naming an L4
+ * plugin). It now defaults to a neutral `'[plugin 点火]'` and takes the marker from the caller,
+ * accepting a LIST for the idempotence check while stamping only the first entry.
+ *
+ * That makes THIS list the thing standing between a rename and a double ignition: sessions in the
+ * field carry `'[dsh-graft-slice 点火]'`. Passing only a future marker would make every warm target
+ * look "never ignited" and be prompted a second time — the exact failure this constant exists to
+ * prevent, and the reason the comment above says the dialect is preserved rather than modernised.
+ *
+ * APPEND ONLY. An alias is never removed: a target ignited two releases ago may still be resumed.
+ */
+export const IGNITION_MARKERS: readonly string[] = [IGNITION_MARKER]
 
 /** How many activation rounds a failed ignition is retried before giving up. */
 export const IGNITION_MAX_ATTEMPTS = 3
@@ -664,7 +683,7 @@ export async function igniteTargetSession(
       text: prompt,
       mode: settings.ignitionMode === 'steer' ? 'interrupt' : 'queue',
       origin: 'plugin:graft-slice:ignition',
-      marker: IGNITION_MARKER,
+      marker: IGNITION_MARKERS,
       /**
        * graft NEVER escalates: a `queue` prompt that the host refused is REPORTED, not re-sent as a
        * `steer` into a live turn. That would be a stronger intervention than the user configured, and
