@@ -356,9 +356,10 @@ export type { GraftIdentity }
  *   `getTransferredSessions`, `getRetiredSessions`, `getGraftTargets`, `getPendingIgnitions`,
  *   `hasIgnitionAdmission`, `markIgnitionAdmission`, `getIgnitionAdmissions`,
  *   `extractWorkspaceState`, `clearGraftTargetsForTest`, `extractGoalForTest`,
- *   `resetRetiredSessions`, `resetParadiseWriteCache`,
- *   plus the three debug readers `debugLastLockCleanup`, `debugLastRecovery`, `debugStorePaths`
- *   (they have NO consumer at all — 批次 3 第 2 组 removes them; the inventory must be edited then).
+ *   `resetRetiredSessions`, `resetParadiseWriteCache`.
+ *   (Until 2026-11-08 this list also carried three `debug*` readers with NO consumer at all —
+ *   `debugLastLockCleanup`, `debugLastRecovery`, `debugStorePaths`. 批次 3 第 2 组 deleted them; the
+ *   module variables they read stayed, because the lock sweep and the recovery pass still write them.)
  *
  * THEY ARE NOT PUBLIC API. A change here is not a breaking change.
  *
@@ -13222,20 +13223,6 @@ let lastRecovery: { scanned: number; rolledBack: string[] } | undefined
  * show the reclamation without re-running it.
  */
 let lastLockCleanup: LockEntry[] = []
-
-/** Test-only: the lock sweep of the last activation in this process. */
-export function debugLastLockCleanup(): LockEntry[] {
-  return lastLockCleanup
-}
-
-/** Test-only: the recovery result of the last activation in this process. */
-export function debugLastRecovery(): { scanned: number; rolledBack: string[] } | undefined {
-  return lastRecovery
-}
-
-export function debugStorePaths(): { txnDir: string; prepared: string; retired: string } {
-  return { txnDir: txnDirPath, prepared: preparedStorePath, retired: retiredStorePath }
-}
 
 /**
  * WIRE `core/ignition.ts` TO THIS FILE'S STATE — at the END of the module, where every declaration exists.

@@ -49,8 +49,13 @@ const TEST_ONLY_SEAMS = [
   'markIgnitionAdmission',
 ]
 
-/** Seams with no consumer at all: 批次 3 第 2 组 removes them, and MUST edit this file when it does. */
-const DEAD_SEAMS_PENDING_REMOVAL = ['debugLastLockCleanup', 'debugLastRecovery', 'debugStorePaths']
+/**
+ * Seams with no consumer at all — 批次 3 第 2 组 REMOVED all three on 2026-11-08
+ * (`debugLastLockCleanup`, `debugLastRecovery`, `debugStorePaths`). The array stays as the place the
+ * next such name is recorded BEFORE it is deleted, which is what keeps the deletion a deliberate act
+ * rather than a silent disappearance.
+ */
+const DEAD_SEAMS_PENDING_REMOVAL = []
 
 /** Referenced by scripts/docs, NOT by production code — and therefore NOT a seam to fold or delete. */
 const REFERENCED_NOT_A_SEAM = ['scanAgentCommand']
