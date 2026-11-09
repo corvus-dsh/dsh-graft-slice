@@ -9165,11 +9165,55 @@ const BOARD_COLUMNS = {
   todo: '⏭️ 待开始',
 }         
 
+/**
+ * ── C3: A DISPLAY TRUNCATION MUST BE VISIBLE ────────────────────────────────────────────────────
+ *
+ * `truncateEnd` deliberately emits no marker: its own comment explains that a `...[已省略 N 行]` line
+ * inside a JSON payload makes a downstream parse fail, and that reason is correct FOR PAYLOADS.
+ *
+ * A board is the opposite kind of surface — a human (and a model) reads it as prose, and a bare cut
+ * reads as a complete sentence that happens to end mid-word. Measured: a 1,164-character request was
+ * cut to 311 and ended at "## 一、EMP" with nothing to say so.
+ *
+ * So the structured fields are used the way they were designed to be used: `truncated` and
+ * `originalLength` decide whether to append a marker, and the marker names the way back to the
+ * original (the seq lookup this session already documents).
+ */
+function truncateForDisplay(text        , limit        )         {
+  const cut = truncateEnd(text, limit)
+  if (cut.truncated === false) return cut.text
+  return `${cut.text}…（已截断，原文 ${cut.originalLength} 字符，用 seq 回读原文）`
+}
+
+/**
+ * True when two texts are THE SAME TEXT cut differently — not two facts that agree.
+ *
+ * ── WHY THIS IS NOT `nearDuplicate` (index.ts:1371) ─────────────────────────────────────────────
+ *
+ * That one compares TOKEN SETS and fires at 90% overlap, which is right for constraint sentences ("is
+ * this the same rule stated twice?") and wrong here: two different paragraphs about the same subsystem
+ * share most of their vocabulary and would be suppressed as duplicates, hiding real content.
+ *
+ * The board's duplicate had a specific shape — the SAME source text rendered into two columns — so the
+ * test is a shared PREFIX, which that shape produces and independent prose does not.
+ */
+function sameTextHead(a        , b        )          {
+  const left = a.replace(/\s+/gu, ' ').trim()
+  const right = b.replace(/\s+/gu, ' ').trim()
+  if (left.length === 0 || right.length === 0) return false
+  if (left === right) return true
+  const shorter = Math.min(left.length, right.length)
+  if (shorter < 30) return false
+  let shared = 0
+  while (shared < shorter && left[shared] === right[shared]) shared += 1
+  return shared >= Math.min(60, shorter)
+}
+
 export function renderTaskBoard(input                )         {
   const lines           = [`## 交接任务看板（第一轮只要读这里）`]
   const request = input.request.replace(/\s+/gu, ' ').trim()
   lines.push(
-    `**${BOARD_COLUMNS.request}**：${request.length === 0 ? '（未提取到明确要求，见 goal 消息）' : truncateEnd(request, 300).text}`,
+    `**${BOARD_COLUMNS.request}**：${request.length === 0 ? '（未提取到明确要求，见 goal 消息）' : truncateForDisplay(request, 300)}`,
   )
 
   /**
@@ -9182,7 +9226,7 @@ export function renderTaskBoard(input                )         {
    */
   const currentGoal = input.currentGoal === undefined ? '' : input.currentGoal.replace(/\s+/gu, ' ').trim()
   if (currentGoal.length > 0 && currentGoal !== request) {
-    lines.push('', `**当前目标**：${truncateEnd(currentGoal, 300).text}`)
+    lines.push('', `**当前目标**：${truncateForDisplay(currentGoal, 300)}`)
   }
   const revisions = typeof input.goalRevisions === 'number' ? input.goalRevisions : 0
   if (revisions > 0) {
@@ -9207,8 +9251,20 @@ export function renderTaskBoard(input                )         {
   const doing = input.inProgress === undefined ? '' : input.inProgress.replace(/\s+/gu, ' ').trim()
   if (doing.length === 0) {
     lines.push('- 无（断点落在一个已闭合的轮次之间）。')
+  } else if (sameTextHead(doing, request) || (currentGoal.length > 0 && sameTextHead(doing, currentGoal))) {
+    /**
+     * ── C2: SAY THAT IT IS THE SAME THING, INSTEAD OF PRINTING IT TWICE ──────────────────────────
+     *
+     * The duplicate is not harmless. Two identical paragraphs read as two agreeing facts, so whatever
+     * they say arrives with double weight — and the reader spends attention confirming that the
+     * second one really does say the same thing. Naming it as a pointer costs one line and removes
+     * the false confirmation.
+     */
+    lines.push(
+      '- （与上面的「原始用户要求」/「当前目标」同一段文本，不重复渲染；断点落在该轮次中，未闭合。）',
+    )
   } else {
-    lines.push(`- ${truncateEnd(doing, 300).text}`)
+    lines.push(`- ${truncateForDisplay(doing, 300)}`)
   }
 
   // ⏭️ 待开始 — the next action FIRST, rest after. This is the column the ignition
@@ -9223,7 +9279,7 @@ export function renderTaskBoard(input                )         {
         : '- 按上面的「原始用户要求」继续推进，并验证结果。',
     )
   } else {
-    for (const item of pending.slice(0, 4)) lines.push(`- ${truncateEnd(item, 200).text}`)
+    for (const item of pending.slice(0, 4)) lines.push(`- ${truncateForDisplay(item, 200)}`)
     if (pending.length > 4) lines.push(`- 其余 ${pending.length - 4} 项按清单顺序处理。`)
   }
 
@@ -9279,7 +9335,15 @@ export function renderTaskBoard(input                )         {
   if (input.stopPoint.boundarySeq !== undefined && input.stopPoint.boundarySeq > 0) {
     stop.push(`边界 seq=${input.stopPoint.boundarySeq}`)
   }
-  if (input.pointerCount > 0) stop.push(`可回读指针 ${input.pointerCount} 处`)
+  /**
+   * ── C4: TWO DIFFERENT COUNTS, TWO DIFFERENT NAMES ────────────────────────────────────────────────
+   *
+   * `pointerCount` is how many pointers were WRITTEN into the tape. The index's own total (see the
+   * "共 N 处可回读" line elsewhere in this file) is `pointerCount + Σ userTexts` — it counts the
+   * user messages too, because those are also readable by seq. Both numbers are correct; printing
+   * one of them under the name of the other is what made "811 vs 1347" look like an arithmetic bug.
+   */
+  if (input.pointerCount > 0) stop.push(`本索引列出可回读指针 ${input.pointerCount} 处（另有用户原话可按 seq 回读，故「共 N 处」会更大）`)
   if (input.sourceSessionId !== undefined && input.sourceSessionId.length > 0) {
     stop.push(`sourceSessionId=${input.sourceSessionId}`)
   }
