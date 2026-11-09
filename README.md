@@ -413,7 +413,7 @@ UI 与命令共用一份实现，而且在客户端 bundle 尚未加载时，命
 
 | 项 | 结果 | 证据 |
 |---|---|---|
-| 全量测试 | graft **591/591**、memory **415/415** | `node --test test/*.test.mjs`（两仓库） |
+| 全量测试 | graft **598/598**、memory **415/415** | `node --test test/*.test.mjs`（两仓库） |
 | 文档/打包一致性 | `check-docs` 27 项一致、`verify-bundle` 27/27 | 同上 |
 | 幽灵条目清理 | projcache **574 → 10**（幽灵 564 → 0）、`retired` **5 → 0**、`targets` **8 → 0** | `scripts/prune-ghosts.mjs`（隔离到 `_quarantine-ghost-<ts>/`，含 `MANIFEST.json` + `restore.ps1`，**未删除任何文件**） |
 | 调试面板 | 真机注册表可查到 `graft_debug_status`；CLI 输出与取证报告逐项吻合 | `cordis_inspect_query Tool.listTools`、`scripts/debug-status.mjs` |

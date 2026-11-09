@@ -49,12 +49,12 @@
 
 | 项 | 内容 |
 |---|---|
-| 现状 | **v7.7 起：`src/index.ts` 13,271 行 / 12,742 非空**（v7.6 为 12,614；本轮接入彼岸层只增不减，见 TD-8）。**行数口径：`wc -l`** —— `content.split(/\r?\n/)`，且文件以换行结尾时不计末尾空项；非空行 = 该数组中 `trim().length > 0` 的个数。已抽出 `core/host-shape.ts`（996 行）、`core/ignition.ts`（1,005 行）与 `core/paradise-write.ts`（240 行）。剩余部分仍含 90+ 导出、约 60 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册 |
+| 现状 | **`src/index.ts` 12,887 行 / 12,383 非空**（G5 之后；搬运前为 13,271 / 12,742）。**行数口径：`wc -l`** —— `content.split(/\r?\n/)`，且文件以换行结尾时不计末尾空项；非空行 = 该数组中 `trim().length > 0` 的个数。已抽出 `core/host-shape.ts`（996 行）、`core/ignition.ts`（1,005 行）、`core/paradise-write.ts`（240 行）与 `core/task-state.ts`（564 行，G5）。剩余部分仍含 90+ 导出、约 60 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册 |
 | 影响 | 单文件让「改 A 碰坏 B」的排查成本变高；diff review 困难；IDE 索引与增量构建变慢；新人无法按职责分层阅读 |
 | 为什么现在不动 | 见下方 TD-7：本轮只搬了「与彼岸层真正重叠」的两块。剩下的搬运是纯位移，不减复杂度，且 84 个测试文件直接 import 那些区域的 30 个符号 |
 | 退出条件（可验收） | ① 按职责拆成 `session-slice.ts` / `tape.ts` / `injection.ts` / `ledger.ts` / `guards.ts` / `console.ts` / `tools.ts` 等模块，每个 ≤ 800 行；② `index.ts` 只保留 `apply()` 装配与再导出，≤ 300 行；③ **拆前后测试数不变、全绿**；④ `scripts/build.mjs` 的产物字节差异仅来自模块边界（banner 与 import 语句）；⑤ 每个模块导出面的 `grep` 参考计数与拆前一致（防止顺手删了导出） |
 | 建议节奏 | 一次只搬一个模块，搬完立刻跑全量 + 真机切片一次；不与其他行为改动混在同一次提交 |
-| 进度 | ✅ `core/host-shape.ts`（v7.6，996 行：身份元数据 / 四个消息构造器 / materializeTape / buildInjectionEvents / assertColdLog / extractActiveGoalChange / 系统头与红线）<br>✅ `core/ignition.ts`（v7.6，921 行 → v7.7 1,005 行：点火通道 + 每目标准入 + 持久队列 + 重试 + 回滚）<br>✅ `core/paradise-write.ts`（v7.7，240 行：彼岸层桥接 —— 懒加载、按 ctx 缓存、具名拒绝）<br>⏳ 存储/账本层（约 1,517 行）<br>⏳ 工具注册层（约 4,119 行） |
+| 进度 | ✅ `core/host-shape.ts`（v7.6，996 行：身份元数据 / 四个消息构造器 / materializeTape / buildInjectionEvents / assertColdLog / extractActiveGoalChange / 系统头与红线）<br>✅ `core/ignition.ts`（v7.6，921 行 → v7.7 1,005 行：点火通道 + 每目标准入 + 持久队列 + 重试 + 回滚）<br>✅ `core/paradise-write.ts`（v7.7，240 行：彼岸层桥接 —— 懒加载、按 ctx 缓存、具名拒绝）<br>✅ `core/task-state.ts`（G5，564 行：`extractTaskState` + `checkTaskBoundary` + `checkSafeHarbor` + 它们共用的 `splitSentences` / `orderedBySeq` / todo 与 report 的解析助手；**纯搬运，导出面 180 不变，测试 598 不变**）<br>⏳ 存储/账本层（约 1,517 行）<br>⏳ 工具注册层（约 4,119 行） |
 
 ### TD-7 存储层与工具层「未搬移」（P2，v7.6 登记）
 
@@ -154,7 +154,7 @@
 | 后果（机制，不是猜测） | 模型想交接时，**它能表达的唯一方式是触发自动提取**；而自动提取读的是**它上一轮写的 TODO** —— 那正是它此刻想覆盖的东西。于是：**轮次中途的「我想交接什么」无法表达；未更新 TODO 时，交接单反映的是上一轮状态。** |
 | 建议修法 | 新增**可选** `handover?: { goal?, pending?, constraints?, notes? }`：提供则**覆盖**对应字段；`review` 里标注「本段由模型提供」；**`digest` 必须把 `handover` 计入** —— 否则「用户审阅的是这一版」这条保证失效（digest 是审阅对象的指纹）。 |
 | 与 G5 的关系 | G5 要搬的 `buildPendingState` / `renderTaskBoard` **正是这套自动提取的实现**。所以在 TD-11 的方案定下来之前，**G5 只搬 `extractTaskState` / `checkTaskBoundary` / `checkSafeHarbor` 三件套**，不搬 `buildPendingState` / `renderTaskBoard` —— 避免搬完就改。 |
-| 退出条件（可验收） | ① 模型提供 `handover` 时，`review` 与 `digest` **都**反映它；② 不提供时行为不变（598 条测试全绿）；③ digest 变化必须能被「用户确认过的 digest」检查捕获（提供与不提供是两份不同的 digest）。 |
+| 退出条件（可验收） | ① 模型提供 `handover` 时，`review` 与 `digest` **都**反映它；② 不提供时行为不变（现状 **598 条测试**全绿）；③ digest 变化必须能被「用户确认过的 digest」检查捕获（提供与不提供是两份不同的 digest）。 |
 
 ## 本次发版（v0.22）**不做**的事
 
