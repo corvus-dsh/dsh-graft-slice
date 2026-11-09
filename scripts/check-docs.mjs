@@ -31,7 +31,14 @@ function check(id, ok, detail) {
 const manifest = JSON.parse(read('manifest.json'))
 const pkg = JSON.parse(read('package.json'))
 const readme = read('README.md')
-const readmeEn = read('README.en.md')
+/**
+ * README.en.md is deliberately NOT read by this gate.
+ *
+ * It is a FROZEN TRANSLATION: `check-readme-counts.mjs` forbids present-tense counts inside it, so any
+ * assertion here that demanded today's numbers would fight that rule and leave only one way out —
+ * editing a document whose purpose is to stay historical. It is still checked for one thing (no
+ * present-tense claim), by that other script, where the rule belongs.
+ */
 const buildScript = read('scripts/build.mjs')
 const source = read('src/index.ts')
 const built = read('index.js')
@@ -101,9 +108,19 @@ check(
 )
 if (count !== undefined) {
   const claims = []
+  /**
+   * ── README.en.md IS EXCLUDED, ON PURPOSE (2026-11-09) ──────────────────────────────────────────
+   *
+   * It used to be scanned here. That put two gates in direct conflict: README.en.md is now a FROZEN
+   * TRANSLATION (its header says so, and `check-readme-counts.mjs` FACT 6 forbids present-tense counts
+   * in it), while this loop demanded that every "N tests" in it match today's count. The result was a
+   * red gate whose only exit was rewriting a document that exists to be historical.
+   *
+   * A gate must not force edits to a frozen record. The Chinese README is this repository's living
+   * document and is fully covered; the English one is a snapshot with its own, narrower rule.
+   */
   for (const [name, text] of [
     ['README.md', readme],
-    ['README.en.md', readmeEn],
   ]) {
     for (const match of text.matchAll(/(\d+)\s*(?:个测试|tests?\b)/gu)) {
       // A dated snapshot section may quote the count of that build; it must
