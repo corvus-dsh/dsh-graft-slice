@@ -37,16 +37,27 @@ const GATE = join(REPO, 'scripts', 'check-readme-counts.mjs')
 /**
  * Build a throwaway repository whose test script "reports" `pass 604`, so the gate's measured
  * count is deterministic and no real suite has to run.
+ *
+ * ── WHY A SCRIPT FILE AND NOT `node -e "…"` ──────────────────────────────────────────────────────
+ *
+ * The first version wrote `scripts.test = 'node -e "console.log(\'pass 604\')"'` and passed on
+ * Windows, where the command runs through `cmd.exe`. On Linux CI it runs through `sh -c`, where
+ * those nested quotes do not mean what they mean in cmd — and **Node 22 failed while Node 24
+ * passed**, which is exactly the kind of quote-handling difference that is invisible on the
+ * developer's machine.
+ *
+ * Writing a small `.mjs` file and invoking `node <file>` has no quoting at all, so the gate is
+ * tested for what it does rather than for how the shell parses a string.
  */
-function fakeRepo({ readme, name = '@corvus-dsh/dsh-graft-slice' }) {
+function fakeRepo({ readme, name = '@corvus-dsh/dsh-graft-slice', passCount = 604 }) {
   const root = mkdtempSync(join(tmpdir(), 'dsh-gate-'))
+  writeFileSync(join(root, 'fake-suite.mjs'), `console.log('pass ${passCount}')\n`, 'utf8')
   writeFileSync(
     join(root, 'package.json'),
     JSON.stringify({
       name,
       version: '0.9.2-beta.1',
-      // `shell: true` in the gate, so this must be a shell command. No quotes needed.
-      scripts: { test: 'node -e "console.log(\'pass 604\')"' },
+      scripts: { test: 'node fake-suite.mjs' },
     }),
     'utf8',
   )
