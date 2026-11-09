@@ -33,40 +33,65 @@ const GRAFT_SOURCE = join(REPO, 'src', 'contracts', 'model-wording.ts')
 const OBSERVER_SOURCE = resolve(REPO, '..', 'dsh-observer', 'src', 'core', 'monitor.ts')
 
 /**
- * Extract a regex literal assigned to `const <name> =` / declared as `re:` in an object.
+ * Extract the regex literal that the consumer actually uses.
  *
- * Both files place the pattern on ONE line, so a line-anchored extraction is enough — and it is
- * deliberately strict: if either file is reformatted so the literal spans lines, this helper returns
- * undefined and the test fails loudly instead of comparing nothing.
+ * Under A′ the contract file holds TWO related lines:
+ *
+ *     export const TODO_TOOL_NAME = /(?:^|[^a-z0-9])todo[_-]?write$/iu     ← the binding to compare
+ *     export const TODO_TOOL_NAME_CONTRACT = { re: TODO_TOOL_NAME, … }     ← metadata, not a literal
+ *
+ * The first version of this helper searched for `re:` first and picked up `/…/iu` from a COMMENT
+ * earlier in the file, so it compared a placeholder against the real pattern and reported a drift
+ * that did not exist. So: prefer an actual `= /…/flags` assignment, and skip `/…/` placeholders.
  */
 function literalOf(source, constName) {
   const lines = source.split(/\r?\n/u)
-  for (const [index, line] of lines.entries()) {
-    const isConst = new RegExp(`\\bconst\\s+${constName}\\s*=`, 'u').test(line)
-    const isProp = new RegExp(`\\b${constName}\\s*=\\s*\\{`, 'u').test(line) || new RegExp(`^\\s*re:\\s*/`, 'u').test(line)
-    // Contract-object declarations put the regex on a `re:` line; locate it by proximity to the name.
-    if (!isConst && !isProp) continue
-    // For `export const X: WordingPattern = {` the regex is on a later `re:` line.
-    for (let cursor = index; cursor < Math.min(index + 12, lines.length); cursor += 1) {
-      const candidate = lines[cursor]
-      const start = candidate.indexOf('/')
-      if (start < 0) continue
-      // Skip the comment/URL slashes by requiring a plausible regex opening.
-      if (!/\/[\^(\[\\a-zA-Z\u4e00-\u9fff]/u.test(candidate.slice(start))) continue
-      let i = start + 1
-      let inClass = false
-      while (i < candidate.length) {
-        const ch = candidate[i]
-        if (ch === '\\') { i += 2; continue }
-        if (ch === '[') inClass = true
-        else if (ch === ']') inClass = false
-        else if (ch === '/' && !inClass) {
-          const flags = /^[a-z]*/u.exec(candidate.slice(i + 1))?.[0] ?? ''
-          return `${candidate.slice(start, i + 1)}${flags}`
-        }
-        i += 1
+
+  /** Pull a `/body/flags` literal starting at a given `=`/`:` position on a line. */
+  const literalFrom = (line) => {
+    const eq = line.search(/=\s*\//u)
+    const colon = line.search(/:\s*\//u)
+    const at = eq >= 0 ? eq : colon
+    if (at < 0) return undefined
+    const start = line.indexOf('/', at)
+    if (start < 0) return undefined
+    let i = start + 1
+    let inClass = false
+    while (i < line.length) {
+      const ch = line[i]
+      if (ch === '\\') { i += 2; continue }
+      if (ch === '[') inClass = true
+      else if (ch === ']') inClass = false
+      else if (ch === '/' && !inClass) {
+        const flags = /^[a-z]*/u.exec(line.slice(i + 1))?.[0] ?? ''
+        const body = line.slice(start + 1, i)
+        // A placeholder like `/…/` is not a pattern.
+        if (body.trim() === '…' || body.trim() === '...') return undefined
+        return `/${body}/${flags}`
       }
+      i += 1
     }
+    return undefined
+  }
+
+  // 1. an actual declaration of this name assigned to a literal
+  for (const line of lines) {
+    if (!new RegExp(`\\b(?:const|let|var)\\s+${constName}\\s*=\\s*/`, 'u').test(line)) continue
+    const literal = literalFrom(line)
+    if (literal !== undefined) return literal
+  }
+
+  // 2. the name used as a `re:` value — resolve it to the OTHER declaration it points at
+  for (const line of lines) {
+    if (!new RegExp(`\\b${constName}\\s*=\\s*\\{`, 'u').test(line)) continue
+    // Nothing more to do: the object form has no literal of its own.
+  }
+
+  // 3. any line mentioning the name near a literal (last resort, still skips placeholders)
+  for (const line of lines) {
+    if (!new RegExp(`\\b${constName}\\b`, 'u').test(line)) continue
+    const literal = literalFrom(line)
+    if (literal !== undefined) return literal
   }
   return undefined
 }

@@ -25,11 +25,11 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { EMPHATIC, PROHIBITION_PLUS_ACT, TODO_TOOL_NAME, WIDE_CONSTRAINT } from '../src/contracts/model-wording.ts'
+import { ALL_CONTRACTS } from '../src/contracts/model-wording.ts'
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
 const CORPUS = resolve(REPO, '..', '_scratch', 'real-texts.json')
-const CONTRACTS = [TODO_TOOL_NAME, WIDE_CONSTRAINT, EMPHATIC, PROHIBITION_PLUS_ACT]
+const CONTRACTS = ALL_CONTRACTS
 
 const corpus = existsSync(CORPUS)
   ? JSON.parse(readFileSync(CORPUS, 'utf8')).map((entry) => entry.text)

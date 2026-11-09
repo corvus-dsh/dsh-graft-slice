@@ -1,20 +1,26 @@
 /**
- * ── THE FOUR CONTRACTS WITH REAL MISFIRES ────────────────────────────────────────────────────────
+ * ── S1b-2 / A′ 形态：同一绑定，两份导出 ──────────────────────────────────────────────────────
  *
- * Every `nearMiss` below is `real-misfire` or `real-nearby`: text cut from the 9153 real text blocks
- * the review supplied (`测试用真实日志/`, 86 `session.v4.jsonl.zstd`). None is invented — an invented
- * near miss proves only that I can imagine a sentence that does not match.
+ * `WordingPattern` 携带元数据（intent / samples / nearMisses / caveat），而生产代码需要一个**裸
+ * RegExp**。`bundle.mjs` 把所有模块内联进一个作用域、剥掉 `export`、删除 import、不做别名重写，
+ * 所以「对象 vs 正则」的转换没有地方可放——实测报 `TypeError: X.test is not a function`。
  *
- * The evidence for each is reproducible: `_scratch/extract-contract-evidence.mjs` and
- * `_scratch/broaden-misfire-search.mjs` re-derive every string here from `_scratch/real-texts.json`,
- * and `test/contracts-model-wording.test.mjs` asserts that each `real-*` near miss still behaves as
- * claimed (misfires really match, near-by really does not).
+ * 解法是**同一个绑定导出两次**：
  *
- * ── WHAT THESE CONTRACTS DO *NOT* CLAIM ────────────────────────────────────────────────────────
+ *     export const TODO_TOOL_NAME = /…/iu                      ← 裸正则，生产代码用
+ *     export const TODO_TOOL_NAME_CONTRACT = { re: TODO_TOOL_NAME, … }   ← 元数据，只有测试用
  *
- * None of them is a judgement. Two are explicitly heuristics with a stated boundary. The value of
- * writing them down is that the boundary is now a sentence someone can argue with, instead of a
- * regex someone has to reverse-engineer.
+ * 这样：
+ *   - 消费方 `import { TODO_TOOL_NAME }` 拿到的就是正则，**函数体零改动**；
+ *   - 元数据对象与正则共享**同一个绑定**，结构性不可能漂移（不需要 `X.re === X_RE` 那种测试）；
+ *   - `*_CONTRACT` 只在测试里 import，所以**不进 bundle**——导出面不变，撞名风险为零。
+ *
+ * ── 命名映射：契约沿用生产名（用户裁定 (i)）────────────────────────────────────────────────────
+ *
+ * 变量名承载「在哪里被引用」的机械性，`name` 字段承载「这是什么」的语义。两者不必相同：
+ *
+ *     CONSTRAINT_PATTERN   ← 生产名（消费方零改动），name: 'WIDE_CONSTRAINT'
+ *     STANDING_PROHIBITION ← 生产名，name: 'PROHIBITION_PLUS_ACT'
  */
 import type { WordingPattern } from './types.js'
 
@@ -31,13 +37,14 @@ import type { WordingPattern } from './types.js'
  *
  * A SECOND IMPLEMENTATION EXISTS: `dsh-observer/src/core/monitor.ts` carries the same pattern under
  * the name `TODO_TOOL`, with the comment "exactly like graft does". The two are separate plugins and
- * cannot share code, so `test/contracts-todo-parity.test.mjs` compares the two SOURCE files character
- * by character. If one drifts, the observer starts believing the main's TODO never moved — and then
- * nudges it for being stalled, blaming the model for the plugin's own disagreement.
+ * cannot share code (observer must not depend on graft), so `test/contracts-todo-parity.test.mjs`
+ * compares the two SOURCE files character by character.
  */
-export const TODO_TOOL_NAME: WordingPattern = {
+export const TODO_TOOL_NAME = /(?:^|[^a-z0-9])todo[_-]?write$/iu
+
+export const TODO_TOOL_NAME_CONTRACT: WordingPattern = {
   name: 'TODO_TOOL_NAME',
-  re: /(?:^|[^a-z0-9])todo[_-]?write$/iu,
+  re: TODO_TOOL_NAME,
   intent: '这次工具调用的名字是不是 todo_write（含 mcp__x__todo_write / foo/todo-write 这类命名空间写法）',
   samples: [
     {
@@ -65,7 +72,7 @@ export const TODO_TOOL_NAME: WordingPattern = {
 }
 
 /**
- * ── 2. WIDE_CONSTRAINT ─────────────────────────────────────────────────────────────────────────
+ * ── 2. CONSTRAINT_PATTERN（契约名 WIDE_CONSTRAINT）──────────────────────────────────────────────
  *
  * WIDE CONSTRUCTION — a RECALL HEURISTIC, NOT A CONSTRAINT JUDGEMENT.
  *
@@ -84,9 +91,11 @@ export const TODO_TOOL_NAME: WordingPattern = {
  * vocabulary is NOT being narrowed: removing `if` / `only` would lose recall on real rules that use
  * those words, and the misfires would simply move.
  */
+export const CONSTRAINT_PATTERN = /(必须|禁止|绝对|不能|不得|不许|务必|第\s*\d+\s*行|CHECKSUM_42|如果|则|除非|仅有|只有|否则|优先|\bmust\b|\bnever\b|\bforbidden\b|\bline\s+\d+\b|\bdo not\b|\bdon't\b|\bcannot\b|\brequired\b|\bconstraint\b|\bif\b|\bthen\b|\bunless\b|\bonly\b|\bprefer\b|\balways\b|\bbefore\s+you\b|\bend\s+every\b)/iu
+
 export const WIDE_CONSTRAINT: WordingPattern = {
   name: 'WIDE_CONSTRAINT',
-  re: /(必须|禁止|绝对|不能|不得|不许|务必|第\s*\d+\s*行|CHECKSUM_42|如果|则|除非|仅有|只有|否则|优先|\bmust\b|\bnever\b|\bforbidden\b|\bline\s+\d+\b|\bdo not\b|\bdon't\b|\bcannot\b|\brequired\b|\bconstraint\b|\bif\b|\bthen\b|\bunless\b|\bonly\b|\bprefer\b|\balways\b|\bbefore\s+you\b|\bend\s+every\b)/iu,
+  re: CONSTRAINT_PATTERN,
   intent: '这句话像不像一条持久的约束（**召回用**，宽；单独使用会误命中，见 caveat）',
   samples: [
     {
@@ -119,13 +128,15 @@ export const WIDE_CONSTRAINT: WordingPattern = {
  * scorer, `strong` in the LLM-path filter). They served the same semantic — "this reads as emphatic" —
  * and differed only by accident of who wrote them.
  *
- * REAL MISFIRE: completion reports. "Only that file … was written" is a STATEMENT OF WHAT HAPPENED;
- * `only` there restricts a set, it does not forbid anything. The corpus is full of these because a
- * model finishing a task reports exactly this way.
+ * NOTE: it is exported but NOT yet imported by production code. The scorer still uses two inline
+ * literals (`hard`, `strong`); wiring those is part of the remaining S1b-2 work, not this step. The
+ * contract is declared now so the test can pin its real misfires.
  */
-export const EMPHATIC: WordingPattern = {
+export const EMPHATIC = /(\bmust\b|\bnever\b|\bdon't\b|\bdo not\b|\bcannot\b|\balways\b|\bonly\b|必须|禁止|绝对|不能|不得|务必|只能|始终|绝不)/iu
+
+export const EMPHATIC_CONTRACT: WordingPattern = {
   name: 'EMPHATIC',
-  re: /(\bmust\b|\bnever\b|\bdon't\b|\bdo not\b|\bcannot\b|\balways\b|\bonly\b|必须|禁止|绝对|不能|不得|务必|只能|始终|绝不)/iu,
+  re: EMPHATIC,
   intent: '这句话里有没有硬强调词（**加权 +2 用**，不作门禁）',
   samples: [
     {
@@ -141,23 +152,18 @@ export const EMPHATIC: WordingPattern = {
       why: '完成汇报：`Only that file … written` 是在限定「只写了这一个文件」，是对已发生事实的描述，不是禁令。',
     },
     {
-      // NOT a misfire — measured: `no restart` is not in this pattern's vocabulary, so it does not
-      // match at all. Recorded as `real-nearby` because that is what it is: real text that reads like
-      // a prohibition and correctly does not fire. The first draft labelled it `real-misfire`, and the
-      // "must actually match" assertion caught the mistake — which is the reason that assertion exists.
       text: 'task-4 COMPLETE. Deliverable: dsh-sidecar\\docs\\RECOVERY-DEPLOY.md (273 lines, UTF-8 中文). No restart, no source…',
       kind: 'real-nearby',
-      why: '同样是完成汇报，但 `No restart` 不在本契约词表内（词表只有 must/never/cannot/only 等），因此正确地不命中。它证明边界的位置：英文的 "No X" 形式不在覆盖范围内。',
+      why: '同样是完成汇报，但 `No restart` 不在本契约词表内，因此正确地不命中。它证明边界的位置。',
     },
   ],
   caveat:
     '`only` / `cannot` / `no …` 在**描述性英文**里极常见，而模型汇报工作时正好这样写。' +
-    '所以这条只能加分，不能单独决定「这是一条约束」——它必须与「谁说的」' +
-    '（isHumanAuthored）和「是不是问句」（isQuestionLike）联合使用。',
+    '所以这条只能加分，不能单独决定「这是一条约束」。',
 }
 
 /**
- * ── 4. PROHIBITION_PLUS_ACT ─────────────────────────────────────────────────────────────────────
+ * ── 4. STANDING_PROHIBITION（契约名 PROHIBITION_PLUS_ACT）───────────────────────────────────────
  *
  * The question: is this a STANDING prohibition against a destructive act (as opposed to a one-off
  * instruction like "delete D:\X\repair-log.cjs")?
@@ -169,12 +175,16 @@ export const EMPHATIC: WordingPattern = {
  * REAL MISFIRE, AND IT IS THE HARD KIND: `因沙箱禁止递归删除未能自动清除` contains 禁止 followed by 删除
  * inside the window. It is a STATUS EXPLANATION — "the sandbox forbade it, so it was not cleaned up".
  * Character-for-character this is indistinguishable from the instruction it resembles; only the
- * subject tells them apart. **This is a known, unfixed boundary**, recorded rather than papered over:
- * a 12-character window cannot see who is forbidding what.
+ * subject tells them apart. **This is a known, unfixed boundary**, recorded rather than papered over.
+ *
+ * NOTE: exported but NOT yet imported by production (which still declares its own literal). Wiring is
+ * remaining S1b-2 work.
  */
+export const STANDING_PROHIBITION = /(禁止|严禁|绝不|不要|不得|不能|务必|必须|每次|任何|一律|永远|始终|never|always|must|do not|don't|only)[^。；\n]{0,12}?(删除|删掉|移除|清空|清理|\brm\b|\bdel\b|\bdelete\b|\bremove\b|\bdrop\b|\bunlink\b)/iu
+
 export const PROHIBITION_PLUS_ACT: WordingPattern = {
   name: 'PROHIBITION_PLUS_ACT',
-  re: /(禁止|严禁|绝不|不要|不得|不能|务必|必须|每次|任何|一律|永远|始终|never|always|must|do not|don't|only)[^。；\n]{0,12}?(删除|删掉|移除|清空|清理|\brm\b|\bdel\b|\bdelete\b|\bremove\b|\bdrop\b|\bunlink\b)/iu,
+  re: STANDING_PROHIBITION,
   intent: '这是不是一条针对破坏性动作的**持久禁令**（区别于「删掉 D:\\X\\repair-log.cjs」这类一次性操作）',
   samples: [
     {
@@ -183,9 +193,6 @@ export const PROHIBITION_PLUS_ACT: WordingPattern = {
       seq: 7693,
     },
     {
-      // The same red-line block is re-asserted on many later turns (seq 7922 / 8072 / 9244 / 9476 /
-      // 9724 / 10140 …) and fires every time. That is the intended behaviour: a red line does not
-      // become less binding because it was repeated.
       text: '6. **resolve 层"最多 8 项"是死代码**（3 项白名单+去重，永远到不了）→ 删掉，上限只留在 `encodeSecurityCapabilities` 的结构边界。',
       source: 'auto-graft-mw7jlaxh-8gtiyl/session.v4.jsonl.zstd',
       seq: 5679,
@@ -201,6 +208,13 @@ export const PROHIBITION_PLUS_ACT: WordingPattern = {
   caveat:
     '**已知未修的边界**：`因沙箱禁止递归删除未能自动清除` 与 `禁止删除任何脚本` 在这条正则看来一模一样。' +
     '区分它们需要看主语（谁在禁止谁），而正则没有主语的概念。' +
-    '12 字符窗口是刻意的（更宽会保留本应丢弃的句子），但窗口救不了这个 case——' +
-    '把它记成「方法的边界」而不是「待修的 bug」，因为收窄窗口会先破坏它存在的理由。',
+    '12 字符窗口是刻意的（更宽会保留本应丢弃的句子），但窗口救不了这个 case。',
 }
+
+/** Every contract, for tests to iterate. Metadata only — never imported by production code. */
+export const ALL_CONTRACTS: readonly WordingPattern[] = [
+  TODO_TOOL_NAME_CONTRACT,
+  WIDE_CONSTRAINT,
+  EMPHATIC_CONTRACT,
+  PROHIBITION_PLUS_ACT,
+]
