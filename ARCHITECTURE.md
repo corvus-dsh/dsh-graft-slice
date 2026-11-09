@@ -132,6 +132,20 @@
 
 ---
 
+## TD-16 命令护栏 `format` / `-Force` 的修正方案：已在沙箱验证，**等裁定后才落地**（P1，2026-11-10 登记）
+
+| 项 | 内容 |
+|---|---|
+| 实测缺陷（复现） | 触发需要**两个因子同时存在**，单独测任一个都不复现——这是我第一次误判「不复现」的原因：<br>`Get-ChildItem -Force 'D:\x'` → safe<br>`Get-ChildItem 'D:\x' \| Format-Table` → safe<br>**`Get-ChildItem -Force 'D:\x' \| Format-Table` → DENY**（只读操作被当成递归删除）<br>历史实测（源会话 seq=5630）：**11 条普通只读命令里 5 条被拦**。 |
+| 根因一：`format` 是动词还是 cmdlet | `DESTRUCTIVE_VERB` 含裸词 `format`，因此 `Format-Table` / `Format-List`（PowerShell 的**渲染** cmdlet）命中「格式化磁盘」这个动词。 |
+| 根因二：`-Force` 被当成递归 | `RECURSIVE_FLAG` 含 `-force`，而判定式是 `deny if recursive && outsideWorkspace`，于是**含 `-Force` 反而让工作区内的删除被豁免**。方向完全反了：`-Force` 正是让一次删除变得不可挽回的那个标志。<br>实测：`Remove-Item -Recurse -Force .\build` → **safe**。 |
+| 根因三（有争议） | 递归删除只要「在工作区内」就放行。但 `isInsideWorkspace` 分不出 `.\build` 和 `.\src`。 |
+| 沙箱验证的分半结果 | 两个沙箱变体，**当时**（2026-11-10，全量 640 条）：<br>**D1+D2**（format 归位 + `-Force` 不再等于递归）→ 当时 **639 绿 / 1 红**，红的只有本提案自己的测试，**既有测试零回归**；<br>**D1+D2+D3**（再让递归删除一律拒绝）→ **637 绿 / 3 红**，三条都是既有 `v81-guardrails` / `v018-policy` 断言「工作区内递归删除应放行」。 |
+| 为什么不直接落地 | **D3 与既有设计正面冲突，且旧设计的理由成立到值得尊重**：旧测试原话是「confined work is NOT blocked（a guard that blocks ordinary work gets switched off）」，并明确断言 `rm -rf node_modules`、`Remove-Item -Recurse -Force D:\workspace\dsh-memory\lib` 放行。这不是我单方面能推翻的判断——用户已裁定「先保留不动，只在沙箱测试，效果进报告等裁定」。 |
+| 待裁定的选项 | ① 只落 D1+D2（零回归，修掉 5/11 的误拦，但 `Remove-Item -Recurse -Force .\build` 仍放行）；② D1+D2+D3（更严，须改写 3 条既有断言并记录这次行为变更）；③ 折中（只拒 `-Recurse .` / `-Recurse ./` 这类无明确子路径形态）。 |
+| 产出位置 | 修正方案以脚本形式保存在 `_scratch/fix-d-*.mjs`（可重放），完整 diff 存 `_scratch/d-family-full.patch`。**生产 `src/index.ts` 零改动**——`git status` 只有新增的测试文件。 |
+| 退出条件 | 裁定后：按选定选项落地对应脚本 → 全量测试数字与裁定前一致（或差异逐条说明）→ 删除未选中的沙箱脚本 → 本 TD 归档并记一行「于 vX.Y 落地选项 N」。 |
+
 ## TD-15 结构判据的四道门：A1/A2 锁同一路径，A4 是同进程内的第二道保险（P2，2026-11-10 登记）
 
 | 项 | 内容 |
