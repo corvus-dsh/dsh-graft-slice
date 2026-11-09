@@ -671,6 +671,32 @@ export interface GraftConfig {
    */
   focusAfterGraft?: 'never' | 'always' | 'manual-only'
   /**
+   * v0.9.5 (TD-11): whether `graft_prepare` may accept a hand-written handover.
+   *
+   * ── A SWITCH THAT DOES NOTHING YET, DECLARED ON PURPOSE ──────────────────────────────────────
+   *
+   * The handoff is TWO-STAGE (`graft_prepare` → review → `graft_commit`), but only the first half of
+   * "check and correct the handoff before committing" was ever built: `graft_commit` takes
+   * `preparedId` + `digest` and nothing else, so stage two can AGREE with the extracted content and
+   * cannot EDIT it. `graft_prepare`'s parameter list has no content field either
+   * (`additionalProperties: false`, three properties).
+   *
+   * That is a gap, not a fault — and it is the quiet kind: nothing errors, the card simply describes
+   * the PREVIOUS turn's todo list because that is the only thing there is to extract from.
+   *
+   * **NOTHING IS WIRED TO THIS FIELD.** It parses, it round-trips through the config, and it changes
+   * no behaviour at either value. The intended semantics, when it is built:
+   *   - `true`  → `graft_prepare` accepts an optional `handover: { goal?, pending?, constraints?, notes? }`
+   *                that OVERRIDES the extracted fields, and the review marks those sections as
+   *                "provided by the model";
+   *   - the `digest` MUST include `handover`, or "the user approved THIS version" stops meaning
+   *                anything (the digest is the fingerprint of what was reviewed).
+   *
+   * Declared now, with this comment and ARCHITECTURE.md TD-11, so that shipping an inert switch is a
+   * documented decision rather than a surprise — the same standard `focusAfterGraft` is held to.
+   */
+  handoverEditable?: boolean
+  /**
    * v7.4 (decision 2): let the TASK STATE, not just the conversation shape, pick
    * the replay tier. Off by default.
    *
@@ -1117,6 +1143,9 @@ export function normalizeConfig(config: GraftConfig | undefined): Required<Graft
       input.focusAfterGraft === 'always' || input.focusAfterGraft === 'manual-only'
         ? input.focusAfterGraft
         : 'never',
+    // v0.9.5 (TD-11): parsed and carried, wired to NOTHING. Both values behave identically
+    // today; the field exists so the intended shape is on record before it is built.
+    handoverEditable: input.handoverEditable === true,
     // v7.4 (decision 2): off unless asked. See the config doc for why n=1 is not
     // enough evidence to make this the default.
     autoAdaptiveTier: input.autoAdaptiveTier === true,
@@ -4508,7 +4537,19 @@ export function buildTape(
   )
   // 硬约束 7: provenance for inherited constraints goes FIRST in the pending
   // state, ahead of every other line a reader might act on.
-  const constraintAnchor = inheritedConstraintAnchor(events, sourceSessionId)
+  //
+  // v0.9.3: the generation comes from the MARK, not from counting blocks. Same source as
+  // `plan.generation` -> `goalMessage`'s `graft_generation`, so the card and the goal of one
+  // handoff cannot disagree about which generation this is.
+  //
+  // Read HERE rather than threaded in as a new `buildTape` parameter: the mark of the source
+  // session is a fact about the log we were handed, and a caller-supplied number could be
+  // wrong in a way this function could not detect. `buildTape` stays a pure function of
+  // (events, config, sourceSessionId) — the state lookup is the same one `findConstraintProvenance`
+  // already does a few lines up.
+  const anchorGeneration =
+    sourceSessionId !== undefined && sourceSessionId.length > 0 ? graftGenerationOf(sourceSessionId) : 0
+  const constraintAnchor = inheritedConstraintAnchor(events, sourceSessionId, anchorGeneration)
   // v7.6 (Model-Driven): the target boots itself.
   //
   // A grafted session whose first move is "waiting for the user" throws away the
@@ -4680,6 +4721,7 @@ export function buildTape(
 export function inheritedConstraintAnchor(
   events: readonly SessionEventLike[],
   sourceSessionId: string,
+  sourceGeneration = 0,
 ): string | undefined {
   // v7.4: only the GOAL counts as the origin.
   //
@@ -4712,7 +4754,31 @@ export function inheritedConstraintAnchor(
     const text = textOfMessage(event.data)
     return text.includes('HARD CONSTRAINTS')
   })
-  if (goals.length === 0 && humanOrigins.length > 0) {
+  /**
+   * ── v0.9.3: `blockOrdinal` IS NOT `generation` ────────────────────────────────────────────────
+   *
+   * Two different questions used to share one number, and the card answered the wrong one:
+   *
+   *   blockOrdinal = how many goal-shaped HARD CONSTRAINTS blocks this log holds.
+   *                  It answers ONE thing: which block is the origin (the newest copy).
+   *   generation   = where this session sits in the chain, read from the MARK
+   *                  (`.graft-targets.json`), the same source `goalMessage` reports.
+   *
+   * They coincide only while every hop writes exactly one block. A hop whose extraction came
+   * back empty writes none — so a generation-3 session can hold 2 blocks, and the card said
+   * "第 2 代会话" while the goal message in the same handoff said `graft_generation: 3`.
+   *
+   * Measured before the fix (this repo's own `.graft-targets.json`: a 3-deep chain), the
+   * anchor and the goal disagreed by one. The names are now different on purpose: collapsing
+   * them again has to be a deliberate act, not a typo.
+   */
+  const blockOrdinal = goals.length
+  // The mark is 0 for a session that was never a target (an original session), and N for the
+  // Nth-generation target. Rendering 0 as "第 0 代" would be nonsense, and rounding it to 1
+  // would assert a chain position the mark does not record.
+  const originLabel =
+    sourceGeneration > 0 ? `第 ${sourceGeneration} 代会话` : '原始会话'
+  if (blockOrdinal === 0 && humanOrigins.length > 0) {
     // v7.4b: point at the EARLIEST human statement, not the newest copy.
     //
     // The constraints are harvested from several user messages across the
@@ -4720,19 +4786,23 @@ export function inheritedConstraintAnchor(
     // rendered into the target's goal as a numbered block. The reader needs the
     // place where the rule was first written, so a re-assertion later on cannot
     // masquerade as the origin.
+    //
+    // v0.9.3: this branch says SESSION, never "第 1 代". A human paste proves a human
+    // wrote it, not which generation they were in — only the mark knows that.
     const first = humanOrigins[0]
     return (
-      `[高优锚点] 核心约束源自第 1 代会话（${sourceSessionId}），seq=${first.seq}，必要时请优先回读。` +
+      `[高优锚点] 核心约束源自${originLabel}（${sourceSessionId}），seq=${first.seq}，必要时请优先回读。` +
       `\n下面这段 HARD CONSTRAINTS 是插件从用户原话抽取的副本，不是这一代用户刚刚说的；` +
       `要确认原话，用 graft_read_result(sourceSessionId, ${first.seq})。`
     )
   }
-  if (goals.length === 0) return undefined
+  if (blockOrdinal === 0) return undefined
   const goal = goals[goals.length - 1]
-  const generation = goals.length
   return (
-    `[高优锚点] 核心约束源自第 ${generation} 代会话（${sourceSessionId}），seq=${goal.seq}，必要时请优先回读。` +
-    `\n当前是第 ${generation + 1} 代。下面这段 HARD CONSTRAINTS 是逐代复制来的文本，不是这一代用户刚刚说的；` +
+    `[高优锚点] 核心约束源自${originLabel}（${sourceSessionId}），seq=${goal.seq}，必要时请优先回读。` +
+    (sourceGeneration > 0
+      ? `\n当前是第 ${sourceGeneration + 1} 代。下面这段 HARD CONSTRAINTS 是逐代复制来的文本，不是这一代用户刚刚说的；`
+      : `\n下面这段 HARD CONSTRAINTS 是逐代复制来的文本，不是这一代用户刚刚说的；`) +
     `要确认原话，用 graft_read_result(sourceSessionId, ${goal.seq})。`
   )
 }

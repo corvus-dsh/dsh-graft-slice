@@ -16,7 +16,7 @@
  * Usage: node scripts/verify-bundle.mjs     (exit 1 on any failed check)
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -205,6 +205,80 @@ check(
   !/[A-Za-z]:[\\/]/u.test(patchText),
   'patch text scanned',
 )
+
+// --- 6b. the EXPORT SURFACE is a compatibility contract --------------------
+/**
+ * ── WHY THE EXPORT COUNT NEEDS A GATE AT ALL ─────────────────────────────────────────────────────
+ *
+ * Measured incident: G5 moved three functions out of `index.ts` into `core/task-state.ts` and, to
+ * make the split compile, re-exported `splitSentences` along with them. That symbol had been a
+ * PRIVATE helper; the bundle went from 180 exports to 181 and **every one of the 604 tests still
+ * passed**, because nothing in the suite imports a function it never knew about.
+ *
+ * A widened export surface is not cosmetic. `exports` is the only thing downstream plugins, the
+ * client bundle and any ecosystem audit can depend on; once shipped, a name cannot be withdrawn
+ * without a breaking change. So the count is checked against a recorded baseline, and any change
+ * must be declared in the commit message with `[export-change]`.
+ *
+ * WHY A COUNT AND NOT A NAME LIST: names would drift on every legitimate addition and the gate would
+ * be switched off within a week. A count catches the accident that actually happened (a private
+ * helper leaking into the surface) and stays quiet for the intentional case (a new tool), because the
+ * intentional case costs one word in the commit message.
+ *
+ * WHY THE BASELINE IS A FILE: the check must work in CI, where there is no previous run to compare
+ * against. `.export-surface.json` is committed, so the question "did this change?" has an answer on a
+ * fresh clone.
+ */
+const SURFACE_FILE = join(ROOT, '.export-surface.json')
+const surface = mod.__error === undefined ? Object.keys(mod).sort() : undefined
+if (surface !== undefined && !surface.includes('default')) {
+  let baseline
+  try {
+    baseline = JSON.parse(readFileSync(SURFACE_FILE, 'utf8'))
+  } catch {
+    baseline = undefined
+  }
+
+  /**
+   * The declaration may live in the commit message OR in an env var, because CI checks out with no
+   * message in reach (`git log` is shallow there, and a squashed PR has a different one). The env var
+   * is what the workflow sets from the head commit's subject.
+   */
+  const declared = /\[export-change\]/u.test(
+    `${process.env.GRAFT_COMMIT_MESSAGE ?? ''}\n${process.env.GITHUB_HEAD_COMMIT_MESSAGE ?? ''}`,
+  )
+
+  if (baseline === undefined || !Array.isArray(baseline.exports)) {
+    // First run: record, do not judge. Writing a baseline is not a change to the contract.
+    writeFileSync(
+      SURFACE_FILE,
+      `${JSON.stringify({ exports: surface, count: surface.length, note: 'baseline recorded by verify-bundle.mjs' }, null, 2)}\n`,
+      'utf8',
+    )
+    check('export surface: baseline recorded', true, `${surface.length} exports (first run)`)
+  } else {
+    const previous = baseline.exports
+    const added = surface.filter((name) => !previous.includes(name))
+    const removed = previous.filter((name) => !surface.includes(name))
+    const same = added.length === 0 && removed.length === 0
+    const detail = same
+      ? `${surface.length} exports, unchanged`
+      : `${previous.length} -> ${surface.length}` +
+        (added.length > 0 ? `; added: ${added.join(', ')}` : '') +
+        (removed.length > 0 ? `; removed: ${removed.join(', ')}` : '') +
+        (declared ? ' [declared]' : ' — add [export-change] to the commit message if intended')
+    check('export surface matches the recorded baseline, or is declared', same || declared, detail)
+    if (!same && declared) {
+      // Refresh the baseline only when the change was declared: an undeclared change must keep
+      // failing until someone looks at it, not silently become the new normal.
+      writeFileSync(
+        SURFACE_FILE,
+        `${JSON.stringify({ exports: surface, count: surface.length, note: 'baseline updated by a declared [export-change]' }, null, 2)}\n`,
+        'utf8',
+      )
+    }
+  }
+}
 
 // --- 7. shipped file hygiene (desensitization) ----------------------------
 const sensitive = [/C:\\Users\\[^<]/u, /\/Users\/[a-z]/iu, /ghp_[A-Za-z0-9]{20,}/u, /github_pat_[A-Za-z0-9_]{20,}/u, /sk-[A-Za-z0-9]{20,}/u]

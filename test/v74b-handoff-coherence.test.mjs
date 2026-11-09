@@ -79,7 +79,12 @@ test('v7.4b: a human goal that PASTES an extracted constraints block gets the an
   const anchor = inheritedConstraintAnchor(events, 'session-src')
   assert.ok(anchor !== undefined, 'an extraction pasted by a human is still a copy')
   assert.match(anchor, /高优锚点/u)
-  assert.match(anchor, /第 1 代会话/u)
+  // v0.9.3: this used to assert `第 1 代会话` — a hardcoded generation the log cannot
+  // support. Called with no mark (the default `sourceGeneration = 0`), the honest label
+  // is 原始会话. The property this test exists for is unchanged: a human paste still gets
+  // anchored, to a seq, with the "this is a copy" warning.
+  assert.match(anchor, /原始会话/u)
+  assert.equal(/第 [01] 代/u.test(anchor), false, 'no mark means no generation claim')
   assert.match(anchor, /seq=17/u)
   assert.match(anchor, /副本/u)
 })
@@ -119,8 +124,20 @@ test('v7.4b: a graft-authored goal still counts the chain in generations', () =>
     userMessage(40, EXTRACTED, 'plugin:graft-replay'),
   ]
   const anchor = inheritedConstraintAnchor(events, 'session-src')
-  assert.match(anchor, /第 2 代会话/u)
-  assert.match(anchor, /seq=40/u)
+  // v0.9.3: WITHOUT a mark this used to say `第 2 代会话` — the block count. The block
+  // count is not a generation, and asserting it here is what let the defect survive: the
+  // test agreed with the bug. What the two blocks still decide is WHICH one is the origin.
+  // The generation now comes from the mark, so it is asserted in the marked call below.
+  assert.match(anchor, /seq=40/u, 'the newest block is still the pointer target')
+  assert.equal(/第 2 代会话/u.test(anchor), false, 'two blocks do not make a generation')
+  assert.match(anchor, /原始会话/u)
+
+  // Same log, with the mark saying generation 2: now the generation is stated, and it
+  // agrees with `goalMessage`'s `graft_generation` because both read the same mark.
+  const marked = inheritedConstraintAnchor(events, 'session-src', 2)
+  assert.match(marked, /第 2 代会话/u)
+  assert.match(marked, /当前是第 3 代/u)
+  assert.match(marked, /seq=40/u)
 })
 
 test('isHumanAuthored is the strict source.kind test, and only that value', () => {

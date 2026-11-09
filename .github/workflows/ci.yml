@@ -112,3 +112,32 @@ jobs:
 
       - name: Test
         run: npm test
+
+      # ── the export surface gate ────────────────────────────────────────────────────────────────
+      #
+      # `verify-bundle` was only ever run by hand, so its 28 checks — including the export-surface
+      # contract added in v0.9.5 — were never enforced on a push. A gate nobody runs is a comment.
+      #
+      # It runs AFTER `npm test` on purpose: a broken bundle should fail on the tests, with a test
+      # name to read, rather than on a packaging check that reports one line.
+      #
+      # `GRAFT_COMMIT_MESSAGE` is what lets an INTENTIONAL surface change pass. The gate compares the
+      # export count against `.export-surface.json` and demands `[export-change]` in the message when
+      # they differ; without this env var a declared change would be indistinguishable from an
+      # accident, and the honest fix would be to switch the gate off. The subject line is enough —
+      # the convention puts the marker there.
+      - name: Bundle contract, including the export surface
+        env:
+          GRAFT_COMMIT_MESSAGE: ${{ github.event.head_commit.message || github.event.pull_request.title }}
+        run: node scripts/verify-bundle.mjs
+
+      # The baseline is a COMMITTED file, so a declared change that refreshes it must land in the same
+      # commit. If CI refreshed it silently, the next clone would inherit a contract nobody reviewed.
+      - name: The export baseline must already be committed
+        run: |
+          if [ -n "$(git status --porcelain .export-surface.json)" ]; then
+            echo "::error::verify-bundle.mjs rewrote .export-surface.json. Commit the new baseline: it is part of the export contract."
+            git --no-pager diff -- .export-surface.json
+            exit 1
+          fi
+          echo "ok: .export-surface.json is committed and current"
