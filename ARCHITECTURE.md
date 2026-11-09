@@ -107,9 +107,9 @@
 |---|---|
 | 现状 | v0.22 的点火路由隔离、撤稿竞态、原子写都改在 `index.ts` 内。`alreadyIgnited` 按 `targetId` 独立存储、`.retired.json` 的 un-retire 回滚，只能通过 `apply()` 装配后的工具面（`graft_slice_and_inject`）驱动，无法单独 import 单测。测试必须走 `fake-harness.mjs` 搭出整个宿主 |
 | 影响 | 单测成本高、失败定位慢；一个纯函数（如「哪些 target 需要点火」）被迫用集成测试覆盖 |
-| 为什么现在不动 | 拆这些函数会动到 `apply()` 的装配顺序，而点火/回滚路径刚刚才被 410 条测试锁住。**发版前不做搬迁** |
+| 为什么现在不动 | 拆这些函数会动到 `apply()` 的装配顺序，而点火/回滚路径刚刚才被 **410 条测试**（v7.7 当时）锁住。**发版前不做搬迁** |
 | 退出条件 | 把 `igniteTargetSession` / `alreadyIgnited` / `unretireSource` 抽到 `ignition.ts`，作为**纯函数 + 注入式副作用**导出；`index.ts` 只做装配；测试可直接 import 单个函数，现有集成测试保持不变且全绿 |
-| 进度（v7.7） | ✅ **已达成。** `igniteTargetSession` / `alreadyIgnited` / `ignitionExhausted` / `igniteTargetSession` 的准入图已住在 `core/ignition.ts`，状态通过 `setIgnitionDepsResolver` 注入（不是 import，避免与 `index.ts` 成环）。`v0.32-ignition-signal.test.mjs` 与 `v0.22-ignition-routing.test.mjs` 直接 import 单函数跑单测，542 条集成测试同时保持全绿 |
+| 进度（v7.7） | ✅ **已达成。** `igniteTargetSession` / `alreadyIgnited` / `ignitionExhausted` / `igniteTargetSession` 的准入图已住在 `core/ignition.ts`，状态通过 `setIgnitionDepsResolver` 注入（不是 import，避免与 `index.ts` 成环）。`v0.32-ignition-signal.test.mjs` 与 `v0.22-ignition-routing.test.mjs` 直接 import 单函数跑单测，**542 条集成测试**（v7.7 当时）同时保持全绿 |
 
 ---
 
@@ -117,7 +117,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 现状 | v7.7 把 graft 的物理写入、冷读校验、回滚与点火通道接进了 `dsh-paradise`。接入过程暴露了四个只有**真实业务消费者**才会撞到的边界问题，全部已修，但每一条都是「协议里少了一个字段」而不是「graft 写错了」：<br>① `isSeeded`：预写校验用的是合成 header，缺 `isSeeded: false`，导致 104 条测试在 `SEEDED_HEADER` 处集体失败；<br>② 可见消息的 `source.kind`：适配器把 observer 的 `'user'` 约定当成通用宿主规则，拒绝了 graft 合法的 `plugin:graft-replay` 回放tape；<br>③ `assistant/message` 回显：同理，回显是「本适配器合成的内容」的约定，不是宿主要求，回放tape 里没有它是对的；<br>④ `prompt` 的 marker 与 mode 词：适配器用 observer 的历史 marker（`[dsh-observer 点火]`）与协议词（`interrupt`）发请求，而宿主只认 `steer`、graft 的日志里只有它自己的 marker。 |
+| 现状（v7.7） | v7.7 把 graft 的物理写入、冷读校验、回滚与点火通道接进了 `dsh-paradise`。接入过程暴露了四个只有**真实业务消费者**才会撞到的边界问题，全部已修，但每一条都是「协议里少了一个字段」而不是「graft 写错了」：<br>① `isSeeded`：预写校验用的是合成 header，缺 `isSeeded: false`，导致 **104 条测试**（v7.7 当时）在 `SEEDED_HEADER` 处集体失败；<br>② 可见消息的 `source.kind`：适配器把 observer 的 `'user'` 约定当成通用宿主规则，拒绝了 graft 合法的 `plugin:graft-replay` 回放tape；<br>③ `assistant/message` 回显：同理，回显是「本适配器合成的内容」的约定，不是宿主要求，回放tape 里没有它是对的；<br>④ `prompt` 的 marker 与 mode 词：适配器用 observer 的历史 marker（`[dsh-observer 点火]`）与协议词（`interrupt`）发请求，而宿主只认 `steer`、graft 的日志里只有它自己的 marker。 |
 | 影响 | 每一条都表现为「**静默降级或错误拒绝**」，而不是崩溃。最贵的第 ④ 条：marker 不匹配会让幂等检查永远判定「没点过」，于是每次重试都会把同一条指令**再发一次**，目标会把它读成两轮用户意图 |
 | 为什么登记而不是继续修 | 四条都已修完并锁了测试（`dsh-paradise/test/caller-contract.test.mjs` 8 条）。但「哪些字段属于调用方」这个判断**只做过一次**，下一个业务消费者（`dsh-memory`、`dsh-observer` 的下一个版本）很可能带来第五、第六条。把它登记下来，是为了下一次不再靠撞墙发现 |
 | 退出条件 | ① `protocol/adapters.ts` 的 `CreateRequest` / `TurnTrigger` 对每个 caller-supplied 字段都写明「谁的约定」；② `caller-contract.test.mjs` 覆盖 create（`tape` / `publish`）与 trigger（`marker` / `mode` / `fallbackModes` / `origin`）的每一条；③ **第二条业务消费者接入时，零新增修复**——若仍有新增，说明边界还没定清 |
