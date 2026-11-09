@@ -633,6 +633,17 @@ export interface GraftConfig {
    */
   taskBoundaryMaxDeferTurns?: number
   /**
+   * v0.9.3: how long an unanswered `tool/call` may hold the harbour closed, in milliseconds.
+   *
+   * THE BUG THIS CLOSES is not a deadlock — `turn-stopping` and `pendingGraftSources` keep firing while
+   * the user is active. It is what happens after the session goes QUIET: nothing re-triggers the check, so
+   * a session whose tool call never returned sits above the watermark permanently and never migrates.
+   *
+   * Default **600000** (10 minutes). **`0` or `Infinity` disables the limit** and restores the previous
+   * "a dangling call holds the harbour forever" behaviour exactly, for anyone who wants it.
+   */
+  harborOpenCallMaxAgeMs?: number
+  /**
    * v7.4 (decision 2): let the TASK STATE, not just the conversation shape, pick
    * the replay tier. Off by default.
    *
@@ -1063,6 +1074,12 @@ export function normalizeConfig(config: GraftConfig | undefined): Required<Graft
     autoGraftKeepAliveMs: asFiniteInteger(input.autoGraftKeepAliveMs, 0, 'autoGraftKeepAliveMs'),
     graftTargetGraceTurns: asFiniteInteger(input.graftTargetGraceTurns, 2, 'graftTargetGraceTurns'),
     taskBoundaryMaxDeferTurns: asFiniteInteger(input.taskBoundaryMaxDeferTurns, 1, 'taskBoundaryMaxDeferTurns'),
+    /**
+     * 10 minutes by default. `asFiniteInteger` maps a non-numeric/absent value to the fallback, so the
+     * documented "0 / Infinity disables it" is handled at the COMPARISON site (`checkSafeHarbor` treats
+     * `<= 0` and `Infinity` as "no limit") rather than by special-casing the parser.
+     */
+    harborOpenCallMaxAgeMs: asFiniteInteger(input.harborOpenCallMaxAgeMs, 600_000, 'harborOpenCallMaxAgeMs'),
     // v7.4 (decision 2): off unless asked. See the config doc for why n=1 is not
     // enough evidence to make this the default.
     autoAdaptiveTier: input.autoAdaptiveTier === true,
@@ -9364,9 +9381,35 @@ async function discardPartialTarget(ctx: PluginContextLike, targetId: string): P
  * When unsafe, the caller records `pendingGraft` and retries at the next
  * turn/end, which is by construction a quiet boundary.
  */
+/**
+ * The state of a session's harbour check.
+ *
+ * ── v0.9.3 (2026-11-09): `openCallAgeSeconds` WAS ADDED BECAUSE THE QUESTION HAD NO TIME DIMENSION ──
+ *
+ * The check used to be purely structural: "is there a `tool/call` with no matching `tool/result`". A
+ * call that never returns — a crashed tool, a killed subprocess, a probe that hung — therefore held the
+ * harbour closed FOREVER. The consequence is not a deadlock while the user is active (`turn-stopping`
+ * and `pendingGraftSources` still fire); it is worse in a quieter way: once the session goes **idle**,
+ * nothing re-triggers the check, and that session sits above the watermark permanently, never migrating.
+ *
+ * Measured before the change: `openCalls` was a `Set<string>` of ids only — no timestamp was retained
+ * anywhere, so "how long has this call been open" was not answerable from the data on hand.
+ *
+ * So the age is now REPORTED, and a caller may act on it. `ageSeconds` is the largest age among the
+ * still-open calls, derived from the `time` field of the `tool/call` event — the only per-event clock this
+ * plugin has (it does not read a wall clock during a pure function, so the result stays deterministic
+ * for a given event list).
+ */
 export interface HarborState {
   safe: boolean
   reason: string
+  /**
+   * Age of the OLDEST still-open tool call, in seconds, or `0` when there is none / no clock is available.
+   *
+   * `0` is also what an event list WITHOUT `time` fields produces, which is the pre-existing behaviour:
+   * a caller that sets no age limit therefore sees exactly what it saw before.
+   */
+  openCallAgeSeconds: number
 }
 
 /**
@@ -9439,14 +9482,29 @@ export function checkTaskBoundary(
   }
 }
 
-export function checkSafeHarbor(events: readonly SessionEventLike[]): HarborState {
-  const openCalls = new Set<string>()
+export function checkSafeHarbor(
+  events: readonly SessionEventLike[],
+  options: { openCallMaxAgeMs?: number } = {},
+): HarborState {
+  /**
+   * callId → the `time` of its `tool/call` (0 when the event carried no clock).
+   *
+   * The map replaces the old `Set<string>`: the ids are still what decides "is a call open", and the
+   * timestamp is what lets the answer carry an AGE. Keeping both in one structure is why this stayed a
+   * small change rather than a second pass over the events.
+   */
+  const openCalls = new Map<string, number>()
   let streaming = false
+  /** The newest event clock in the list — the only "now" available to a pure function. */
+  let latestTime = 0
 
   for (const event of events) {
+    const eventTime = Number(event.time)
+    if (Number.isFinite(eventTime) && eventTime > latestTime) latestTime = eventTime
+
     if (event.type === 'tool/call') {
       const callId = typeof event.data?.callId === 'string' ? event.data.callId : ''
-      if (callId.length > 0) openCalls.add(callId)
+      if (callId.length > 0) openCalls.set(callId, Number.isFinite(eventTime) ? eventTime : 0)
       continue
     }
     if (event.type === 'tool/result') {
@@ -9496,16 +9554,51 @@ export function checkSafeHarbor(events: readonly SessionEventLike[]): HarborStat
     }
   }
 
+  /**
+   * THE AGE, COMPUTED BEFORE THE VERDICT.
+   *
+   * `latestTime - oldestOpenCallTime`. When no event carries a clock (an old fixture, a hand-built
+   * list), `latestTime` is 0 and the age is 0 — which is the pre-existing behaviour, not a new one.
+   */
+  const oldestOpenTime = openCalls.size === 0 ? 0 : Math.min(...[...openCalls.values()].filter((t) => t > 0))
+  const ageSeconds =
+    oldestOpenTime > 0 && latestTime > oldestOpenTime ? Math.round((latestTime - oldestOpenTime) / 1000) : 0
+
   if (openCalls.size > 0) {
+    /**
+     * ── THE AGE LIMIT: opt-in, and OFF unless a caller asks for it ─────────────────────────────
+     *
+     * `0` / `Infinity` / a non-finite value keeps the old behaviour exactly ("a dangling call holds the
+     * harbour forever"). A positive value means: past this age, stop waiting.
+     *
+     * WHY EXPIRING IS THE SAFE DIRECTION **HERE**, when a stale lease is not: a lease protects exclusive
+     * access to shared state, so letting it expire early lets two writers in. This protects a MIGRATION
+     * DECISION about a log that is already durable and being read, not written. Waiting forever costs the
+     * session its only migration opportunity; migrating a session whose dangling call is 40 minutes old
+     * costs a slightly-less-clean cut, and the dangler is named in the reason so a reader can see what
+     * was skipped. Between "never migrate" and "migrate and say why", the second is the honest one.
+     */
+    const limit = Number(options.openCallMaxAgeMs)
+    const limitActive = Number.isFinite(limit) && limit > 0 && limit !== Number.POSITIVE_INFINITY
+    if (limitActive && ageSeconds > 0 && ageSeconds * 1000 >= limit) {
+      return {
+        safe: true,
+        openCallAgeSeconds: ageSeconds,
+        reason:
+          `open call 超龄 ${ageSeconds} 秒（上限 ${Math.round(limit / 1000)} 秒），放弃等待：` +
+          `${openCalls.size} 个 tool call 仍未返回`,
+      }
+    }
     return {
       safe: false,
+      openCallAgeSeconds: ageSeconds,
       reason: `${openCalls.size} tool call(s) still awaiting a result`,
     }
   }
   if (streaming) {
-    return { safe: false, reason: 'an assistant response is still streaming' }
+    return { safe: false, openCallAgeSeconds: ageSeconds, reason: 'an assistant response is still streaming' }
   }
-  return { safe: true, reason: 'quiet boundary' }
+  return { safe: true, openCallAgeSeconds: ageSeconds, reason: 'quiet boundary' }
 }
 
 /**
@@ -9771,7 +9864,12 @@ async function autoGraftIfNeeded(
       return undefined
     })()
     if (snapshotForHarbor !== undefined) {
-      const harbor = checkSafeHarbor(snapshotForHarbor)
+      /**
+       * v0.9.3: the age limit is passed from CONFIG, and reaching it turns `safe` into `true` with a
+       * reason naming how long it waited. That is the only place this session can recover once it goes
+       * quiet — see `harborOpenCallMaxAgeMs` in the config docs.
+       */
+      const harbor = checkSafeHarbor(snapshotForHarbor, { openCallMaxAgeMs: settings.harborOpenCallMaxAgeMs })
       if (!harbor.safe) {
         // Arm the retry; the next turn/end is a quiet boundary by construction.
         pendingGraftSources.add(sourceSessionId)
@@ -11842,8 +11940,9 @@ async function appendTransitionCard(
     if (events === undefined) return next()
 
     // Reuse the same safe-harbour rule as the pressure path: a half-finished
-    // step is not a boundary, even under overflow.
-    const harbor = checkSafeHarbor(events)
+    // step is not a boundary, even under overflow. v0.9.3: and the same age limit, or a session whose
+    // tool call never returned could never recover from an overflow either.
+    const harbor = checkSafeHarbor(events, { openCallMaxAgeMs: settings.harborOpenCallMaxAgeMs })
     if (!harbor.safe) {
       ctx.logger?.warn?.(
         `[dsh-graft-slice] overflow recovery deferred for ${agentId}: ${harbor.reason}`,
