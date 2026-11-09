@@ -119,20 +119,33 @@ export const WIDE_CONSTRAINT: WordingPattern = {
 }
 
 /**
- * ── 3. EMPHATIC ─────────────────────────────────────────────────────────────────────────────────
+ * ── 3. EMPHATIC — 与生产 `hard` **逐字相同**，不是并集 ──────────────────────────────────────────
  *
  * The question: does this sentence contain a HARD emphasis word? Used for WEIGHTING (+2), never as a
  * gate on its own.
  *
- * This merges the two narrow lists that used to exist separately (`hard` in the human-constraint
- * scorer, `strong` in the LLM-path filter). They served the same semantic — "this reads as emphatic" —
- * and differed only by accident of who wrote them.
+ * ── WHY THIS IS `hard` AND NOT `hard ∪ strong` (a correction, measured) ────────────────────────
  *
- * NOTE: it is exported but NOT yet imported by production code. The scorer still uses two inline
- * literals (`hard`, `strong`); wiring those is part of the remaining S1b-2 work, not this step. The
- * contract is declared now so the test can pin its real misfires.
+ * There are two emphasis lists in the source, and they are NOT the same:
+ *
+ *     hard   (scorer, human path)  must never don't "do not" cannot always only
+ *                                  必须 禁止 绝对 不能 不得 务必                            (13)
+ *     strong (LLM path)            must never don't "do not" only always cannot
+ *                                  必须 禁止 不要 不得 只能 务必 始终 绝不                     (15)
+ *
+ * Measured (`_scratch/verify-emphatic-tables.mjs`):
+ *     only in hard   : 绝对 不能
+ *     only in strong : 不要 只能 始终 绝不
+ *     UNION would be 17 tokens — it is neither list.
+ *
+ * The first version of this contract WAS the union, on the theory that two lists serving one semantic
+ * should merge. That was wrong for a wiring step: the union gives `hard` three extra words, so a
+ * 必须-class sentence would earn +2 where it currently earns 0, and **which rules fit a fixed prompt
+ * budget would change**. Wiring exists to remove duplication, not to change behaviour.
+ *
+ * So this contract is `hard`, character for character. What to do about the union is TD-14.
  */
-export const EMPHATIC = /(\bmust\b|\bnever\b|\bdon't\b|\bdo not\b|\bcannot\b|\balways\b|\bonly\b|必须|禁止|绝对|不能|不得|务必|只能|始终|绝不)/iu
+export const EMPHATIC = /(\bmust\b|\bnever\b|\bdon't\b|\bdo not\b|\bcannot\b|\balways\b|\bonly\b|必须|禁止|绝对|不能|不得|务必)/iu
 
 export const EMPHATIC_CONTRACT: WordingPattern = {
   name: 'EMPHATIC',
@@ -159,7 +172,9 @@ export const EMPHATIC_CONTRACT: WordingPattern = {
   ],
   caveat:
     '`only` / `cannot` / `no …` 在**描述性英文**里极常见，而模型汇报工作时正好这样写。' +
-    '所以这条只能加分，不能单独决定「这是一条约束」。',
+    '所以这条只能加分，不能单独决定「这是一条约束」。' +
+    '**本契约与生产 `hard` 逐字相同（13 个词），不含 `strong` 的 只能/始终/绝不/不要**——' +
+    '取并集是更合理的设计，但会改变加权，需单独一轮验证（见 ARCHITECTURE TD-14）。',
 }
 
 /**

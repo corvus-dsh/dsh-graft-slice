@@ -789,6 +789,7 @@ export interface GraftSource {
  * re-exported here so the constant still has exactly ONE definition in the bundle.
  */
 import { GRAFT_REPLAY_SOURCE_KIND } from './core/host-shape.js'
+import { CONSTRAINT_PATTERN, STANDING_PROHIBITION } from './contracts/model-wording.js'
 export { GRAFT_REPLAY_SOURCE_KIND }
 
 /** Whether a message source was written by this plugin's replay injector. */
@@ -1338,9 +1339,7 @@ function pickSentence(sentences: string[], pattern: RegExp, fallback: string): s
 const PLAN_LEAD_PATTERN =
   /^\s*(?:[-*•]\s*)?(?:下一步|接下来|随后|待办|接着|然后|现在先|现在需要|还需要|需要先|next\b|then\b)/iu
 
-/** Keywords that mark a sentence as an absolute constraint worth carrying across a reset. */
-const CONSTRAINT_PATTERN =
-  /(必须|禁止|绝对|不能|不得|不许|务必|第\s*\d+\s*行|CHECKSUM_42|如果|则|除非|仅有|只有|否则|优先|\bmust\b|\bnever\b|\bforbidden\b|\bline\s+\d+\b|\bdo not\b|\bdon't\b|\bcannot\b|\brequired\b|\bconstraint\b|\bif\b|\bthen\b|\bunless\b|\bonly\b|\bprefer\b|\balways\b|\bbefore\s+you\b|\bend\s+every\b)/iu
+// CONSTRAINT_PATTERN: 单一出处 = src/contracts/model-wording.ts（契约名 WIDE_CONSTRAINT）
 
 function isConstraintSentence(sentence: string): boolean {
   return CONSTRAINT_PATTERN.test(sentence)
@@ -1440,8 +1439,7 @@ const CONCRETE_ARTIFACT =
  * this filter exists to drop. The cue must sit ON the act, not merely near it.
  */
 const DESTRUCTIVE_ACT = /(删除|删掉|移除|清空|清理|\brm\b|\bdel\b|\bdelete\b|\bremove\b|\bdrop\b|\bunlink\b)/iu
-const STANDING_PROHIBITION =
-  /(禁止|严禁|绝不|不要|不得|不能|务必|必须|每次|任何|一律|永远|始终|never|always|must|do not|don't|only)[^。；\n]{0,12}?(删除|删掉|移除|清空|清理|\brm\b|\bdel\b|\bdelete\b|\bremove\b|\bdrop\b|\bunlink\b)/iu
+// STANDING_PROHIBITION: 单一出处 = src/contracts/model-wording.ts（契约名 PROHIBITION_PLUS_ACT）
 
 function isOneOffAction(text: string): boolean {
   if (STANDING_PROHIBITION.test(text)) return false

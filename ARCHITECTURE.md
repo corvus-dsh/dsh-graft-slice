@@ -54,7 +54,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 现状 | **`src/index.ts` 12,992 行 / 12,488 非空**（v0.9.5 之后；G5 搬运后为 12,887，搬运前为 13,271）。**行数口径：`wc -l`** —— `content.split(/\r?\n/)`，且文件以换行结尾时不计末尾空项；非空行 = 该数组中 `trim().length > 0` 的个数。已抽出 `core/host-shape.ts`（996 行）、`core/ignition.ts`（1,005 行）、`core/paradise-write.ts`（240 行）与 `core/task-state.ts`（564 行，G5）。剩余部分仍含 90+ 导出、约 60 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册 |
+| 现状 | **`src/index.ts` 12,990 行 / 12,486 非空**（v0.9.5 之后；G5 搬运后为 12,887，搬运前为 13,271）。**行数口径：`wc -l`** —— `content.split(/\r?\n/)`，且文件以换行结尾时不计末尾空项；非空行 = 该数组中 `trim().length > 0` 的个数。已抽出 `core/host-shape.ts`（996 行）、`core/ignition.ts`（1,005 行）、`core/paradise-write.ts`（240 行）与 `core/task-state.ts`（564 行，G5）。剩余部分仍含 90+ 导出、约 60 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册 |
 | 影响 | 单文件让「改 A 碰坏 B」的排查成本变高；diff review 困难；IDE 索引与增量构建变慢；新人无法按职责分层阅读 |
 | 为什么现在不动 | 见下方 TD-7：本轮只搬了「与彼岸层真正重叠」的两块。剩下的搬运是纯位移，不减复杂度，且 84 个测试文件直接 import 那些区域的 30 个符号 |
 | 退出条件（可验收） | ① 按职责拆成 `session-slice.ts` / `tape.ts` / `injection.ts` / `ledger.ts` / `guards.ts` / `console.ts` / `tools.ts` 等模块，每个 ≤ 800 行；② `index.ts` 只保留 `apply()` 装配与再导出，≤ 300 行；③ **拆前后测试数不变、全绿**；④ `scripts/build.mjs` 的产物字节差异仅来自模块边界（banner 与 import 语句）；⑤ 每个模块导出面的 `grep` 参考计数与拆前一致（防止顺手删了导出） |
@@ -128,6 +128,15 @@
 | 退出条件 | ① `protocol/adapters.ts` 的 `CreateRequest` / `TurnTrigger` 对每个 caller-supplied 字段都写明「谁的约定」；② `caller-contract.test.mjs` 覆盖 create（`tape` / `publish`）与 trigger（`marker` / `mode` / `fallbackModes` / `origin`）的每一条；③ **第二条业务消费者接入时，零新增修复**——若仍有新增，说明边界还没定清 |
 
 ---
+
+## TD-14 `hard` 与 `strong` 是两份强调词表，并集更合理但会改变加权（P2，2026-11-09 登记）
+
+| 项 | 内容 |
+|---|---|
+| 现状 | 源码里有两份强调词表，语义相同、内容不同（实测 `_scratch/verify-emphatic-tables.mjs`）：<br>**`hard`**（人工约束打分，13 词）：`must never don't "do not" cannot always only` + `必须 禁止 绝对 不能 不得 务必`<br>**`strong`**（LLM 路径筛选，15 词）：`must never don't "do not" only always cannot` + `必须 禁止 不要 不得 只能 务必 始终 绝不`<br>差异：只有 `hard` 有 **绝对 / 不能**；只有 `strong` 有 **不要 / 只能 / 始终 / 绝不**。并集是 **17 词**。 |
+| 为什么不合并（本轮裁定） | **接线的目的是消除重复，不是改变行为。** 把 `strong` 的四个词并进 `hard`，会让 必须-类句子在计分处多 +2，从而改变「哪些约束排得进固定预算」——那不是接线步骤该做的事。所以 `src/contracts/model-wording.ts` 的 `EMPHATIC` 契约**与 `hard` 逐字相同（13 词）**，`strong` 保持独立。 |
+| 为什么并集更合理（要留住这个判断） | 两表服务同一语义（「这句读起来是硬强调」），差异只是「谁写的、写在哪一版」的偶然。长期看一份词表是对的。 |
+| **退出条件（可验收）** | 合并为一份 `EMPHATIC` 并用于两处，需同时满足：<br>① **18 条真实句子的 `extractConstraintsDetailed` 输出在合并前后逐字节相同**（或差异被逐条解释并接受）；<br>② 差异若存在，必须说明是「哪条约束因此进了预算 / 出了预算」，且该变化被确认是想要的；<br>③ 四仓测试数字不变或增量有说明。<br>只满足「测试全绿」不算达成——**静默的行为变更也会全绿**，这正是 ① 存在的原因。 |
 
 ## TD-13 `PHASE_PREFIX` / `STEP_EN`：本机语料零命中，保留但有退出条件（P3，2026-11-09 登记）
 

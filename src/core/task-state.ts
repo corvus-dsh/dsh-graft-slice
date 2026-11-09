@@ -23,6 +23,7 @@
 import { isRecord, truncateEnd } from '../utils/serialize.js'
 import { textOfMessage } from './watermark.js'
 import type { SessionEventLike } from './watermark.js'
+import { TODO_TOOL_NAME } from '../contracts/model-wording.js'
 
 /**
  * Split prose into sentences.
@@ -92,15 +93,7 @@ function looksLikeToolDump(text: string): boolean {
   return (text.match(/[A-Za-z]:\\/gu) ?? []).length >= 4
 }
 
-/**
- * v0.32 P1: recognise the todo tool even when it arrives under a namespace.
- *
- * The live host registers `todo_write`, but a preset/toolset is allowed to expose
- * it as `mcp__server__todo_write`, `foo.todo_write` or `foo/todo-write`. An exact
- * `name === 'todo_write'` test then misses the newest write and the board keeps
- * showing the previous list — the exact "old P1-1/P1-2" symptom.
- */
-const TODO_TOOL_NAME = /(?:^|[^a-z0-9])todo[_-]?write$/iu
+// TODO_TOOL_NAME: 单一出处 = src/contracts/model-wording.ts（契约名 TODO_TOOL_NAME）
 
 function isTodoWriteTool(name: string): boolean {
   return TODO_TOOL_NAME.test(name.trim())
