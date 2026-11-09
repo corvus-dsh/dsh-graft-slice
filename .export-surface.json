@@ -126,6 +126,8 @@
     "loadPendingIgnitions",
     "locateBoundary",
     "lockDirFor",
+    "lockTraceReset",
+    "lockTraceSnapshot",
     "markIgnitionAdmission",
     "materializeTape",
     "migrationSystemPrompt",
@@ -181,6 +183,6 @@
     "workspaceRedline",
     "writeLayoutManifest"
   ],
-  "count": 180,
+  "count": 182,
   "note": "baseline updated by a declared [export-change]"
 }

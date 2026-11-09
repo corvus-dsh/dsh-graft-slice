@@ -1559,10 +1559,48 @@ function lockDirFor(path        )         {
  * `label` is only for the audit line ("which lock did we wait on?"), so an operator can
  * tell a ledger wait from an audit wait.
  */
+/**
+ * ── ACQUISITION COUNTER (env-gated, DEFAULT OFF, read-only) ───────────────────────────────────
+ *
+ * The same instrument as `dsh-memory/src/lock.ts`, on this repository's own lock, so the two are
+ * directly comparable. "Reduce acquisitions" is the direction the T2d numbers point at, and it
+ * cannot be acted on before knowing how many acquisitions a turn makes and on which paths.
+ *
+ * With `DSH_LOCK_TRACE` unset, `record()` returns on its first line: one boolean test per
+ * acquisition, no allocation. Nothing in production reads the counters.
+ */
+const LOCK_TRACE_ENABLED = process.env.DSH_LOCK_TRACE === '1'
+const lockTrace = new Map                ()
+let lockTraceTotal = 0
+
+function recordAcquisition(lockPath        )       {
+  if (!LOCK_TRACE_ENABLED) return
+  lockTraceTotal += 1
+  lockTrace.set(lockPath, (lockTrace.get(lockPath) ?? 0) + 1)
+}
+
+/** Snapshot of acquisitions since the last reset. Empty unless `DSH_LOCK_TRACE=1`. */
+function lockTraceSnapshot()                                                                                      {
+  return {
+    enabled: LOCK_TRACE_ENABLED,
+    total: lockTraceTotal,
+    byPath: [...lockTrace.entries()]
+      .map(([path, count]) => ({ path, count }))
+      .sort((left, right) => right.count - left.count),
+  }
+}
+
+/** Clear the counters. Safe to call whether or not tracing is on. */
+function lockTraceReset()       {
+  lockTrace.clear()
+  lockTraceTotal = 0
+}
+
 function acquireFileLock(
   path        ,
   options                                                                                               = {},
 )             {
+  recordAcquisition(path)
   const lock = lockDirFor(path)
   const timeoutMs = options.timeoutMs ?? LOCK_TIMEOUT_MS
   const staleMs = options.staleMs ?? LOCK_STALE_MS
@@ -4871,6 +4909,22 @@ export {
   readLayoutManifest,
   writeLayoutManifest,
 }
+/**
+ * ── THE LOCK COUNTER IS EXPORTED, AND THAT IS A DELIBERATE CONTRACT CHANGE ──────────────────────
+ *
+ * `lockTraceSnapshot` / `lockTraceReset` are the T2f instrument: with `DSH_LOCK_TRACE=1` they report
+ * how many times a turn takes a lock and on which files. They were written into `core/txn.ts` and then
+ * were NOT reachable from the bundle — the count came back as "not observable", which for a
+ * measurement is the same as a missing row.
+ *
+ * The alternative was to keep them private and re-measure by editing code, i.e. by changing the thing
+ * under measurement. Exporting two read-only functions is cheaper and more honest, and it is exactly
+ * what the export-surface gate exists to make VISIBLE rather than accidental: this commit carries
+ * `[export-change]`, and the baseline records 182 instead of 180.
+ *
+ * Neither function does anything when `DSH_LOCK_TRACE` is unset, so the shipped behaviour is unchanged.
+ */
+export { lockTraceReset, lockTraceSnapshot }
 
 /**
  * v1.4 — THE PLUGIN'S PRIVATE STATE LIVES IN ONE MODULE (`src/core/state.ts`).

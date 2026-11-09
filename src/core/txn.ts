@@ -115,10 +115,48 @@ export function lockDirFor(path: string): string {
  * `label` is only for the audit line ("which lock did we wait on?"), so an operator can
  * tell a ledger wait from an audit wait.
  */
+/**
+ * ── ACQUISITION COUNTER (env-gated, DEFAULT OFF, read-only) ───────────────────────────────────
+ *
+ * The same instrument as `dsh-memory/src/lock.ts`, on this repository's own lock, so the two are
+ * directly comparable. "Reduce acquisitions" is the direction the T2d numbers point at, and it
+ * cannot be acted on before knowing how many acquisitions a turn makes and on which paths.
+ *
+ * With `DSH_LOCK_TRACE` unset, `record()` returns on its first line: one boolean test per
+ * acquisition, no allocation. Nothing in production reads the counters.
+ */
+const LOCK_TRACE_ENABLED = process.env.DSH_LOCK_TRACE === '1'
+const lockTrace = new Map<string, number>()
+let lockTraceTotal = 0
+
+function recordAcquisition(lockPath: string): void {
+  if (!LOCK_TRACE_ENABLED) return
+  lockTraceTotal += 1
+  lockTrace.set(lockPath, (lockTrace.get(lockPath) ?? 0) + 1)
+}
+
+/** Snapshot of acquisitions since the last reset. Empty unless `DSH_LOCK_TRACE=1`. */
+export function lockTraceSnapshot(): { enabled: boolean; total: number; byPath: Array<{ path: string; count: number }> } {
+  return {
+    enabled: LOCK_TRACE_ENABLED,
+    total: lockTraceTotal,
+    byPath: [...lockTrace.entries()]
+      .map(([path, count]) => ({ path, count }))
+      .sort((left, right) => right.count - left.count),
+  }
+}
+
+/** Clear the counters. Safe to call whether or not tracing is on. */
+export function lockTraceReset(): void {
+  lockTrace.clear()
+  lockTraceTotal = 0
+}
+
 export function acquireFileLock(
   path: string,
   options: { timeoutMs?: number; staleMs?: number; label?: string; silent?: boolean; leaseMs?: number } = {},
 ): () => void {
+  recordAcquisition(path)
   const lock = lockDirFor(path)
   const timeoutMs = options.timeoutMs ?? LOCK_TIMEOUT_MS
   const staleMs = options.staleMs ?? LOCK_STALE_MS
