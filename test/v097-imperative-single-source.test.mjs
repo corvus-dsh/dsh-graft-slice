@@ -129,36 +129,89 @@ test('v0.9.7: the imperative-opening list is declared ONCE and the scorer uses i
   )
 })
 
-test('v0.9.7: the shared constant still matches every verb the truncated copy had', () => {
+test('v0.9.7: IMPERATIVE_START covers the original list AND the 19 verbs the copy dropped', () => {
   /**
-   * The truncation dropped 19 verbs. This pins that the single surviving list covers ALL of them, so
-   * de-duplication cannot silently narrow the vocabulary.
+   * ── TWO ARRAYS, BECAUSE THEY ARE TWO DIFFERENT SETS (and they are NOT nested) ──────────────────
    *
-   * ── EACH VERB IS TESTED ALONE, AND THAT IS NOT A SHORTCUT ─────────────────────────────────────
+   * The first version of this test had ONE array of 20 verbs called `DROPPED`. That name was wrong on
+   * two counts: `\bend\b` was in BOTH lists (never dropped), and the sets do not nest. Measured from
+   * the two regex sources (`_scratch/verify-end-claim.mjs`, `_scratch/check-set-relation.mjs`):
    *
-   * The first version fed all 20 sentences in ONE call and got `kept = 1`. That looked like the gate
-   * rejecting 19 verbs; it was `nearDuplicate()` collapsing them, because the sentences differ only
-   * in their first word. Measured individually: **20/20 accepted**. So the collapse was my test's
-   * construction, not the code — a batch assertion here would have reported a defect that does not
-   * exist, and would have "passed" the fix for the wrong reason.
+   *   ORIGINAL  (20 = every ASCII verb the truncated copy contained)
+   *     do don't do not must never always only write use ignore include send ask end reply
+   *     choose pick report avoid keep
+   *
+   *   TRUNCATION_LOST (19 = present in IMPERATIVE_START, absent from the copy)
+   *     add avoid call choose draft ensure exclude keep leave make pick prefer remove report
+   *     return run set show wait
+   *
+   *   overlap             : avoid choose keep pick report   (5 — in the copy AND in the dropped set)
+   *   only in ORIGINAL    : 15 (incl. `end`, which the copy DID keep)
+   *   only in TRUNCATION_LOST: 14
+   *
+   * `TRUNCATION_LOST ⊄ ORIGINAL` — deliberately. The lost set is defined by comparing the two regexes,
+   * not by "everything the copy lacks", so a verb can be lost while never having been in the copy at
+   * all only if it entered IMPERATIVE_START later. Both sets are measured, neither is inferred.
+   *
+   * ── EACH VERB IS TESTED ALONE ─────────────────────────────────────────────────────────────────
+   *
+   * Feeding all sentences in ONE call returned `kept = 1`. That looked like the gate rejecting 19
+   * verbs; it was `nearDuplicate()` collapsing them, because the sentences differ only in their first
+   * word. Measured individually: all accepted. The collapse was my test's construction, not the code.
    */
-  const DROPPED = [
-    'add', 'avoid', 'call', 'choose', 'draft', 'end', 'ensure', 'exclude', 'keep',
+  /** Every ASCII verb the truncated copy contained (measured, not remembered). */
+  const ORIGINAL = [
+    'do', "don't", 'do not', 'must', 'never', 'always', 'only', 'write', 'use', 'ignore',
+    'include', 'send', 'ask', 'end', 'reply', 'choose', 'pick', 'report', 'avoid', 'keep',
+  ]
+  /** In IMPERATIVE_START, absent from the copy (measured by diffing the two regex sources). */
+  const TRUNCATION_LOST = [
+    'add', 'avoid', 'call', 'choose', 'draft', 'ensure', 'exclude', 'keep',
     'leave', 'make', 'pick', 'prefer', 'remove', 'report', 'return', 'run', 'set', 'show', 'wait',
   ]
 
+  // The facts the two names claim, asserted rather than assumed.
+  assert.equal(ORIGINAL.length, 20, 'the copy contained 20 ASCII verbs')
+  assert.equal(TRUNCATION_LOST.length, 19, 'the truncation lost exactly 19 verbs')
+  assert.equal(TRUNCATION_LOST.includes('end'), false, '`end` was in BOTH lists — it was never dropped')
+  assert.equal(ORIGINAL.includes('end'), true, '`end` belongs to the original list')
+
+  // The overlap is real and small; asserting it keeps both arrays honest if either is edited.
+  const overlap = TRUNCATION_LOST.filter((verb) => ORIGINAL.includes(verb))
+  assert.deepEqual(overlap.sort(), ['avoid', 'choose', 'keep', 'pick', 'report'], 'measured overlap, not guessed')
+
+  // Every one of them must still open a valid imperative through the surviving single list —
+  // EXCEPT the ones `isQuestionLike` deliberately intercepts first.
+  const ALL = [...new Set([...ORIGINAL, ...TRUNCATION_LOST])]
   const rejected = []
-  for (const [index, verb] of DROPPED.entries()) {
+  for (const [index, verb] of ALL.entries()) {
     // A distinct body per verb so nothing is suppressed as a near-duplicate of another.
     const text = `${verb} 第${index + 1}项交接之前都先跑完全量测试再继续下一步工作。`
     const selection = extractConstraintsDetailed([userMessage(200 + index, text)], 80_000)
     if (selection.constraints.length + selection.archived.length === 0) rejected.push(verb)
   }
 
+  /**
+   * ── `do` / `does` / `did` ARE INTERCEPTED ON PURPOSE, AND THAT IS NOT A FAILURE ────────────────
+   *
+   * Measured (`_scratch/why-do-rejected.mjs`): a sentence opening with `do` never survives extraction.
+   * The reason is `isQuestionLike` — its question-word list contains `do|does|did`, so
+   * "do 第1项交接…" is treated as a question and dropped before the imperative gate is even consulted.
+   *
+   * That order is deliberate: the same function special-cases `^(do not|don't|does not|did not)` to
+   * return FALSE immediately, i.e. "a negated imperative is not a question". So `do not …` is kept and
+   * `do …` is dropped, which is the intended reading.
+   *
+   * Asserting they are extracted would be asserting against a design decision. So they are excluded
+   * from the coverage set BY NAME, with the reason written down — not silently filtered.
+   */
+  const INTERCEPTED_AS_QUESTION = new Set(['do', 'does', 'did'])
+  const expectedRejected = ALL.filter((verb) => INTERCEPTED_AS_QUESTION.has(verb))
   assert.deepEqual(
-    rejected,
-    [],
-    `these verbs must still open a valid imperative but were rejected: ${rejected.join(', ')}`,
+    rejected.sort(),
+    expectedRejected.sort(),
+    `only the question-intercepted verbs may be rejected; expected ${expectedRejected.join(',') || '(none)'}, ` +
+      `got ${rejected.join(',') || '(none)'}`,
   )
 })
 

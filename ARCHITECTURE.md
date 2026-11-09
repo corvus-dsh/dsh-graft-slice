@@ -124,6 +124,17 @@
 
 ---
 
+## TD-12 `IMPERATIVE_START` 的截断副本：结构缺陷，无可观测后果（P3，2026-11-09 登记并已修）
+
+| 项 | 内容 |
+|---|---|
+| 结构缺陷（存在） | 同一个函数里，同一个问题被问了两次、用了两份不同的词表。`hasImperative`（门禁）用 351 字符的 `IMPERATIVE_START`；计分用行内一份 **165 字符**的副本。实测（`_scratch/verify-end-claim.mjs`）：共同前缀 164 字符 = **覆盖 46.7%**；副本丢掉 **19 个动词**（add call draft ensure exclude leave make prefer remove return run set show wait 等）。`\bend\b` 两边都有，**从未被丢**。 |
+| 可观测后果（**未找到**） | 18 条真实风格句子上，修复前后 `extractConstraintsDetailed` 输出 **18/18 完全相同**（`_scratch/compare-behaviour-1680.mjs`）。那 2 分的差额只在候选竞争固定预算时影响排序，而实测中它从未翻盘 —— `必须` 一类句子另有 `EMPHATIC` 的 +2 主导，`prefer` 一类通常独自入选。**所以这不是「修复了 bug」；不能这样表述。** |
+| 潜在风险（真实） | 一旦 `EMPHATIC` 的词表收窄、或权重调整（例如把 `hard` 从 2 降到 1），那 2 分立刻变成可观测的排序差异。届时「同一句话在门禁与计分里被判成两回事」会直接表现为「本该优先的约束被挤出预算」。 |
+| 已做 | 删除行内副本，改用 `IMPERATIVE_START.test(normalized)`（一行）。不动任何正则本身、不动权重、不动 `EMPHATIC`。 |
+| 测试 | `test/v097-imperative-single-source.test.mjs`（3 条）：① `prefer X` 与 `必须 X` 都保留；② **结构性**：`^(请\|必须\|禁止\|不要\|不能\|不得\|务必` 在源码里只能出现 1 次（修复前实测 2 次 → 红）；③ 原表 20 个动词 + 副本丢掉的 19 个，逐个仍能开启合法祈使句（`do`/`does`/`did` 被 `isQuestionLike` 刻意拦截，已在测试里具名排除并写明理由）。 |
+| 为什么保留这条 TD | 缺陷已修，但**教训要留**：三份词表（`CONSTRAINT_PATTERN` 269 + `ACTION_PATTERN` 348 + `IMPERATIVE_START` 351 字符）分散在同一文件里。S1a 分类表把它们列为 A 类零覆盖，S1b-2 要把它们收成 4 个带 `samples`/`nearMisses` 的契约。 |
+
 ## TD-9 `scanAgentCommand`：**刻意保留的兼容层**，不是「8 个版本没处理」（P2，2026-11-09 登记）
 
 | 项 | 内容 |
