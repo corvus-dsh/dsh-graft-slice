@@ -135,6 +135,27 @@
 | 新代码该用什么 | `classifyAgentCommand` + `policyDecision(risk, mode)`。两者职责分离：前者只给风险等级，**不给裁决**；后者是唯一做决定的地方（见 README 的风险/策略分离小节）。 |
 | 退出条件（可验收） | ① `scripts/check-docs.mjs` 的断言改指 `classifyAgentCommand`；② `v81-guardrails.test.mjs` 全部改用 `classifyAgentCommand` + `policyDecision` 并断言等价判决；③ README 不再把 `scanAgentCommand` 当公开用法介绍；④ 全仓 `grep scanAgentCommand` 为 0（除 ARCHITECTURE 本条记录）；⑤ 全量测试数**不变**且全绿——证明迁移没有顺手丢掉任何一条护栏。 |
 
+## TD-10 焦点转移只存在于 observer；graft 侧需要可选入口（P2，2026-11-09 登记）
+
+| 项 | 内容 |
+|---|---|
+| 现状 | **焦点转移只在 `dsh-observer` 里实现。** 实测 `openSession` 出现次数：observer `client.js` **8** 次（`:68-94` 有完整的 openSession + 跳转）、memory **0** 次、graft **0** 次。当 observer 未安装（它是可选插件）时，**graft 切片完成后没有任何东西把界面跳过去**。 |
+| 为什么这不是「直接补一个跳转」 | **自动切片不跳转是正确的设计**：水位触发的切片是后台行为，多会话并发切片时自动跳转会打断用户正在做的工作。所以修复方向是**可选入口**，不是恢复默认跳转。 |
+| 已做（本轮） | `GraftConfig` 新增 `focusAfterGraft?: 'never' \| 'always' \| 'manual-only'`，**默认 `'never'`（与现状一致，不改行为）**。`'always'` / `'manual-only'` **被接受并记录，但尚未接线** —— 配置项与文档都明确标注这一点，**不发布一个不生效却不标注的开关**。 |
+| 若要实现的正确形态 | ① observer 孵化（用户点击触发）→ **默认跳转**（保留现状）；② graft 自动切片（水位触发）→ **默认不跳**，面板给「→ 跳到新会话」按钮；③ graft 手动切片（模型主动调用）→ `focusAfterGraft: 'always'` 时跳转；④ 多会话场景 → 面板显示「刚才 N 个会话完成切片」的列表，**而不是跳到某一个**。 |
+| 退出条件（可验收） | ① `'never'` 下行为与今天完全一致（测试数字不变）；② `'manual-only'` 只在工具主动调用路径跳转，自动路径不跳；③ `'always'` 覆盖两种路径；④ 多会话完成时**不**产生跳转，而是列出条目；⑤ 用测试固定「自动路径永不抢焦点」这一条——它是这个功能存在的理由。 |
+
+## TD-11 `graft_prepare` 没有内容入参：交接内容 100% 自动提取（P1，2026-11-09 登记）
+
+| 项 | 内容 |
+|---|---|
+| 现状 | `graft_prepare` 的参数**只有三个**：`sourceSessionId` / `targetSessionId` / `allowReslice`，且 `additionalProperties: false`（`src/index.ts:12667-12689` 实测）。**没有第四个参数可以承载内容。** |
+| 交接内容的来源 | `prepareSlice` 的 `review` 全部来自自动提取：`pending-state` 来自 `buildPendingState`，后者读 `extractTaskState` 的 `openTodos`，后者读 **`todo_write` 事件**。 |
+| 后果（机制，不是猜测） | 模型想交接时，**它能表达的唯一方式是触发自动提取**；而自动提取读的是**它上一轮写的 TODO** —— 那正是它此刻想覆盖的东西。于是：**轮次中途的「我想交接什么」无法表达；未更新 TODO 时，交接单反映的是上一轮状态。** |
+| 建议修法 | 新增**可选** `handover?: { goal?, pending?, constraints?, notes? }`：提供则**覆盖**对应字段；`review` 里标注「本段由模型提供」；**`digest` 必须把 `handover` 计入** —— 否则「用户审阅的是这一版」这条保证失效（digest 是审阅对象的指纹）。 |
+| 与 G5 的关系 | G5 要搬的 `buildPendingState` / `renderTaskBoard` **正是这套自动提取的实现**。所以在 TD-11 的方案定下来之前，**G5 只搬 `extractTaskState` / `checkTaskBoundary` / `checkSafeHarbor` 三件套**，不搬 `buildPendingState` / `renderTaskBoard` —— 避免搬完就改。 |
+| 退出条件（可验收） | ① 模型提供 `handover` 时，`review` 与 `digest` **都**反映它；② 不提供时行为不变（598 条测试全绿）；③ digest 变化必须能被「用户确认过的 digest」检查捕获（提供与不提供是两份不同的 digest）。 |
+
 ## 本次发版（v0.22）**不做**的事
 
 - 不搬迁 `index.ts` 的任何大段代码（TD-1 / TD-2 / TD-6）。

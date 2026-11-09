@@ -4725,6 +4725,23 @@ export const inject = ['tools', 'sessions', 'sessionQuery', 'sessionPersistence'
      
                                  
      
+                                                                                   
+    
+                                                                                                   
+    
+                                                                                                      
+                                                                                                      
+                                                                                                   
+                                                                             
+    
+                                                                                                      
+                                                                                     
+    
+                                                                                                   
+                                                                                                    
+     
+                                                      
+     
                                                                                  
                                      
     
@@ -5160,6 +5177,16 @@ export function normalizeConfig(config                         )                
      * `<= 0` and `Infinity` as "no limit") rather than by special-casing the parser.
      */
     harborOpenCallMaxAgeMs: asFiniteInteger(input.harborOpenCallMaxAgeMs, 600_000, 'harborOpenCallMaxAgeMs'),
+    /**
+     * `'never'` keeps today's behaviour exactly: no focus transfer from this plugin. `'always'` and
+     * `'manual-only'` are ACCEPTED AND RECORDED but **not implemented** — see TD-10. Recording them
+     * rather than rejecting them lets a profile declare its intent, and the config is validated so a typo
+     * cannot silently fall back.
+     */
+    focusAfterGraft:
+      input.focusAfterGraft === 'always' || input.focusAfterGraft === 'manual-only'
+        ? input.focusAfterGraft
+        : 'never',
     // v7.4 (decision 2): off unless asked. See the config doc for why n=1 is not
     // enough evidence to make this the default.
     autoAdaptiveTier: input.autoAdaptiveTier === true,

@@ -644,6 +644,23 @@ export interface GraftConfig {
    */
   harborOpenCallMaxAgeMs?: number
   /**
+   * v0.9.4: whether a completed graft should move the UI focus to the new session.
+   *
+   * ── WHY THE DEFAULT IS `'never'`, AND WHY THE SWITCH EXISTS WITHOUT DOING ANYTHING YET ────────
+   *
+   * Focus transfer lives ONLY in `dsh-observer/client.js` today (8 `openSession` occurrences; graft's
+   * own client has 0). When observer is installed — and it is optional — hatching a main moves the UI
+   * there. Grafter's automatic slice has no such call, and that is CORRECT for the automatic path:
+   * a background migration must not steal focus from what the user is doing.
+   *
+   * But with observer absent, a manual slice leaves the user with nothing pointing at the result. The
+   * honest fix is an OPT-IN, not a default: auto slices never jump, manual ones may.
+   *
+   * **`'always'` IS NOT WIRED YET** — stated here and in README rather than shipping a switch that
+   * silently does nothing. See ARCHITECTURE.md TD-10 for the intended shape and the exit condition.
+   */
+  focusAfterGraft?: 'never' | 'always' | 'manual-only'
+  /**
    * v7.4 (decision 2): let the TASK STATE, not just the conversation shape, pick
    * the replay tier. Off by default.
    *
@@ -1080,6 +1097,16 @@ export function normalizeConfig(config: GraftConfig | undefined): Required<Graft
      * `<= 0` and `Infinity` as "no limit") rather than by special-casing the parser.
      */
     harborOpenCallMaxAgeMs: asFiniteInteger(input.harborOpenCallMaxAgeMs, 600_000, 'harborOpenCallMaxAgeMs'),
+    /**
+     * `'never'` keeps today's behaviour exactly: no focus transfer from this plugin. `'always'` and
+     * `'manual-only'` are ACCEPTED AND RECORDED but **not implemented** — see TD-10. Recording them
+     * rather than rejecting them lets a profile declare its intent, and the config is validated so a typo
+     * cannot silently fall back.
+     */
+    focusAfterGraft:
+      input.focusAfterGraft === 'always' || input.focusAfterGraft === 'manual-only'
+        ? input.focusAfterGraft
+        : 'never',
     // v7.4 (decision 2): off unless asked. See the config doc for why n=1 is not
     // enough evidence to make this the default.
     autoAdaptiveTier: input.autoAdaptiveTier === true,
