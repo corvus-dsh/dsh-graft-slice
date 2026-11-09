@@ -9086,7 +9086,7 @@ function autoTargetId(settings: Required<GraftConfig>): string {
  *
  *     graft_prepare({})                        -> INVALID_ARGUMENT (blocked)
  *     graft_prepare({sourceSessionId:"current"}) -> session "current" not found
- *     graft_prepare({sourceSessionId:"auto-graft-mw21oowu-e7kcmk"}) -> SUCCEEDED
+ *     graft_prepare({sourceSessionId:"<某个从别处抓来的旧会话 id>"}) -> SUCCEEDED
  *
  * That third id was scraped out of a stored skill's text — someone else's OLD session. The slice
  * succeeded and handed over the WRONG CONVERSATION, with no error anywhere. A silent wrong answer

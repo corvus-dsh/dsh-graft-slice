@@ -25,7 +25,16 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { ALL_CONTRACTS } from '../src/contracts/model-wording.ts'
+/**
+ * The metadata now lives in `model-wording.contracts.ts` (E1): `bundle.mjs` inlines whole FILES, so
+ * keeping the metadata beside the regexes meant every `samples` entry — real `session-<uuid>` ids,
+ * `.jsonl.zstd` filenames — was inlined into the PUBLISHED bundle. Measured before the split: 2 session
+ * ids, 5 corpus filenames, 8 `auto-graft-*` names.
+ *
+ * This test imports the metadata file directly (Node strips the types), which is exactly the property
+ * being asserted elsewhere: production cannot reach it, tests can.
+ */
+import { ALL_CONTRACTS } from '../src/contracts/model-wording.contracts.ts'
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
 const CORPUS = resolve(REPO, '..', '_scratch', 'real-texts.json')
