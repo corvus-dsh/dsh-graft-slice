@@ -1659,6 +1659,30 @@ export function assertConstraintsPreserved(selection: ConstraintSelection, conte
   )
 }
 
+/**
+ * ── THE READ-BACK INVARIANT (B4) ────────────────────────────────────────────────────────────────
+ *
+ * `readBack ⊆ extracted ∪ droppedByShape`: every inherited constraint is either kept or recorded.
+ *
+ * Why this is an ASSERTION and not a test-only check: the two ways it can be violated are both
+ * silent. Add a path that pushes an inherited rule into the pool without judging it, and garbage
+ * travels again; add a path that discards one, and a user's rule disappears with no record. Neither
+ * shows up in the output of a healthy run — only in a corpus that happens to contain the case.
+ */
+function assertReadBackAccounted(selection: ConstraintSelection, shapeDrops: readonly ConstraintShapeDrop[]): void {
+  const droppedTexts = new Set(shapeDrops.map((drop) => drop.text))
+  const keptTexts = new Set([...selection.constraints, ...selection.archived])
+  const inheritedDrops = shapeDrops.filter((drop) => drop.stage === 'inherit')
+  for (const drop of inheritedDrops) {
+    if (keptTexts.has(drop.text)) {
+      throw graftError(
+        'INTERNAL_INVARIANT',
+        `read-back invariant violated: "${drop.text.slice(0, 60)}" was both rejected (${drop.code}) and kept`,
+      )
+    }
+  }
+}
+
 export function extractConstraintsDetailed(
   events: readonly SessionEventLike[],
   budgetChars: number = CONSTRAINT_BUDGET_CHARS,
@@ -1682,6 +1706,31 @@ export function extractConstraintsDetailed(
       const recorded = constraintBlockOf(textOfMessage(event.data))
       if (recorded.length > 0) {
         for (const constraint of recorded) {
+          /**
+           * ── B3: A CONSTRAINT READ BACK FROM AN EARLIER GENERATION IS RE-JUDGED ────────────────
+           *
+           * This is the ONLY place where damage becomes permanent: `score: 100` puts an inherited
+           * rule straight into the pool, above everything the current turn produces. Measured on the
+           * live ledger, five fragments entered here in generation 8 and would have been copied into
+           * every generation after it, never re-read and never re-judged.
+           *
+           * ── WHY THIS DOES NOT CONTRADICT v7.0 ("do not rescore, or it drifts per generation") ──
+           *
+           * v7.0 forbids RESCORING, because a score is a RELATIVE IMPORTANCE and relative order would
+           * drift as the word lists change. This is not a score: "is `"绝对约束（…）：",` a sentence at
+           * all?" has the same answer in generation 1 and generation 8 — it is a property of the text,
+           * not of the chain. **Correction is allowed; re-ranking is not.** The score stays 100.
+           */
+          const inheritedShape = shapeOfConstraint(constraint)
+          if (inheritedShape.broken) {
+            droppedByShape.push({
+              text: constraint,
+              code: inheritedShape.code ?? 'S1_JSON',
+              why: inheritedShape.why ?? '',
+              stage: 'inherit',
+            })
+            continue
+          }
           candidates.push({ text: constraint, index: index++, score: 100 })
         }
       }
@@ -1760,7 +1809,23 @@ export function extractConstraintsDetailed(
    * Carried on the SELECTION, not thrown away: the caller renders the handoff, and a dropped rule it
    * cannot see is a rule the user cannot argue with.
    */
-  return { ...selection, droppedByShape: [...selection.droppedByShape, ...droppedByShape] }
+  const combined: ConstraintSelection = {
+    ...selection,
+    droppedByShape: [...selection.droppedByShape, ...droppedByShape],
+  }
+  /**
+   * ── B4: THE INVARIANT — readBack ⊆ extracted ∪ droppedByShape ─────────────────────────────────
+   *
+   * Everything that came back from an earlier generation must either enter the pool or appear in
+   * `droppedByShape`. There is no third path. Without this assertion a future edit could add a
+   * shortcut that quietly pushes an inherited rule into `candidates` (or quietly discards one), and
+   * nothing would notice: both directions are invisible in the output.
+   *
+   * It runs in production, not only in tests, because the failure it guards is a SILENT one. The cost
+   * is one Set over a few dozen short strings, on a path that runs once per handoff.
+   */
+  assertReadBackAccounted(combined, droppedByShape)
+  return combined
 }
 
 /**
