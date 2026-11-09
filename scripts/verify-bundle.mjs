@@ -256,6 +256,26 @@ if (surface !== undefined && !surface.includes('default')) {
       'utf8',
     )
     check('export surface: baseline recorded', true, `${surface.length} exports (first run)`)
+  } else if (baseline.count !== baseline.exports.length) {
+    /**
+     * A FIELD THE GATE IGNORES IS A FIELD THAT CAN LIE.
+     *
+     * `count` is redundant (`exports.length` is the truth), and the first version of this check read
+     * only `exports` — so editing `count` to 999 changed nothing and still exited 0. That is worse
+     * than not having the field: it invites someone to "update the count" and believe they changed
+     * the contract, and it lets an inconsistent file survive review.
+     *
+     * Measured in `_scratch/prove-surface-gate.mjs` CASE 3 before this branch existed: count=999,
+     * names identical ⇒ exit 0, file untouched. Now it is RED, and the baseline is NOT rewritten —
+     * a corrupted baseline must be fixed by hand, not silently normalised by the gate that just
+     * refused it.
+     */
+    check(
+      'export surface: baseline is self-consistent',
+      false,
+      `.export-surface.json says count=${baseline.count} but lists ${baseline.exports.length} exports — ` +
+        'fix the file by hand (the gate will not rewrite a baseline it just refused)',
+    )
   } else {
     const previous = baseline.exports
     const added = surface.filter((name) => !previous.includes(name))
