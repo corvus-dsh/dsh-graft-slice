@@ -1,5 +1,10 @@
 # dsh-graft-slice
 
+> **This document is a FROZEN TRANSLATION.** It is kept as a historical record and is **not** maintained.
+> Numbers here describe the version at the time of writing; **the authoritative, gate-checked facts live in
+> [README.md](./README.md)**. If a count below disagrees with `README.md`, `README.md` is right.
+> The gate `scripts/check-readme-counts.mjs` checks this file only for un-dated CURRENT claims (see its header).
+
 Log slicing and minimal injection for DeepSeek Harness. It cuts a finished source session at its last `turn/end`, then creates a zero-inheritance, cold-resumable handoff session. No fork, no SQLite, no standalone `tool/result` injection.
 
 Target runtime: DSH **0.2.1-rc.5** (the installed desktop build).
@@ -165,7 +170,7 @@ node scripts/scan-real-logs.mjs        # read-only scan of every local persisted
 ## v5.2 crash postmortem and architecture fix
 
 - Outage cause: the detached target was pushed into the live store via `sessions.enter()` / `sessions.announce()`, and the target received forged `request/header` + permission events copied from the source. On restart DSH restored those half-live sessions and crashed; safe mode failed as well.
-- Both mechanisms are removed. Targets stay detached: `prepare 鈫抪ersistence.create 鈫抋ppend 鈫抐lush 鈫抍lose 鈫抴orkspace attach`.
+- Both mechanisms are removed. Targets stay detached: `prepare → persistence.create → append → flush → close → workspace attach`.
 - Runtime state (model, tools, permissions) is rebuilt by the target's own agent loop; only `agentPreset` is inherited. No log-level impersonation.
 - `stableCtx.get()` now falls back to the live context, which fixed the late-bound `workspaceRegistry` that made the autoGraft path skip workspace attach.
 - Isolated verification: a new target auto-attached to its workspace without editing `workspace.json`; two consecutive restarts resumed it with `exit=0`; skeleton has no `surfaceOp`; seeded `assistant/message` has `stream: []`; no `sourceEventSeqs`.
@@ -176,7 +181,7 @@ The post-crash lesson is not "runtime state cannot migrate" but "migrate the dur
 
 | Event | Projection | Migrate? |
 |---|---|---|
-| `model/selection` | `modelSelection` (`lastUsed` / `pending`) | yes 鈥攊t is the user's choice |
+| `model/selection` | `modelSelection` (`lastUsed` / `pending`) | yes — it is the user's choice |
 | `permission/preset` | `permissions.preset` | yes |
 | `sandbox/mode` | `permissions.sandbox` | yes |
 | `approval/policy` | `permissions.approval` | yes |
@@ -185,7 +190,7 @@ The post-crash lesson is not "runtime state cannot migrate" but "migrate the dur
 
 `extractRuntimeIntent()` reads these four from the **full** source log; `buildInjectionEvents()` writes them into the target seed **after** `turn/end`, which is where DSH itself writes them, all `surface: false`.
 
-The autoGraft snapshot truncates at the last `turn/end` (to avoid slicing an open turn), and the knobs live just past it 鈥攕o autoGraft extracts the intent from the complete event list separately.
+The autoGraft snapshot truncates at the last `turn/end` (to avoid slicing an open turn), and the knobs live just past it — so autoGraft extracts the intent from the complete event list separately.
 
 Verification (isolated headless):
 
@@ -196,7 +201,7 @@ tgt  lab6-mvxlqnqw-e8rqvu  ... turn/end, permission/preset, sandbox/mode,
                            v4 validator PASS, two restarts exit=0
 ```
 
-Decisive check 鈥攆olding the target log with DSH's own `applyModelSelectionProjection`:
+Decisive check — folding the target log with DSH's own `applyModelSelectionProjection`:
 
 ```text
 lastUsed = { provider: qodercn, model: dfmodel }                  (this run's profile default)
@@ -217,7 +222,7 @@ So the target resumes on the source route even though the profile default differ
 Observed on this machine:
 
 ```text
-43 tests passed   # v5.1 snapshot, historical 鈥攖he current suite is 95
+43 tests passed   # v5.1 snapshot (historical; see the current count in README.md)
 317 real logs parsed; 299 plan-ok; 16 open-turn; 2 no-closed-turn; 0 other failures
 sealed sandbox activation PASS (sandbox_verify, clean profile)
 real v4 validator: synthetic-1-1 PASS, real-log PASS, plugin:graft fallback PASS, 0/0 FAIL as expected
@@ -232,7 +237,7 @@ plugin_manager(action: "install_bundle", target: "<path-to-dsh-graft-slice>")
 Then call:
 
 ```text
-graft_slice_and_inject({ sourceSessionId: "session-鈥? newSessionId: "session-graft-鈥?})
+graft_slice_and_inject({ sourceSessionId: "session-…", newSessionId: "session-graft-…" })
 ```
 
 Refresh the Web UI session list and resume the new session. Set `retireSource: false` in `cordis.patch.yml` if the source must remain live.

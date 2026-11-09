@@ -124,10 +124,22 @@
 
 ---
 
+## TD-9 `scanAgentCommand`：**刻意保留的兼容层**，不是「8 个版本没处理」（P2，2026-11-09 登记）
+
+| 项 | 内容 |
+|---|---|
+| 事实 | `src/index.ts` 的 `scanAgentCommand(command, workspace)` 带 `@deprecated v0.18` 标记至今仍在导出面上。它**不是**被遗忘的死代码：审计一度把它归入「标了废弃却跨 8 个版本没处理」，这个判断是错的——它是**有意保留的兼容层**。 |
+| 它现在做什么 | 内部只做一件事：调 `classifyAgentCommand(command, workspace)`（风险分级 `safe \| unknown \| destructive`），再套上历史判决 `{ decision: 'deny' }`。**`deny` 是它唯一的判决**——它从不返回 allow，因为「允许」在历史 API 里用 `undefined` 表达。 |
+| 谁在用（删了会红哪条） | ① `scripts/check-docs.mjs:181` —— 文档门禁断言 README 提到 `scanAgentCommand(`；② `test/v81-guardrails.test.mjs` —— 多处直接调用并断言 `decision`（含 `Remove-Item -Recurse C:\` 必须是 `deny`）；③ `test/v103-seam-inventory.test.mjs` —— 把它钉成 **REFERENCED_NOT_A_SEAM**，专门防止有人把它当 seam 折叠或删除。 |
+| 为什么不删 | 删它 = **改变行为**，不是清理：① 上面两个测试会红；② 文档门禁会红；③ 任何仍在 import 它的外部调用方会从「拿到 deny」变成「拿到 undefined」——在一个安全护栏上，这个方向的错误是 fail-open。冻结期不做行为变更。 |
+| 新代码该用什么 | `classifyAgentCommand` + `policyDecision(risk, mode)`。两者职责分离：前者只给风险等级，**不给裁决**；后者是唯一做决定的地方（见 README 的风险/策略分离小节）。 |
+| 退出条件（可验收） | ① `scripts/check-docs.mjs` 的断言改指 `classifyAgentCommand`；② `v81-guardrails.test.mjs` 全部改用 `classifyAgentCommand` + `policyDecision` 并断言等价判决；③ README 不再把 `scanAgentCommand` 当公开用法介绍；④ 全仓 `grep scanAgentCommand` 为 0（除 ARCHITECTURE 本条记录）；⑤ 全量测试数**不变**且全绿——证明迁移没有顺手丢掉任何一条护栏。 |
+
 ## 本次发版（v0.22）**不做**的事
 
 - 不搬迁 `index.ts` 的任何大段代码（TD-1 / TD-2 / TD-6）。
 - 不改阈值常量的数值与所属层（TD-3）。
 - 不实现技能合并的落盘（TD-4）。
+- 不删除 `scanAgentCommand`（TD-9：删它是行为变更，退出条件见上）。
 
 以上各项均已登记且有退出条件；发版后按「一次一个模块 + 全量测试 + 真机切片」的节奏推进。
