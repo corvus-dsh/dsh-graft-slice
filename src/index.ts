@@ -6465,9 +6465,35 @@ function persistConstraintSections(ctx: PluginContextLike | undefined): void {
     mkdirSync(dirname(constraintSectionsPath), { recursive: true })
     withFileLock(constraintSectionsPath, () => {
       const payload = readJsonRecord(constraintSectionsPath) as Record<string, { constraints: string[]; at: number }>
+      /**
+       * ── A4: DO NOT WRITE FRAGMENTS INTO THE LEDGER ─────────────────────────────────────────────
+       *
+       * The ledger is what the NEXT generation reads back, so writing a fragment here is how one bad
+       * turn becomes permanent damage (measured: 5 of 40 entries across 8 generations, all in the
+       * newest one — the damage was born here).
+       *
+       * ── AND WHY EXISTING ENTRIES ARE NOT REWRITTEN ────────────────────────────────────────────
+       *
+       * The ledger is AUDIT EVIDENCE: it records what a previous build actually injected. Rewriting
+       * it on activation would erase the proof that the bug existed, and would make the incident
+       * unreproducible. So this filters on WRITE only; reads are filtered at A2 and B3, which is where
+       * behaviour is decided. `graft_debug_status` still shows the historical entries.
+       */
       for (const [id, entry] of targetConstraintSections) {
         const existing = payload[id]
-        if (existing === undefined || Number(entry.at ?? 0) >= Number(existing.at ?? 0)) payload[id] = entry
+        if (existing === undefined || Number(entry.at ?? 0) >= Number(existing.at ?? 0)) {
+          const shaped = splitByShape(
+            (entry as { constraints?: unknown }).constraints?.filter?.((value: unknown): value is string => typeof value === 'string') ?? [],
+            'ledger',
+          )
+          if (shaped.dropped.length > 0) {
+            ctx?.logger?.warn?.(
+              `[dsh-graft-slice] not recording ${shaped.dropped.length} malformed constraint(s) for ${id}: ` +
+                shaped.dropped.map((drop) => drop.code).join(','),
+            )
+          }
+          payload[id] = { ...(entry as { at: number }), constraints: shaped.kept }
+        }
       }
       for (const [id, entry] of Object.entries(payload)) {
         if (isRecord(entry) && Array.isArray(entry.constraints) && !targetConstraintSections.has(id)) {
@@ -6961,7 +6987,25 @@ function loadPendingConstraints(ctx: PluginContextLike): void {
     for (const item of parsed) {
       if (!isRecord(item)) continue
       if (typeof item.targetId !== 'string' || !Array.isArray(item.constraints)) continue
-      const constraints = item.constraints.filter((value: unknown): value is string => typeof value === 'string')
+      const strings = item.constraints.filter((value: unknown): value is string => typeof value === 'string')
+      /**
+       * ── A2: THE ONLY REPAIR DOOR FOR TEXT THAT IS ALREADY ON DISK ──────────────────────────────
+       *
+       * A queue written by an older build still holds whatever that build accepted. Filtering only at
+       * injection time would repair the output but leave the file poisoned forever — and every
+       * subsequent load would carry it again. Filtering HERE means one activation fixes the store.
+       *
+       * The dropped entries are logged but the file is NOT rewritten on load: the queue is audit
+       * evidence (the review's instruction), so filtering changes what is USED, not what is KEPT.
+       */
+      const shaped = splitByShape(strings, 'accept')
+      if (shaped.dropped.length > 0) {
+        ctx.logger?.warn?.(
+          `[dsh-graft-slice] ignoring ${shaped.dropped.length} malformed queued constraint(s) for ${String(item.targetId)}: ` +
+            shaped.dropped.map((drop) => drop.code).join(','),
+        )
+      }
+      const constraints = shaped.kept
       if (constraints.length === 0) continue
       pendingConstraints.set(item.targetId, {
         sourceSessionId: typeof item.sourceSessionId === 'string' ? item.sourceSessionId : '',
@@ -10690,6 +10734,48 @@ export interface GraftConsoleState {
   generatedAt: string
 }
 
+/**
+ * ── WHY THIS FUNCTION IS AT MODULE TOP LEVEL (it was inside `apply()` once) ─────────────────────
+ *
+ * It was first added directly above `takePendingConstraintMessages`, which is written at column 0
+ * and therefore LOOKS top-level. It is not: that function is a CLOSURE inside `apply()` (it captures
+ * `ctx`), so the helper inherited apply's scope. The two call sites inside apply worked; the two at
+ * top level — `loadPendingConstraints` (A2) and `persistConstraintSections` (A4) — threw
+ * `splitByShape is not defined`. A4's throw was swallowed by its own try/catch and only logged, so
+ * the symptom appeared as "the shield must be written to disk" in v72-hardening rather than a crash.
+ *
+ * The lesson is not "indent carefully". It is that scope must be proven by the runtime (the runtime
+ * said `typeof splitByShape === 'undefined'` at module end while the text said column 0), and that a
+ * catch-all try/catch around a ledger write can hide a ReferenceError for an entire release.
+ */
+
+/**
+ * ── A-FAMILY: ONE FILTER, FOUR SITES ────────────────────────────────────────────────────────────
+ *
+ * The shape judge is applied where a constraint is ACCEPTED or WRITTEN, not only where it is
+ * extracted. Extraction is one door; a rule can also arrive from the pending queue, from an earlier
+ * generation's ledger, or from a handoff block being rendered right now. Filtering only the first
+ * door leaves the other three open — measured: the live contamination arrived through the ledger.
+ *
+ * Every call returns the survivors AND the rejects, so no path can drop something without a record.
+ */
+function splitByShape(
+  texts: readonly string[],
+  stage: ConstraintShapeDrop['stage'],
+): { kept: string[]; dropped: ConstraintShapeDrop[] } {
+  const kept: string[] = []
+  const dropped: ConstraintShapeDrop[] = []
+  for (const text of texts) {
+    const verdict = shapeOfConstraint(text)
+    if (verdict.broken) {
+      dropped.push({ text, code: verdict.code ?? 'S1_JSON', why: verdict.why ?? '', stage })
+      continue
+    }
+    kept.push(text)
+  }
+  return { kept, dropped }
+}
+
 export function apply(ctx: PluginContextLike, config: GraftConfig = {}): void {
   const settings = normalizeConfig(config)
   configureRetiredStore(ctx, settings)
@@ -10959,7 +11045,25 @@ function takePendingConstraintMessages(agentId: string): any[] {
   constraintsApplied.add(agentId)
   pendingConstraints.delete(agentId)
   persistPendingConstraints(ctx)
-  ctx.logger?.info?.(`[dsh-graft-slice] injecting ${payload.constraints.length} async constraint(s) into ${agentId}`)
+  /**
+   * ── A1: FILTER BEFORE INJECTING, AND SAY HOW MANY WERE DROPPED ────────────────────────────────
+   *
+   * This is the door the live contamination used in generation 8: five fragments went out as
+   * "[系统提示] 这个会话从旧会话继承了以下长期约束". The irony is worth naming — injecting garbage
+   * *properly framed* is still injecting garbage, which is exactly the C2 note in the backlog.
+   *
+   * A message whose rules are ALL rejected is not sent at all: an empty "以下约束，请遵守：" block is
+   * worse than silence, because a reader will look for rules that are not there.
+   */
+  const accepted = splitByShape(payload.constraints, 'accept')
+  if (accepted.dropped.length > 0) {
+    ctx.logger?.warn?.(
+      `[dsh-graft-slice] dropped ${accepted.dropped.length} malformed inherited constraint(s) for ${agentId}: ` +
+        accepted.dropped.map((drop) => `${drop.code}`).join(','),
+    )
+  }
+  if (accepted.kept.length === 0) return []
+  ctx.logger?.info?.(`[dsh-graft-slice] injecting ${accepted.kept.length} async constraint(s) into ${agentId}`)
   return [
     {
       id: `graft-constraints-${agentId}` as any,
@@ -10973,7 +11077,7 @@ function takePendingConstraintMessages(agentId: string): any[] {
           type: 'text',
           text: [
             '[系统提示] 这个会话从旧会话继承了以下长期约束，请在整个会话中遵守：',
-            ...payload.constraints.map((item, index) => `${index + 1}. ${item}`),
+            ...accepted.kept.map((item, index) => `${index + 1}. ${item}`),
           ].join('\n'),
         },
       ],

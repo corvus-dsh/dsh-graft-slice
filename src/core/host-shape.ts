@@ -159,6 +159,15 @@ export function parseIdentityMetadata(text: string): GraftIdentity | undefined {
   }
 }
 
+/**
+ * A3 — the renderer is the LAST door: it writes the block the next generation reads back.
+ *
+ * `core/constraint-shape.ts` has no imports of its own, so importing it here cannot create a cycle.
+ * Filtering at render time closes the case where a caller assembles the constraint list before the
+ * shape gate existed (or bypasses it).
+ */
+import { shapeOfConstraint } from './constraint-shape.js'
+
 function goalMessage(
   cwd: string,
   goal: string,
@@ -255,11 +264,23 @@ function goalMessage(
   // The enumeration is deliberately mechanical: the failure mode this guards
   // against is a model that summarises "the main constraints" and silently
   // drops the one it was about to violate.
-  if (constraints.length > 0) {
+  /**
+   * ── A3: THE BLOCK THAT REACHES THE NEXT GENERATION IS FILTERED HERE TOO ────────────────────────
+   *
+   * This function writes the text a FUTURE session reads back with `constraintBlockOf`. A fragment
+   * written here does not merely look bad in one handoff — it becomes inherited input for every
+   * generation after it. Filtering at extraction, inheritance and acceptance but not here would leave
+   * exactly one path by which damage still reaches the ledger.
+   *
+   * The numbering is computed AFTER filtering so the block never shows a gap: a reader who sees
+   * "1. … 3. …" concludes a rule was lost silently, which is the failure this whole change is about.
+   */
+  const shapedConstraints = constraints.filter((constraint) => !shapeOfConstraint(constraint).broken)
+  if (shapedConstraints.length > 0) {
     lines.push(
       '',
       'HARD CONSTRAINTS（从源会话用户消息中抽取，逐条有效，不可协商）:',
-      ...constraints.map((constraint, index) => `${index + 1}. [ ] ${constraint}`),
+      ...shapedConstraints.map((constraint, index) => `${index + 1}. [ ] ${constraint}`),
       '',
       'If asked about constraints or progress, you MUST enumerate every single item above without skipping or summarizing.',
     )
