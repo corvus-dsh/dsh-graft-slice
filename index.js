@@ -6353,7 +6353,24 @@ export function extractConstraintsDetailed(
       if (!ACTION_PATTERN.test(normalized)) continue
       if (candidates.some((candidate) => nearDuplicate(candidate.text, normalized))) continue
       const hard = /(\bmust\b|\bnever\b|\bdon't\b|\bdo not\b|\bcannot\b|\balways\b|\bonly\b|必须|禁止|绝对|不能|不得|务必)/iu.test(normalized) ? 2 : 0
-      const imperative = /^(请|必须|禁止|不要|不能|不得|务必|\bdo\b|\bdon't\b|\bdo not\b|\bmust\b|\bnever\b|\balways\b|\bonly\b|\bwrite\b|\buse\b|\bignore\b|\binclude\b|\bsend\b|\bask\b|\bend\b|\breply\b)/iu.test(normalized) ? 2 : 0
+      /**
+       * ── v0.9.7: THIS USED TO BE A SECOND, TRUNCATED COPY OF `IMPERATIVE_START` ─────────────────
+       *
+       * The line here was an inline `^(请|必须|禁止|…|\bend\b|\breply\b)` — a 165-character prefix of
+       * the 351-character `IMPERATIVE_START` declared above. Measured (`_scratch/measure-1359-1680.mjs`):
+       *
+       *     common prefix   = 164 chars  → 46.7% of the original
+       *     verbs dropped   = 19  (add avoid call choose draft end ensure exclude keep
+       *                            leave make pick prefer remove report return run set show wait)
+       *
+       * So the same sentence was asked "are you an imperative opening?" TWICE and could get two
+       * answers: the GATE at `hasImperative` used the full list, this SCORER used the truncated one.
+       * `prefer X` passed the gate and then earned +0 instead of +2 — measured score 3 vs 5, a 2-point
+       * deficit on a scale of 1..7, in the number that decides which rules fill a fixed prompt budget.
+       *
+       * It is ONE question. It now has ONE list.
+       */
+      const imperative = IMPERATIVE_START.test(normalized) ? 2 : 0
       const actionHits = (normalized.match(ACTION_PATTERN) ?? []).length
       const lengthBonus = normalized.length >= 20 && normalized.length <= 240 ? 1 : 0
       const scopeBonus = (messageScope ? 6 : 0) + (SESSION_SCOPE_PATTERN.test(normalized) ? 4 : 0)
