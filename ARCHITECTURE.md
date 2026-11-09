@@ -49,7 +49,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 现状 | **v7.7 起：`src/index.ts` 12,710 行**（v7.6 为 12,614；本轮接入彼岸层只增不减，见 TD-8）。已抽出 `core/host-shape.ts`（996 行）、`core/ignition.ts`（1,005 行）与 `core/paradise-write.ts`（240 行）。剩余部分仍含 90+ 导出、约 60 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册 |
+| 现状 | **v7.7 起：`src/index.ts` 13,271 行 / 12,742 非空**（v7.6 为 12,614；本轮接入彼岸层只增不减，见 TD-8）。**行数口径：`wc -l`** —— `content.split(/\r?\n/)`，且文件以换行结尾时不计末尾空项；非空行 = 该数组中 `trim().length > 0` 的个数。已抽出 `core/host-shape.ts`（996 行）、`core/ignition.ts`（1,005 行）与 `core/paradise-write.ts`（240 行）。剩余部分仍含 90+ 导出、约 60 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册 |
 | 影响 | 单文件让「改 A 碰坏 B」的排查成本变高；diff review 困难；IDE 索引与增量构建变慢；新人无法按职责分层阅读 |
 | 为什么现在不动 | 见下方 TD-7：本轮只搬了「与彼岸层真正重叠」的两块。剩下的搬运是纯位移，不减复杂度，且 84 个测试文件直接 import 那些区域的 30 个符号 |
 | 退出条件（可验收） | ① 按职责拆成 `session-slice.ts` / `tape.ts` / `injection.ts` / `ledger.ts` / `guards.ts` / `console.ts` / `tools.ts` 等模块，每个 ≤ 800 行；② `index.ts` 只保留 `apply()` 装配与再导出，≤ 300 行；③ **拆前后测试数不变、全绿**；④ `scripts/build.mjs` 的产物字节差异仅来自模块边界（banner 与 import 语句）；⑤ 每个模块导出面的 `grep` 参考计数与拆前一致（防止顺手删了导出） |
@@ -63,7 +63,7 @@
 | 现状 | v7.6 只抽出了与 `dsh-paradise` **真正重叠**的两块：`core/host-shape.ts`（996 行）与 `core/ignition.ts`（921 行）。`index.ts` 仍有两大块没有搬：<br>① **存储 / 账本 / 墓碑 / 转生**（约 1,517 行）：`.retired.json`、`.transferred.json`、`.graft-targets.json`、`.graft-prepared.json`、事务恢复、锁的调用点；<br>② **工具注册层**（约 4,119 行）：8 个工具的 `parameters` / `output.schema` / `render` 样板，加上 `agent/pre-step`、`agent/turn-stopping`、`session/event` 的监听与水位判定。 |
 | 为什么不搬 | **不是因为难，是因为没有收益。** 这两块与彼岸层**零重叠**：存储层是 graft 私有的转生账本（`dsh-paradise` 不关心一个会话为什么被退休），工具层是 graft 自己的对外门面（协议层不该知道 `graft_prepare` 的 schema）。<br>把它们搬到 `src/core/` 只是**换文件**——总行数不变、耦合不变、认知负担不变，但会新增两类风险：<br>（a）84 个测试文件直接 import 这两个区域的 **30 个符号**（`acquireFileLock`、`recoverGraftTransactions`、`renderTaskBoard`、`graftSliceAndInject`、`readLedgerPayload` 等），搬动就要逐个核对 import 面；<br>（b）两个区域都有**模块级可变状态**（`retiredSessions`、`graftTargets`、`autoGraftStates`）被 pre-step 与工具处理器共享，搬到新文件后跨模块访问会立刻遇到本文件已经踩过两次的 TDZ 问题。 |
 | 什么时候该搬 | 当**接入彼岸层的适配器**成为下一步时（第二阶段），工具层要改的是调用点而不是位置——那时顺手搬才有意义：改动本来就要发生，搬动是免费的。现在单独搬一次，等于为同一个文件付两次回归成本。<br>**v7.7 更新**：第二阶段（接入彼岸层）**已经发生**，但工具层仍然没搬——因为实际改动只落在 `graftSliceAndInjectUnlocked` 内的**两个调用点**（create 与 rollback）和 `igniteTargetSession` 的**通道段**，工具注册那一层（8 个工具的 schema / render 样板、pre-step 与 turn-stopping 监听、水位判定）一行都没动。原来那句「第二阶段顺手搬」的假设，被事实推翻了：接入彼岸层不是一次全局改写，而是三处调用点的替换。所以这条记录继续有效，只是理由更新为「**至今仍没有发生那次顺手的机会**」。 |
-| 退出条件（可验收） | ① 存储层搬进 `core/stores.ts`（≤ 800 行），`register` / `commit` / `discard` / `recover` 四个动作各自成函数；② 工具层搬进 `core/tools.ts`，`apply()` 只做 `registerTools(ctx)` 一行装配；③ **542 条测试全绿且数字不变**；④ 上述 30 个被测试 import 的符号全部保持同名再导出；⑤ 真机切片一次，侧边栏、卡片、点火全部正常。 |
+| 退出条件（可验收） | ① 存储层搬进 `core/stores.ts`（≤ 800 行），`register` / `commit` / `discard` / `recover` 四个动作各自成函数；② 工具层搬进 `core/tools.ts`，`apply()` 只做 `registerTools(ctx)` 一行装配；③ **591 条测试全绿且数字不变**；④ 上述 30 个被测试 import 的符号全部保持同名再导出；⑤ 真机切片一次，侧边栏、卡片、点火全部正常。 |
 | 与彼岸层的关系 | **无。** 这是 graft 的内部整理，不涉及协议。`dsh-paradise` 只接管「怎么在宿主上写一个会话」，不接管「graft 为什么决定写它」。 |
 
 ### TD-2 `dsh-memory/src/index.ts` 单文件偏大（P2，非阻塞）

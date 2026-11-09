@@ -100,15 +100,15 @@ npm 上的**裸名** `dsh-memory` 和 `dsh-observer` 已被第三方注册，包
 >
 > **核心功能**：在源会话最后一个 `turn/end` 处切取高保真磁带，生成零继承、可冷恢复的交接会话；不 fork、不引入 SQLite、不单独注入 `tool/result`。转生后广播 `graft/session-transferred`，由旁路插件自行决定是否跟随。
 >
-> **已完成的重构**：`src/index.ts` 14354 → 13425 行，抽出 5 个内联模块（`utils/serialize`、`utils/logger`、`core/ledger`、`core/watermark`、`core/txn`），行为不变、545 → 542 条测试全绿（historical：v1.3 重构时的数量）（6 条副脑测试随代码迁往 `dsh-observer`）。
+> **v1.3 重构时**（historical）：`src/index.ts` 14,354 → 13,425 行，抽出 5 个内联模块（`utils/serialize`、`utils/logger`、`core/ledger`、`core/watermark`、`core/txn`），行为不变、545 → 542 条测试全绿；6 条副脑测试随代码迁往 `dsh-observer`。
+> **现状**（0.9.1-beta.1）：**13,271 行 / 12,742 非空**；测试 **591**（`check-docs` 实时校验）。
 >
 > **已知结构性限制**：宿主 `commands.execute` 是广播语义（每次调用必留一行）；第三方客户端没有插件自有 Remote。因此副脑类功能不能靠「客户端命令 + UI 按钮」实现，只能由模型工具或宿主侧动作触发 —— 详见 [副脑插件架构复盘与底层缺陷报告](https://github.com/corvus-dsh/dsh-observer) 同期的复盘文档。
-
 > 兄弟项目：[dsh-memory](https://github.com/corvus-dsh/dsh-memory) —— 能力记忆（SKILL.md / 负知识），与本插件只通过台账文件耦合。
 
 **DSH 日志切片与最小注入插件。** 在源会话最后一个 `turn/end` 处切取高保真磁带，创建一个零继承、可冷恢复的交接会话；不 fork，不引入 SQLite，不单独注入 `tool/result`。
 
-> 当前版本 **0.22.0（预发布）**（v7.4 能力线，仓库语义化版本从 0 起）。
+> 当前版本见 `package.json`（语义化版本从 0 起；能力线见本文各版本小节）。
 > 发布说明：[RELEASE_NOTES.md](./RELEASE_NOTES.md)（v0.8.1 归档见 [RELEASE_NOTES-v0.8.1.md](./RELEASE_NOTES-v0.8.1.md)）。
 > 目标运行时：DeepSeek Harness **0.2.1-rc.5**（当前桌面端）。
 > 规格书 v2.1 写的是 rc.4；本实现已按 rc.5 的真实源码校正了两处会导致冷恢复失败的问题。
@@ -413,7 +413,7 @@ UI 与命令共用一份实现，而且在客户端 bundle 尚未加载时，命
 
 | 项 | 结果 | 证据 |
 |---|---|---|
-| 全量测试 | graft **321/321**、memory **138/138** | `node --test test/*.test.mjs`（两仓库） |
+| 全量测试 | graft **591/591**、memory **415/415** | `node --test test/*.test.mjs`（两仓库） |
 | 文档/打包一致性 | `check-docs` 27 项一致、`verify-bundle` 27/27 | 同上 |
 | 幽灵条目清理 | projcache **574 → 10**（幽灵 564 → 0）、`retired` **5 → 0**、`targets` **8 → 0** | `scripts/prune-ghosts.mjs`（隔离到 `_quarantine-ghost-<ts>/`，含 `MANIFEST.json` + `restore.ps1`，**未删除任何文件**） |
 | 调试面板 | 真机注册表可查到 `graft_debug_status`；CLI 输出与取证报告逐项吻合 | `cordis_inspect_query Tool.listTools`、`scripts/debug-status.mjs` |
