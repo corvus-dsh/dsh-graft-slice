@@ -790,6 +790,7 @@ export interface GraftSource {
  */
 import { GRAFT_REPLAY_SOURCE_KIND } from './core/host-shape.js'
 import { CONSTRAINT_PATTERN, STANDING_PROHIBITION } from './contracts/model-wording.js'
+import { shapeOfConstraint } from './core/constraint-shape.js'
 export { GRAFT_REPLAY_SOURCE_KIND }
 
 /** Whether a message source was written by this plugin's replay injector. */
@@ -1488,10 +1489,35 @@ export interface ConstraintDrop {
   reason: 'budget'
 }
 
+/**
+ * ── A CONSTRAINT REJECTED FOR ITS SHAPE, NOT FOR ITS SIZE ────────────────────────────────────────
+ *
+ * `dropped` means "qualified but did not fit the budget" — a CAPACITY problem the caller can fix by
+ * raising the knob. This is a different thing: the text is not a sentence at all (a JSON fragment, a
+ * table row, a term list). Reporting both through one field would invite "raise the budget" as the
+ * answer to garbage, which is exactly the reasoning that let five fragments into seven generations.
+ *
+ * Keeping it separate is also the "no silent dropping" rule: every rejected item is recorded with its
+ * code, so a reader can audit what the filter ate.
+ */
+export interface ConstraintShapeDrop {
+  text: string
+  /** `S1_JSON` … `S6_SEPARATORS`, from `core/constraint-shape.ts`. */
+  code: string
+  why: string
+  /** Where the text was seen: extraction, inheritance, session acceptance, or the section ledger. */
+  stage: 'extract' | 'inherit' | 'accept' | 'ledger'
+}
+
 export interface ConstraintSelection {
   constraints: string[]
   /** Rules that qualified but did not fit. Non-empty means: do not ship. */
   dropped: ConstraintDrop[]
+  /**
+   * Text rejected because it is not a standalone sentence. NOT a budget problem: raising
+   * `constraintBudgetChars` must not bring these back.
+   */
+  droppedByShape: ConstraintShapeDrop[]
   budgetChars: number
   totalChars: number
   candidateCount: number
@@ -1538,6 +1564,18 @@ const REDLINE_PATTERN =
  */
 function isRedline(text: string): boolean {
   if (text.length > 160) return false
+  /**
+   * ── B2: THE PROMPT SLOT'S TICKET MUST BE AS STRICT AS EXTRACTION ─────────────────────────────
+   *
+   * Extraction and slot allocation used to judge the same text by two different standards: extraction
+   * asked "does it look like a rule", allocation asked "is it short and does it contain 绝对/never".
+   * A pasted keyword list satisfies the SECOND perfectly — it is short and made of exactly those
+   * words. So even a correct extraction gate would be defeated here: garbage that slipped through one
+   * layer would occupy the five prompt slots reserved for red lines.
+   *
+   * One predicate, used by both. `shapeOfConstraint` is not a second opinion; it is the same one.
+   */
+  if (shapeOfConstraint(text).broken) return false
   return REDLINE_PATTERN.test(text)
 }
 
@@ -1599,6 +1637,7 @@ export function selectConstraints(
     archived: archived.map((candidate) => candidate.text),
     redlineCount: redlines.length,
     dropped,
+    droppedByShape: [],
     budgetChars: budget,
     totalChars: total,
     candidateCount: candidates.length,
@@ -1625,6 +1664,8 @@ export function extractConstraintsDetailed(
   budgetChars: number = CONSTRAINT_BUDGET_CHARS,
 ): ConstraintSelection {
   const candidates: ConstraintCandidate[] = []
+  /** Everything the shape gate rejected, with its code. Never silently discarded. */
+  const droppedByShape: ConstraintShapeDrop[] = []
   let index = 0
   for (const event of events) {
     if (event.type !== 'user/message') continue
@@ -1668,6 +1709,21 @@ export function extractConstraintsDetailed(
       if (DELEGATION_NOISE_PATTERN.test(normalized)) continue
       // v0.13: "delete D:\X\repair-log.cjs" is a step, not a rule. See isOneOffAction.
       if (isOneOffAction(normalized)) continue
+      /**
+       * ── B1: THE STRUCTURAL GATE, AND WHY IT SITS HERE ─────────────────────────────────────────
+       *
+       * Placed BEFORE the keyword test on purpose. A pasted report is made of constraint vocabulary,
+       * so every word-based test downstream would accept it — running the shape check first is what
+       * makes the outcome independent of how many emphasis words the fragment happens to contain.
+       *
+       * The rejection is RECORDED, not merely skipped: `droppedByShape` is what lets a reader answer
+       * "why did my rule disappear" without re-running the extractor by hand.
+       */
+      const shape = shapeOfConstraint(normalized)
+      if (shape.broken) {
+        droppedByShape.push({ text: normalized, code: shape.code ?? 'S1_JSON', why: shape.why ?? '', stage: 'extract' })
+        continue
+      }
       const hasKeyword = isConstraintSentence(normalized)
       const hasImperative = IMPERATIVE_START.test(normalized)
       if (!hasKeyword && !hasImperative) continue
@@ -1699,7 +1755,12 @@ export function extractConstraintsDetailed(
       candidates.push({ text: normalized, index: index++, score: hard + imperative + actionHits + lengthBonus + scopeBonus })
     }
   }
-  return selectConstraints(candidates, budgetChars)
+  const selection = selectConstraints(candidates, budgetChars)
+  /**
+   * Carried on the SELECTION, not thrown away: the caller renders the handoff, and a dropped rule it
+   * cannot see is a rule the user cannot argue with.
+   */
+  return { ...selection, droppedByShape: [...selection.droppedByShape, ...droppedByShape] }
 }
 
 /**
