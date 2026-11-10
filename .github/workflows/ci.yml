@@ -137,6 +137,19 @@ jobs:
       - name: Documentation counts match the code
         run: node scripts/check-readme-counts.mjs
 
+      # ── check-docs WAS THE ONE GATE NOBODY RAN ───────────────────────────────────────────────────
+      #
+      # Measured on N2: moving the command policy layer into `core/command-policy.ts` made
+      # `check-docs` report 26 facts instead of 27 — the missing one was `docs: command guard
+      # documented`, whose marker lived in the file the function left. NOTHING FAILED. It was found
+      # only because it was run by hand, which is the same reason `check-readme-counts` was red in a
+      # green CI before it was wired in: "A gate nobody runs is a comment."
+      #
+      # The marker scan now covers all of src/ and a marker found nowhere is a FAILURE, so this step
+      # is what keeps that from regressing silently again.
+      - name: Documentation contract (features and structure named in the README)
+        run: node scripts/check-docs.mjs
+
       # The pass/skip SPLIT, not just the total: a guard that quietly becomes a skip keeps the total
       # identical, and that is exactly how coverage shrinks without anyone noticing.
       - name: README test tally (passed + skipped == total, all measured)
