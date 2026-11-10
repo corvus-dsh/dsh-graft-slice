@@ -32,11 +32,60 @@
  * Usage:  node scripts/check-readme-tally.mjs [--json]
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const REPO = fileURLToPath(new URL('..', import.meta.url))
+
+/**
+ * ── THE CLASSIFIER IS THE GATE'S INPUT, SO IT IS A NAMED, TESTABLE FUNCTION ────────────────────
+ *
+ * The distinction this gate rests on (RESOURCE = a file is missing on THIS machine; PENDING = the repo
+ * declared the test as awaiting a decision) is decided by matching the SKIP REASON text. That match was
+ * inline and untested, and it was wrong in the direction that fails a build:
+ *
+ *   measured on CI run 60: `documented skipped 2 != measured PENDING skips 6`
+ *
+ * The four extra were the tests in `test/v127-closure-instrument.test.mjs`, whose reason begins
+ * `RESOURCE: typescript is not installed…`. The marker listed `RESOURCE_MISSING` but not the bare
+ * `RESOURCE:` prefix, so four MACHINE skips were counted as REPO skips and the gate demanded the README
+ * document a number that is not true in any complete checkout.
+ *
+ * The fix is NOT to relax the gate: the pending leg stays exact in every environment. It is to make the
+ * classifier recognise the prefix the skips actually use — and to pin that with tests, because a gate
+ * whose input rule is untested is the same class of defect as the empty-set green (rule 27).
+ */
+/**
+ * ── WHAT COUNTS AS "THIS MACHINE IS MISSING SOMETHING" ──────────────────────────────────────────
+ *
+ * An UNRECOGNISED reason classifies as PENDING — the fail-loud direction, because PENDING is the number
+ * the README must document. Defaulting to resource instead would silently exclude a skip from the
+ * documented tally, which is the "report claiming more coverage than exists" failure this gate exists for.
+ *
+ * `git unavailable in this environment` was missing too: on a machine without git, four v023 tests skip
+ * and were counted as repo-declared pending, i.e. the same false red this prefix fix is about.
+ */
+const RESOURCE_MARKER = /RESOURCE_MISSING|(?:^|[^A-Z])RESOURCE:|corpus absent|observer source absent|ledger absent|sibling|git unavailable/i
+
+/**
+ * `'resource'` | `'pending'` | `undefined` (not a skip line at all).
+ *
+ * `not ok N - … # SKIP` is still a skip: `t.skip()` after a real assertion is reported through the
+ * failing channel while carrying the SKIP directive. Keying on `^ok ` counted 1 of this repo's 2.
+ *
+ * ── AND `\# SKIP` IS A TEST NAME, NOT A DIRECTIVE ────────────────────────────────────────────────
+ *
+ * Found by this gate mis-counting its OWN test suite: adding
+ * `test/v128-tally-classifier.test.mjs` with a test named
+ * ``` `not ok … # SKIP` is a SKIP … ``` made `pending` 3 while the suite reported `# skipped 2`.
+ * TAP escapes a literal `#` inside a test NAME as `\#`, so the directive is only a directive when the
+ * `#` is NOT escaped. Without the lookbehind, any test that merely names the marker inflates the
+ * documented number — and the fix would look like "the README is stale" instead of "the classifier is wrong".
+ */
+export function classifySkipLine(line) {
+  if (!/^(?:not )?ok \d+ - .*(?<!\\)# SKIP/u.test(line)) return undefined
+  return RESOURCE_MARKER.test(line) ? 'resource' : 'pending'
+}
 
 /** Run the suite once and read the tally from its summary. */
 export function measureSuite() {
@@ -87,14 +136,12 @@ export function measureSuite() {
    * 1 pending when the truth was 2 — the gate's INPUT was wrong, which is the same failure class as the
    * empty-set green (rule 27): a number with no correct denominator.
    */
-  const RESOURCE_MARKER = /RESOURCE_MISSING|corpus absent|observer source absent|ledger absent|sibling/i
   let pending = 0
   let resource = 0
   for (const line of output.split(/\r?\n/)) {
-    // `ok N - … # SKIP …` OR `not ok N - … # SKIP …`; the directive is what decides, not the status verb.
-    if (!/^(?:not )?ok \d+ - .*# SKIP/u.test(line)) continue
-    if (RESOURCE_MARKER.test(line)) resource += 1
-    else pending += 1
+    const verdict = classifySkipLine(line)
+    if (verdict === 'resource') resource += 1
+    else if (verdict === 'pending') pending += 1
   }
 
   return { tests: read('tests'), pass: read('pass'), fail: read('fail'), skipped: read('skipped'), pending, resource }
@@ -149,12 +196,25 @@ if (isMain) {
   console.log(`claims found: ${claims.length}`)
 
   /**
-   * Strict split only where this machine has the local-only resources. Elsewhere (CI) the pending set is
-   * still compared EXACTLY — that is the environment-independent leg — and the pass/skip split is left to
-   * the arithmetic plus that pending comparison.
+   * ── "IS THIS ENVIRONMENT COMPLETE?" IS NOW DERIVED, NOT ENUMERATED ──────────────────────────────
+   *
+   * It used to be `existsSync(../_scratch/real-texts.json)` — the corpus, the one machine resource the
+   * author happened to think of. That is an enumeration, and enumerations drift: the moment the suite
+   * gained a second machine resource (v127 needs the TypeScript compiler) the predicate was wrong. It
+   * was measured doing so: with typescript hidden and the corpus present, this gate reported
+   * `passed 700 != measured pass 696` on a checkout where nothing was actually stale.
+   *
+   * The honest predicate is the measurement itself: the strict split applies only when the suite has NO
+   * resource skips at all, i.e. when every test the machine could run, did run. New machine resources are
+   * then covered automatically — they raise `resource`, which turns the strict split off, while the
+   * PENDING leg stays exact everywhere (that is the leg that catches "a test quietly became a skip").
    */
-  const hasCorpus = existsSync(join(REPO, '..', '_scratch', 'real-texts.json'))
-  console.log(`environment: ${hasCorpus ? 'corpus present → strict split' : 'corpus absent (CI) → pending exact, split via invariants'}`)
+  const completeEnvironment = measured.resource === 0
+  console.log(
+    `environment: ${completeEnvironment
+      ? 'complete (no resource skips) → strict pass/skip split'
+      : `${measured.resource} resource skip(s) on this machine → pending exact, split via invariants`}`,
+  )
 
   if (measured.tests === undefined) {
     console.error('FAIL  could not read the suite tally — a gate that cannot measure is not a gate')
@@ -196,7 +256,7 @@ if (isMain) {
         )
       }
       // (5) the strict split, only where the environment is complete
-      if (hasCorpus) {
+      if (completeEnvironment) {
         if (claim.passed !== measured.pass) local.push(`passed ${claim.passed} != measured pass ${measured.pass}`)
         if (claim.skipped !== undefined && claim.skipped !== measured.skipped) {
           local.push(`skipped ${claim.skipped} != measured skipped ${measured.skipped}`)
