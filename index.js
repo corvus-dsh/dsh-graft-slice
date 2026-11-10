@@ -7718,6 +7718,28 @@ function neutralizeStructure(text        )         {
                        
                                                                                          
                     
+     
+                                                                                                     
+    
+                                                                                                  
+                                                                                                    
+                                                                                            
+                                                                                           
+    
+                                                                                                      
+                                                                                                   
+                                                                                                      
+                                                                                                 
+                                                                                             
+     
+                  
+                                                                         
+                
+                                                            
+                
+                                                                 
+                           
+   
  
 
 /**
@@ -7822,46 +7844,25 @@ function extractGoal(events                             , dagText         )     
    * — simply does not arise. That is why this was held for a ruling instead of patched with a
    * report-shape regex: the regex would have been guessing at layer 3 while a declaration was available.
    */
-  const declared = objectiveOf(events)
-  if (declared !== undefined) {
-    return {
-      goal: truncateEnd(declared.objective, 4000).text,
-      source: 'user',
-      goalLayer: 'objective',
-      ...(declared.seq === undefined ? {} : { sourceSeq: declared.seq }),
-    }
-  }
-
   /**
-   * Layer 2: the DAG's current node, when layer 1 is silent.
+   * ── DECLARED BEFORE LAYER 1, BECAUSE LAYER 1 NOW READS IT (rule 24, learned twice) ──────────────
    *
-   * ONE line, as a boundary — rule 1. The node says WHERE the work is, never WHAT it contains; the
-   * carrier (`context/memory-graph` or the rendered `memory_graph_read` text) is the caller's business,
-   * so this takes the rendered text and extracts the single node line.
+   * Rule 2 makes layer 1 consult the newest human message, so `humans` must exist before the objective
+   * branch runs. It was declared further down, and the first build died with
+   * `Cannot access 'humans' before initialization` — the same temporal-dead-zone failure this file's
+   * architecture notes warn about (`splitByShape` had it too). Moving the declaration is the fix; the
+   * ordering comment is here so the next edit does not re-break it.
    */
-  const dagNode = currentDagNode(dagText)
-  if (dagNode !== undefined) {
-    return {
-      goal: truncateEnd(dagNode, 4000).text,
-      source: 'user',
-      goalLayer: 'dag-node',
-    }
-  }
-
-  const humans = events.filter(
-    (event) => event.type === 'user/message' && event.data?.source?.kind === 'user' && textOfMessage(event.data).length > 0,
-  )
-  /** The seq of the newest human message — the pointer layer 3 hands back instead of the body. */
-  const newestHumanSeq = ()                     => {
-    for (let index = events.length - 1; index >= 0; index -= 1) {
-      const event = events[index]
-      if (event?.type !== 'user/message') continue
-      if (isGraftAuthored(event.data?.source)) continue
-      const candidate = Number(event.seq)
-      if (Number.isSafeInteger(candidate)) return candidate
-    }
-    return undefined
-  }
+  /**
+   * ── DECLARED ABOVE THEIR FIRST CONSUMER, ON PURPOSE ──────────────────────────────────────────
+   *
+   * C1 rule 2 makes layer 1 look at the newest human message, so it reaches `newestSubstantive` →
+   * `substantive` → these two patterns. All of it used to sit BELOW the objective branch, and the
+   * build died with `Cannot access 'substantive' before initialization` — the same temporal-dead-zone
+   * failure as `humans` a moment earlier, and the same class as `splitByShape` before that.
+   *
+   * The order here is load-bearing: patterns → substantive → humans → objectiveOf → layer 1.
+   */
   const bareAcknowledgement =
     /^(请?继续(吧|工作|推进)?|继续|好的?|可以|嗯+|行|ok|okay|go on|continue|yes|y|proceed|go)[\s.!。！?？]*$/iu
   /**
@@ -7885,6 +7886,78 @@ function extractGoal(events                             , dagText         )     
     // A short phrase that is mostly punctuation/steering carries no goal.
     if (trimmed.length < 8 && /^(请|继续|再|来|开始|试试)/u.test(trimmed)) return false
     return true
+  }
+
+  const humans = events.filter(
+    (event) => event.type === 'user/message' && event.data?.source?.kind === 'user' && textOfMessage(event.data).length > 0,
+  )
+
+  const declared = objectiveOf(events)
+  if (declared !== undefined) {
+    /**
+     * ── C1 HARD RULE 2: THE OBJECTIVE DOES NOT SILENTLY OVERRULE THE USER ────────────────────────
+     *
+     * A declared objective says what the session was SET to do. It does not say the user never changed
+     * their mind afterwards, and the measured failure is exactly that: the objective won unconditionally,
+     * the user's "先别写骨架，先修 CI" vanished, and the target kept building what the user had just
+     * abandoned.
+     *
+     * THE RULING'S JUDGEMENT CALL, ENCODED: do NOT decide whether the two are "the same task". That is a
+     * semantic comparison this code cannot make — and `nearDuplicate` is the wrong tool for it (it
+     * compares TOKEN SETS, so "两个不同任务在同一子系统" scores as identical; that mistake was already
+     * made once in C2).
+     *
+     * Instead: whenever an objective answered AND a newer substantive human message exists, carry that
+     * message as a STRUCTURED second value with its seq, and let the renderer say "以最新为准". Constant
+     * cost, no semantic guess, and the conflict is visible even when a human would call the two
+     * consistent — a redundant line is cheaper than a silently abandoned instruction.
+     */
+    const newest = newestSubstantive()
+    const objectiveSeq = declared.seq
+    const afterObjective = newest !== undefined && (objectiveSeq === undefined || newest.seq === undefined || newest.seq > objectiveSeq)
+    return {
+      goal: truncateEnd(declared.objective, 4000).text,
+      source: 'user',
+      goalLayer: 'objective',
+      ...(declared.seq === undefined ? {} : { sourceSeq: declared.seq }),
+      ...(newest === undefined || !afterObjective
+        ? {}
+        : {
+            supersededBy: {
+              text: truncateEnd(newest.text, 400).text,
+              ...(newest.seq === undefined ? {} : { seq: newest.seq }),
+              afterObjective: true,
+            },
+          }),
+    }
+  }
+
+  /**
+   * Layer 2: the DAG's current node, when layer 1 is silent.
+   *
+   * ONE line, as a boundary — rule 1. The node says WHERE the work is, never WHAT it contains; the
+   * carrier (`context/memory-graph` or the rendered `memory_graph_read` text) is the caller's business,
+   * so this takes the rendered text and extracts the single node line.
+   */
+  const dagNode = currentDagNode(dagText)
+  if (dagNode !== undefined) {
+    return {
+      goal: truncateEnd(dagNode, 4000).text,
+      source: 'user',
+      goalLayer: 'dag-node',
+    }
+  }
+
+  /** The seq of the newest human message — the pointer layer 3 hands back instead of the body. */
+  const newestHumanSeq = ()                     => {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event?.type !== 'user/message') continue
+      if (isGraftAuthored(event.data?.source)) continue
+      const candidate = Number(event.seq)
+      if (Number.isSafeInteger(candidate)) return candidate
+    }
+    return undefined
   }
   // v7.0 P2: anchor on the last few substantive messages, not one.
   //
@@ -7919,6 +7992,27 @@ function extractGoal(events                             , dagText         )     
     if (anchors.some((existing) => nearDuplicate(existing, normalized))) continue
     anchors.push(normalized)
   }
+
+  /**
+   * The NEWEST substantive human message, as a structured value.
+   *
+   * Same three gates as the anchor loop above — user-authored, not graft-authored, substantive — so
+   * "the user changed direction" is judged by the SAME notion of substance that decides what counts as
+   * a goal at all. A second, weaker predicate here would let a bare "请继续" masquerade as a new
+   * instruction.
+   */
+  function newestSubstantive()                                             {
+    for (let index = humans.length - 1; index >= 0; index -= 1) {
+      const event = humans[index]
+      if (isGraftAuthored(event.data?.source)) continue
+      const text = textOfMessage(event.data)
+      if (!substantive(text)) continue
+      const seq = Number(event.seq)
+      return Number.isSafeInteger(seq) ? { text: normalizeText(text), seq } : { text: normalizeText(text) }
+    }
+    return undefined
+  }
+
   if (anchors.length > 0) {
     const ordered = anchors.reverse()
     const joined = ordered.map((line) => truncateEnd(line, 1600).text).join('\n')
@@ -9089,6 +9183,19 @@ export const INSTRUCTION_CARD_MAX_CHARS = 1400
                            
                                                                                      
                       
+     
+                                                                                                       
+                                                                                                
+    
+                                                                                                
+                                                                       
+     
+                                                     
+     
+                                                                                                    
+                                                                                                      
+     
+                                                                        
                                                                                  
                         
      
@@ -9268,9 +9375,46 @@ function sameTextHead(a        , b        )          {
 export function renderTaskBoard(input                )         {
   const lines           = [`## 交接任务看板（第一轮只要读这里）`]
   const request = input.request.replace(/\s+/gu, ' ').trim()
+  /**
+   * ── C1: THE LABEL SAYS HOW MUCH TO TRUST THIS LINE ────────────────────────────────────────────
+   *
+   * A reader cannot tell a declared objective from a transcript guess without being told, and the two
+   * deserve different trust. `unknown` is stated explicitly rather than omitted: a missing label reads
+   * as "no distinction", which is the ambiguity this change exists to remove.
+   *
+   * POSITION MATTERS: the label goes at the END of the line. Three shipped board tests match
+   * `**原始用户要求**：<text>` literally, so inserting the label before or right after the colon broke them.
+   * A new fact must be added WITHOUT moving the shape other code depends on — that is the whole lesson.
+   */
+  const layerLabel =
+    input.goalLayer === 'objective'
+      ? ' （objective）'
+      : input.goalLayer === 'dag-node'
+        ? ' （dag-node）'
+        : input.goalLayer === 'transcript'
+          ? ' （transcript，未声明目标）'
+          : ' （来源未知）'
   lines.push(
-    `**${BOARD_COLUMNS.request}**：${request.length === 0 ? '（未提取到明确要求，见 goal 消息）' : truncateForDisplay(request, 300)}`,
+    `**${BOARD_COLUMNS.request}**：${request.length === 0 ? '（未提取到明确要求，见 goal 消息）' : truncateForDisplay(request, 300)}${layerLabel}`,
   )
+
+  /**
+   * ── C1 HARD RULE 2, RENDERED ──────────────────────────────────────────────────────────────────
+   *
+   * The objective is a DECLARATION, not a veto. When a newer substantive human message exists, it is
+   * shown here with its seq and an explicit arbitration line — "以最新为准" — so a target that reads
+   * only this block still learns the user moved. No semantic comparison is attempted: the ruling
+   * forbids it (a token-set test would misjudge two tasks in one subsystem, which is the C2 mistake).
+   */
+  if (input.supersededBy !== undefined && input.supersededBy.afterObjective) {
+    const newer = input.supersededBy.text.replace(/\s+/gu, ' ').trim()
+    const seqText = input.supersededBy.seq === undefined ? '' : `（seq=${input.supersededBy.seq}）`
+    lines.push(
+      '',
+      `⚠️ 本会话后来改了口径${seqText}：${truncateForDisplay(newer, 300)}`,
+      '    判定：以最新的用户要求为准；objective 未变，完成本轮后需更新。',
+    )
+  }
 
   /**
    * v1.0.2 — THE GOAL IN FORCE, NEXT TO THE GOAL IT STARTED FROM.
@@ -9485,6 +9629,10 @@ export const BOARD_TRAILER =
                       
                                                                                  
                         
+                                                                                               
+                                                     
+                                                                                          
+                                                                        
  
 
 /**
@@ -9553,6 +9701,9 @@ export function renderInstructionCard(input                      )         {
     ...(input.verification === undefined ? {} : { verification: input.verification }),
     ...(input.currentGoal === undefined ? {} : { currentGoal: input.currentGoal }),
     ...(input.goalRevisions === undefined ? {} : { goalRevisions: input.goalRevisions }),
+    // C1: the label and the arbitration must reach the reader, not stop at the extractor.
+    ...(input.goalLayer === undefined ? {} : { goalLayer: input.goalLayer }),
+    ...(input.supersededBy === undefined ? {} : { supersededBy: input.supersededBy }),
     notes,
   })
 }
@@ -10115,6 +10266,9 @@ export function buildTape(
     semantic,
     body: pendingBody,
     request: goal.goal,
+    // C1: provenance travels with the text; a transcript guess is labelled as one.
+    ...(goal.goalLayer === undefined ? {} : { goalLayer: goal.goalLayer }),
+    ...(goal.supersededBy === undefined ? {} : { supersededBy: goal.supersededBy }),
     // v1.0.2: a source that evolved its goal hands the EVOLVED one down, plus the count.
     ...(sourceMarkGoal.currentGoal === undefined ? {} : { currentGoal: sourceMarkGoal.currentGoal }),
     ...(sourceMarkGoal.revisions > 0 ? { goalRevisions: sourceMarkGoal.revisions } : {}),
