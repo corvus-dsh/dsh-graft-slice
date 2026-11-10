@@ -40,7 +40,39 @@ const readme = read('README.md')
  * present-tense claim), by that other script, where the rule belongs.
  */
 const buildScript = read('scripts/build.mjs')
-const source = read('src/index.ts')
+/**
+ * ── `source` IS ALL OF src/, NOT JUST index.ts ────────────────────────────────────────────────────
+ *
+ * Measured on N2: moving the command policy layer into `core/command-policy.ts` made this gate report
+ * **26 facts instead of 27** — the missing one was `docs: command guard documented`, whose marker is
+ * `scanAgentCommand(`. The coverage loop is written as
+ *
+ *     if (!source.includes(marker)) continue
+ *
+ * so a marker that lives in a DIFFERENT file simply skipped its own check. Nothing failed; a check
+ * quietly stopped existing. That is the same defect class as v126's file-set hole and v128's escaped
+ * `# SKIP`: an input that shrinks reads as "nothing to report".
+ *
+ * Two changes, both measured:
+ *   1. the scan covers every `.ts`-bearing file under src/ (same filter as the other gates);
+ *   2. a marker found NOWHERE is a FAILURE, not a skip — deleting a feature must be a deliberate act
+ *      that also removes the README fact, not something that happens by moving a function.
+ */
+const sourceFiles = (() => {
+  const out = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir).sort()) {
+      const full = join(dir, entry)
+      let stat
+      try { stat = readdirSync(full) } catch { stat = undefined }
+      if (stat !== undefined) { walk(full); continue }
+      if (/\.ts(?:\.|$)/u.test(entry)) out.push(full)
+    }
+  }
+  walk(join(root, 'src'))
+  return out
+})()
+const source = sourceFiles.map((file) => readFileSync(file, 'utf8')).join('\n')
 const built = read('index.js')
 
 // 1. One version, everywhere ------------------------------------------------
@@ -199,8 +231,26 @@ const coverage = [
   ['lock reclamation', 'scanAndReclaimLocks(', '锁'],
   ['debug panel', 'collectDebugStatus(', '调试面板'],
 ]
+/**
+ * ── A MARKER THAT EXISTS NOWHERE IS A FAILURE, NOT A SKIP ────────────────────────────────────────
+ *
+ * `continue` used to mean "this feature is not shipped, so there is nothing to document". Measured, it
+ * also meant "this feature moved to another file and its check silently vanished" (N2, 27 → 26 facts).
+ * The two are indistinguishable from the inside, so the direction is now fail-loud: if a marker is
+ * absent from ALL of src/, this gate says so and names it. Deleting a feature would then fail here and
+ * force the README fact to be removed deliberately — which is the only way it should happen.
+ */
 for (const [name, marker, keyword] of coverage) {
-  if (!source.includes(marker)) continue
+  if (!source.includes(marker)) {
+    check(
+      `docs: ${name} documented`,
+      false,
+      `marker "${marker}" exists in NO file under src/ — either the feature was deleted (then remove ` +
+        'this row deliberately) or the scan is looking in the wrong place. Silently skipping it would ' +
+        'drop the check, which is how it disappeared when the command policy moved to core/',
+    )
+    continue
+  }
   const documented = readme.includes(keyword)
   check(
     `docs: ${name} documented`,
