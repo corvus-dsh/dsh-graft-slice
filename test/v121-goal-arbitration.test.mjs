@@ -21,6 +21,20 @@
  * Assigned in 9 places, read in 0. My own comment claimed a reader could tell a declared objective from
  * a guess; only a test could. A target reading an unlabelled "原始用户要求" cannot know whether the user
  * SET that task or the plugin fished it out of a sentence — so the label now reaches the board.
+ *
+ * ── WHY IMPORTING `../index.js` (THE BUILT ARTIFACT) IS SAFE HERE ───────────────────────────────
+ *
+ * The obvious worry is that these tests exercise a STALE bundle rather than the source: `src/index.ts`
+ * could be edited, the build forgotten, and every assertion below would pass against yesterday's code.
+ *
+ * That cannot happen, because the docs gate compares the two BYTE FOR BYTE. Editing only `src` and
+ * running the gates produces:
+ *
+ *     FAIL build: index.js is exactly composeBundle(src/) — 862832 vs 862817 bytes
+ *
+ * So a stale artifact fails the build, not the test. Reading the artifact is not merely acceptable here
+ * — it is the point: these tests assert what SHIPS, through its real export surface, rather than a
+ * source path no consumer ever takes.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
