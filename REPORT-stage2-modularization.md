@@ -6,6 +6,7 @@
 > 拆分远未完成；本阶段只吃掉了「闭包闭合、≤ 800 行、无模块级可变状态」的那一类叶子。
 
 - 报告日期：2026-11-10
+- 本文件 **155 行**（三种方法一致：LF 计数 / split+末尾空项 / `git show` 行数）。`(Get-Content).Count` 报 **111** —— 那是**假数字**，本项目 S3-PLAN §五 已记录过同类偏差，行数只用前三种算法。
 - 阶段：S3 搬运（阶段 2）
 - 依据：`ARCHITECTURE.md` TD-1 / TD-21 / TD-22
 
@@ -110,7 +111,8 @@
 
 ## 七、未解决项（本阶段不关闭）
 
-1. **TD-21**：`apply()` **2,344 行**（L11333..13676）占 `src/index.ts` 的 17%，而 TD-1 的退出条件写着
+1. **TD-21**：`apply()` **2,344 行**（L11333..13676）占 `src/index.ts` **19.0%**（2,344 / 12,354，用**当前**分母；用搬移前的 13,827 才是 17.0%，那个分母已经作废）。
+   搬走 1,473 行之后 `apply()` 一行没少 —— **它的占比是变大了的**。而 TD-1 的退出条件写着
    `index.ts ≤ 300 行`。现状是目标的 **40 倍**（12,354 / 300）。**不属于搬运节点**，须依赖倒置 + handler 提取，单独立项。
 2. **三个含 7 个 `let` 的目标**（`recoverGraftTransactions` / `graftSliceAndInjectUnlocked` /
    `graftSliceAndInject`）：被 TD-1 的 STOP 判据挡住，需要参数化存储路径后才能进队列。
@@ -121,7 +123,24 @@
    - 现象：`measured: tests=720 pass=717 fail=0 skipped=2` —— 有一条测试既未通过也未跳过
    - 复现尝试：同一命令连跑 **10 次**（2026-11-10T21:09:06 结束），**10/10 均为 `pass=718`**，**未复现**
    - 处置：不称噪声、不阻断收尾；**列为未解决项**
-5. **`manifest.json` 缺 `dsh.bundle`**：待确认宿主从哪个文件读 bundle 声明（见 §三.2）。
+5. **`manifest.json` 缺 `dsh.bundle`** —— **下一阶段第一优先，但仍只算「待确认」，不是缺陷**（见 §三.2）。本阶段尝试核定「宿主从哪个文件读 bundle 声明」，**未能核定**，缺口如实记：
+   - `manifest.json` 顶层键**无 `dsh`**、全文不含 `bundle`；`package.json` 有 `dsh.bundle.patch = ./cordis.patch.yml`（均为实测）；
+   - 运行时给出的 DSH checkout 路径 `D:\DeepSeek Harness\resources\app.asar\dsh` —— **`Test-Path` 为 False**；
+   - `dsh` **不在 PATH 上**；工作区 `node_modules` 只有 `@corvus-dsh` 与 `typescript`，**没有宿主代码可读**；
+   - 按红线**不再换路径去找**（不扫 C:、不扩散搜索），因此这一条**停在这里**。
+
+   **能自证的判据（由持有宿主的人执行，两个方向各一次）**：造一个临时包，让两个文件**互相矛盾** ——
+   ① `package.json` 声明 `dsh.bundle.patch=./a.yml`（有效）、`manifest.json` 不声明；
+   ② 反过来：`manifest.json` 声明 `./b.yml`、`package.json` 不声明。
+   在一次性 profile 里各跑一次 `dsh plugin add <dir>`，观察**是否被发现**、以及用的是 `a.yml` 还是 `b.yml`。
+   两个方向的组合唯一确定读取方，不依赖任何文档。
+   **若结论是「读 `manifest.json`」→ 先修 manifest，再谈真机切片。**
+
+## 七之二、⑥ 的定稿措辞（不得简化）
+
+**阶段 2 完成度 = 「①-⑤、⑦-⑩ 全绿；⑥ 未完成（C2 / C3 未执行）」。**
+
+**不许简化成「阶段 2 全绿」。** ⑥ 是唯一一条没有闭合的验收项；把它并进「全绿」，就是这份报告在本阶段一直在抓的那个毛病 —— 用一个总括词盖住一个明确的缺口。
 
 ## 八、验收与 CI
 
@@ -140,11 +159,25 @@
 
 | 仓 | run | 结论 | sha |
 |---|---|---|---|
-| dsh-graft-slice | **#77**（N7 后的重测提交） | success | `32bdf73` |
+| dsh-graft-slice | **#78**（**产生本报告的那次 run**） | success | `b1a2550` |
+| dsh-graft-slice | #77（N7 后的全表重测） | success | `32bdf73` |
 | dsh-graft-slice | #76（N7） | success | `9e2f33e` |
 | dsh-paradise | **#35** | success | `4036cca` |
 | dsh-memory | **#30** | success | `88e432f` |
 | dsh-observer | **#24** | success | `c17c622` |
+
+## 八之二、下一阶段的准入条件：行为面等价（先定验收，再动代码）
+
+依赖倒置会**改函数签名**，因此 `verify-pure-move`（内容行多重集合不变）**不适用**。在动第一行代码之前，先钉死四条验收：
+
+| # | 判据 | 现状基线 |
+|---|---|---|
+| 1 | **导出面 182 不变**（`verify-bundle` 的 export surface 基线） | 182 |
+| 2 | **测试 720 全绿**（pass 718 / fail 0 / skipped 2） | 720 / 718 / 0 / 2 |
+| 3 | **端到端（假 harness）通过**：`create → append → flush → close`、`retired: true`、`durability verified: true` | 三项均 true |
+| 4 | **逐函数对照表**：被改签名的每个函数，旧签名 / 新签名 / 调用点清单 / 行为差异「无」 | 待产出 |
+
+第 4 条是本阶段的替代品：没有内容行不变式，就必须用**人能读的对照表**代替它，并且表要随提交一起走。
 
 ## 九、下一步（不在本阶段内）
 
