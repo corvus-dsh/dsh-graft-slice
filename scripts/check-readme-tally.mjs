@@ -32,7 +32,8 @@
  * Usage:  node scripts/check-readme-tally.mjs [--json]
  */
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const REPO = fileURLToPath(new URL('..', import.meta.url))
@@ -40,16 +41,49 @@ const REPO = fileURLToPath(new URL('..', import.meta.url))
 /** Run the suite once and read the tally from its summary. */
 export function measureSuite() {
   let output = ''
+  /**
+   * ── TAP, NOT THE DEFAULT REPORTER, BECAUSE ONLY TAP PRINTS THE SKIP REASON ─────────────────────
+   *
+   * Measured: the default reporter prints `- test name # SKIP ...` only sometimes, and the `# SKIP`
+   * text is absent for `t.skip()` calls entirely — so a classifier keyed on `# SKIP` counted
+   * `pending=0 resource=0` against a real `skipped=2`. TAP prints the reason on every skip line:
+   *
+   *     ok 369 - D2 control: … # SKIP TD-17 ruled to KEEP this behaviour: …
+   *
+   * Only the reason lets the gate tell a DECLARED pending test from a MACHINE-missing resource, which is
+   * the entire distinction this file rests on.
+   */
   try {
-    output = execFileSync('node', ['--test', 'test/*.test.mjs'], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+    output = execFileSync('node', ['--test', '--test-reporter=tap', 'test/*.test.mjs'], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
   } catch (error) {
     output = String(error.stdout ?? '')
   }
   const read = (label) => {
-    const match = new RegExp(`^\\u2139 ${label} (\\d+)$`, 'mu').exec(output)
+    const match = new RegExp(`^# ${label} (\\d+)$`, 'mu').exec(output)
     return match === null ? undefined : Number(match[1])
   }
-  return { tests: read('tests'), pass: read('pass'), fail: read('fail'), skipped: read('skipped') }
+
+  /**
+   * ── TWO KINDS OF SKIP, AND ONLY ONE OF THEM BELONGS IN A README ──────────────────────────────
+   *
+   * RESOURCE — a file is missing on THIS machine (the corpus, a sibling checkout). A property of the
+   *            environment; CI legitimately has more of them (measured: 2 locally vs 8 on CI).
+   * PENDING  — the repo itself declares the test as awaiting a decision. A property of the REPO, and
+   *            therefore the number a README can honestly document in every checkout.
+   *
+   * Without this split the gate had to choose between a permanent false red on CI and a hole where
+   * "skipped 2→4, total unchanged" stayed green. Splitting makes the documented number exact everywhere.
+   */
+  const RESOURCE_MARKER = /RESOURCE_MISSING|corpus absent|observer source absent|ledger absent|sibling/i
+  let pending = 0
+  let resource = 0
+  for (const line of output.split(/\r?\n/)) {
+    if (!/# SKIP/.test(line)) continue
+    if (RESOURCE_MARKER.test(line)) resource += 1
+    else pending += 1
+  }
+
+  return { tests: read('tests'), pass: read('pass'), fail: read('fail'), skipped: read('skipped'), pending, resource }
 }
 
 /** Parse every pass/total（skipped）claim out of a README, with the REPO it belongs to. */
@@ -97,8 +131,16 @@ if (isMain) {
     process.exit(0)
   }
 
-  console.log(`measured: tests=${measured.tests} pass=${measured.pass} fail=${measured.fail} skipped=${measured.skipped}`)
+  console.log(`measured: tests=${measured.tests} pass=${measured.pass} fail=${measured.fail} skipped=${measured.skipped} (pending=${measured.pending} resource=${measured.resource})`)
   console.log(`claims found: ${claims.length}`)
+
+  /**
+   * Strict split only where this machine has the local-only resources. Elsewhere (CI) the pending set is
+   * still compared EXACTLY — that is the environment-independent leg — and the pass/skip split is left to
+   * the arithmetic plus that pending comparison.
+   */
+  const hasCorpus = existsSync(join(REPO, '..', '_scratch', 'real-texts.json'))
+  console.log(`environment: ${hasCorpus ? 'corpus present → strict split' : 'corpus absent (CI) → pending exact, split via invariants'}`)
 
   if (measured.tests === undefined) {
     console.error('FAIL  could not read the suite tally — a gate that cannot measure is not a gate')
@@ -119,13 +161,32 @@ if (isMain) {
       console.log(`    ${claim.line}`)
 
       const local = []
+      // (1) arithmetic — true in every checkout
       if (claim.skipped !== undefined && claim.passed + claim.skipped !== claim.total) {
         local.push(`passed+skipped != total: ${claim.passed}+${claim.skipped} != ${claim.total}`)
       }
+      // (2)(3) invariants
       if (claim.total !== measured.tests) local.push(`total ${claim.total} != measured tests ${measured.tests}`)
-      if (claim.passed !== measured.pass) local.push(`passed ${claim.passed} != measured pass ${measured.pass}`)
-      if (claim.skipped !== undefined && claim.skipped !== measured.skipped) {
-        local.push(`skipped ${claim.skipped} != measured skipped ${measured.skipped}`)
+      if (measured.fail !== 0) local.push(`measured fail is ${measured.fail}, must be 0`)
+      /**
+       * (4) THE DECLARED PENDING SET — exact, in EVERY environment.
+       *
+       * This is the leg that catches "a test quietly became a skip": the README declares N pending
+       * tests; if the suite now has N+2, the repo is declaring work it does not document. Resource
+       * skips are excluded because they are a property of the machine, not of the repo.
+       */
+      if (claim.skipped !== undefined && claim.skipped !== measured.pending) {
+        local.push(
+          `documented skipped ${claim.skipped} != measured PENDING skips ${measured.pending} ` +
+            `(resource skips ${measured.resource} excluded — they belong to this machine)`,
+        )
+      }
+      // (5) the strict split, only where the environment is complete
+      if (hasCorpus) {
+        if (claim.passed !== measured.pass) local.push(`passed ${claim.passed} != measured pass ${measured.pass}`)
+        if (claim.skipped !== undefined && claim.skipped !== measured.skipped) {
+          local.push(`skipped ${claim.skipped} != measured skipped ${measured.skipped}`)
+        }
       }
       for (const problem of local) console.log(`    ✖ ${problem}`)
       if (local.length === 0) console.log('    ✔ consistent')
