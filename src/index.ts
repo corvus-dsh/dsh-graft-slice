@@ -12208,29 +12208,14 @@ export const activate = apply
 // ===========================================================================
 // Structural runtime types (erased by the build; kept for TypeScript readers)
 // ===========================================================================
+import type { SessionHeaderLike, SessionLogSnapshotLike, PreparedSessionLike, SessionStoreLike, SessionQueryLike, ToolRegistryLike, PluginContextLike } from './core/gateway-types.js'
 
 
-interface SessionHeaderLike {
-  id: string
-  cwd?: string
-  createdAt?: number
-  isSeeded?: boolean
-  [key: string]: any
-}
 
-interface SessionLogSnapshotLike {
-  session: SessionHeaderLike
-  inheritedEventCount?: number
-  events: SessionEventLike[]
-}
 
-interface PreparedSessionLike {
-  id: string
-  header: SessionHeaderLike
-  seq: number
-  append(type: string, data: any, opts?: any): SessionEventLike
-  snapshotEvents(from?: number): readonly SessionEventLike[]
-}
+
+
+
 
 interface SessionHandleLike {
   append(events: readonly SessionEventLike[], options?: any): Promise<void>
@@ -12243,31 +12228,13 @@ interface SessionPersistenceLike {
   stat?(id: string): Promise<unknown | undefined>
 }
 
-interface SessionStoreLike {
-  get(id: string): { id: string } | undefined
-  prepare(id: string, options?: any): PreparedSessionLike
-}
 
-interface SessionQueryLike {
-  readSession(id: string): Promise<SessionLogSnapshotLike>
-}
 
-interface ToolRegistryLike {
-  register(definition: any): () => void
-}
 
-interface PluginContextLike {
-  tools: ToolRegistryLike
-  sessions: SessionStoreLike
-  sessionQuery: SessionQueryLike
-  get(name: string): any
-  on(name: string, listener: (...args: any[]) => any, options?: any): () => void
-  logger?: {
-    info?: (message: string) => void
-    warn?: (message: string) => void
-    error?: (message: string) => void
-  }
-}
+
+
+
+
 
 /** Test-only: where the durable stores currently resolve. */
 let lastRecovery: { scanned: number; rolledBack: string[] } | undefined

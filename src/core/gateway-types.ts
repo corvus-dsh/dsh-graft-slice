@@ -63,3 +63,51 @@ export interface LogReading {
    */
   readonly session?: Record<string, unknown>
 }
+
+export interface SessionHeaderLike {
+  id: string
+  cwd?: string
+  createdAt?: number
+  isSeeded?: boolean
+  [key: string]: any
+}
+
+export interface SessionLogSnapshotLike {
+  session: SessionHeaderLike
+  inheritedEventCount?: number
+  events: SessionEventLike[]
+}
+
+export interface PreparedSessionLike {
+  id: string
+  header: SessionHeaderLike
+  seq: number
+  append(type: string, data: any, opts?: any): SessionEventLike
+  snapshotEvents(from?: number): readonly SessionEventLike[]
+}
+
+export interface SessionStoreLike {
+  get(id: string): { id: string } | undefined
+  prepare(id: string, options?: any): PreparedSessionLike
+}
+
+export interface SessionQueryLike {
+  readSession(id: string): Promise<SessionLogSnapshotLike>
+}
+
+export interface ToolRegistryLike {
+  register(definition: any): () => void
+}
+
+export interface PluginContextLike {
+  tools: ToolRegistryLike
+  sessions: SessionStoreLike
+  sessionQuery: SessionQueryLike
+  get(name: string): any
+  on(name: string, listener: (...args: any[]) => any, options?: any): () => void
+  logger?: {
+    info?: (message: string) => void
+    warn?: (message: string) => void
+    error?: (message: string) => void
+  }
+}
