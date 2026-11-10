@@ -413,7 +413,7 @@ UI 与命令共用一份实现，而且在客户端 bundle 尚未加载时，命
 
 | 项 | 结果 | 证据 |
 |---|---|---|
-| 全量测试 | graft **690/692**（2 条待裁定跳过）、memory **423/423** | `node --test test/*.test.mjs`（两仓库） |
+| 全量测试 | graft **692/694**（2 条待裁定跳过）、memory **423/423** | `node --test test/*.test.mjs`（两仓库） |
 | 文档/打包一致性 | `check-docs` 27 项一致、`verify-bundle` 28/28 | 同上 |
 | 幽灵条目清理 | projcache **574 → 10**（幽灵 564 → 0）、`retired` **5 → 0**、`targets` **8 → 0** | `scripts/prune-ghosts.mjs`（隔离到 `_quarantine-ghost-<ts>/`，含 `MANIFEST.json` + `restore.ps1`，**未删除任何文件**） |
 | 调试面板 | 真机注册表可查到 `graft_debug_status`；CLI 输出与取证报告逐项吻合 | `cordis_inspect_query Tool.listTools`、`scripts/debug-status.mjs` |
@@ -805,7 +805,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 692 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch、v0.19 语义瘦身/物理点火、v0.20 任务看板、v7.8 回滚通知改走 pre-step messages、v1.0.6 控制台空闲会话寻址（`session/agent-busy`）与 `api-session/added` 载荷守卫 |
+| `test/*.test.mjs` | 694 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch、v0.19 语义瘦身/物理点火、v0.20 任务看板、v7.8 回滚通知改走 pre-step messages、v1.0.6 控制台空闲会话寻址（`session/agent-busy`）与 `api-session/added` 载荷守卫 |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -1472,7 +1472,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 692 个测试
+# 2) 694 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）
