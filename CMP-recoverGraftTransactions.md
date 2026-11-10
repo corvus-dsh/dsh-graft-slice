@@ -16,6 +16,7 @@
 > | 5 | 调用点（`src/` 与 `test/` 分列） | 你的硬约束 |
 > | 6 | 行为差异（逐条「无」） | 你的硬约束 |
 > | 7 | 参数化来源（值从哪来） | 依赖倒置的落点，必须写清否则无法实现 |
+> | 8 | **验收映射** | 你的裁定：不填它，「这个签名改动由哪条验收兜住」没人回答 |
 
 ---
 
@@ -29,9 +30,22 @@
 | 4 | 模块级可变状态 | **7 个，逐个见 §四**（无「待定」） |
 | 5 | 调用点 | `src/` **1 处调用**；`test/` **2 个文件、4 处调用、4 处非调用提及**（分列见 §五） |
 | 6 | 行为差异 | **7 条，逐条「无」**（见 §六，每条给出「同一值、同一时序」的依据） |
-| 7 | 参数化来源 | 全部 7 个值都来自**同一次装配**：`configureRetiredStore(ctx, settings)`（`src/index.ts` L5300..5345），见 §七 |
+| 7 | 参数化来源 | 全部 7 个值都来自**同一次装配**：`configureRetiredStore(ctx, settings)`（`src/index.ts` L5300..5345），见 §六 |
+| 8 | **验收映射** | 见 §八：4 条验收各自兜住这次改动的一个面（导出面 / 全绿 / 端到端 / 对照表 + 新增 v131） |
 
 ---
+
+## 一之二、签名基线（两行，可直接 diff）
+
+**裁定为必填参数**（可选 + 回退会让 7 个 `let` 留着 → STOP 永不解除 → 依赖倒置白做）。基线如下，评审与
+`.export-surface.json` 都看不出这类破坏（它只管名字），所以这两行必须随提交一起走：
+
+```ts
+// BEFORE
+export function recoverGraftTransactions(ctx: PluginContextLike): { scanned: number; rolledBack: string[] }
+// AFTER（`paths` 必填；不提供默认值，不保留回退）
+export function recoverGraftTransactions(ctx: PluginContextLike, paths: GraftStorePaths): { scanned: number; rolledBack: string[] }
+```
 
 ## 二、闭包构成（34 声明，搬动/改签名时必须一起处理）
 
@@ -161,8 +175,28 @@ export interface GraftStorePaths {
 
 ---
 
-## 八、数据来源（可复跑）
+## 八、第 8 列详解：验收映射
+
+| 这次改动动了什么 | 由哪条验收兜住 | 现状 |
+|---|---|---|
+| 函数签名加**必填** `paths`（`src/` 1 处 + `test/` 4 处调用点） | **验收 2**：720 全绿（改完必须仍 718 pass / 0 fail） | 720 / 718 / 0 / 2 |
+| 7 个模块级 `let` 消失（闭包的 `mutable` 从 7 → 0） | **验收 4**（逐函数对照表）+ **v131**（解析的优先级 / 每装配重算 / 稳定性） | v131 4/4 绿，且**能红证明 2/2** |
+| 公开名字不变（只加参数） | **验收 1**：导出面 182 不变 | 182 |
+| 运行时行为（写盘位置、退休闸门、点火） | **验收 3**：端到端（假 harness）三项 true | 三项均 true |
+| 每个被改签名函数的行为差异 | **验收 4**：第 6 列逐条「无」 | 7 条「无」（本轮） |
+
+**v131 是前置证据，不是补充**：它断言 `resolveStoreDir` ①显式 `config.dataDir` 胜出 ②每次装配重算
+③同输入同结果。这三条任一不成立，参数化就会**改行为**，那就不许动代码。
+
+**一条方法教训（实测）**：v131 的测试 import 的是 **产物 `index.js`**，而变异改的是 `src/index.ts`。
+前两次能红证明都「未红」，原因是**变异后没有重建**——测试跑的还是旧产物。正确循环是
+**变异 → 重建 → 测试 → 还原 → 重建**（两次重建都要做，否则产物与已提交源码不一致）。
+本项目的其它能红证明大多读源码或直接 import 脚本，不受此影响；**凡是测试 import 产物的，都必须带重建**。
+
+## 九、数据来源（可复跑）
 
 - 闭包与 `mutable`：`node scripts/closure.mjs recoverGraftTransactions`
 - 声明行 / 签名 / 7 个 `let` 的读写点 / 调用点：`node ..\_scratch\cmp-recover.mjs`
 - 装配点：`src/index.ts` L5300..5345（本表 §六 原文引用）
+- v131 前置证据：`node --test test/v131-store-dir-resolution.test.mjs`
+- v131 能红证明：`node ..\_scratch\v131-canred3.mjs`（含重建循环）
