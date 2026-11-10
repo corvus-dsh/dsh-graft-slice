@@ -40,6 +40,29 @@ async function loadTypeScript() {
   return undefined
 }
 
+/**
+ * ── WHERE DID THE COMPILER COME FROM? ───────────────────────────────────────────────────────────
+ *
+ * The repo has NO `node_modules` of its own and NO `typescript` dependency (measured: `package.json`
+ * declares none). So `import('typescript')` resolves UPWARDS — measured on this machine it landed in
+ * `D:/持久层能力架构/node_modules/typescript`, i.e. the WORKSPACE root, not this package.
+ *
+ * That matters for anyone reading a report: a closure number is only reproducible if the reader can see
+ * which compiler produced it. A fresh clone with no workspace-level install would find nothing and exit 2,
+ * so the path must be printed rather than assumed.
+ */
+async function describeTypeScript() {
+  const ts = await loadTypeScript()
+  if (ts === undefined) return { ts: undefined, path: undefined, version: undefined }
+  let path
+  try {
+    path = import.meta.resolve('typescript')
+  } catch {
+    path = undefined
+  }
+  return { ts, path, version: ts.version }
+}
+
 function sourceFiles() {
   const out = []
   const walk = (dir) => {
@@ -268,10 +291,20 @@ const isMain = process.argv[1] !== undefined && fileURLToPath(import.meta.url) =
 
 if (isMain) {
   const targets = process.argv.slice(2).filter((arg) => !arg.startsWith('--'))
-  const ts = await loadTypeScript()
+  const { ts, path: tsPath, version } = await describeTypeScript()
 
   if (ts !== undefined) {
-    console.log(`typescript ${ts.version} — measuring with the compiler API`)
+    console.log(`typescript ${version} — measuring with the compiler API`)
+    /**
+     * Print WHERE the compiler came from. This package declares no dependency and has no `node_modules`,
+     * so the module resolves from the workspace root — a reader must be able to tell that, because a
+     * fresh clone without that install cannot reproduce these numbers.
+     */
+    console.log(`resolved from: ${tsPath ?? '(unknown)'}`)
+    if (tsPath !== undefined && !tsPath.includes('/dsh-graft-slice/')) {
+      console.log(`note: the compiler is NOT inside this package — it comes from the workspace above it.`)
+      console.log(`      a fresh clone without that install exits 2 by design (see the fallback message).`)
+    }
     const closureOf = measureWithTypeScript(ts)
     if (targets.length === 0) {
       console.log('\ncalibration samples:')

@@ -97,13 +97,19 @@
 
 拆分不是按「一个函数」切，而是按**闭包闭合**切：一个可搬的节点，是它的依赖闭包**完全落在它自己内部**（不引用 `index.ts` 里的其它符号）的那一簇。因此搬运顺序必须是**从叶子往根**——每剥掉一个叶子，上层目标的闭包就会变小；只有当某个根函数的闭包小到闭合，它才可以搬。
 
-| 事实 | **当时**（2026-11-10，S3 闭包实测；**上界**，非结论） |
+| 事实 | **现状**（2026-11-10 用 `scripts/closure.mjs` + typescript 5.9.3 **实测**，非上界） |
 |---|---|
-| 最干净的叶子 | `calculateAdaptiveDepth`，闭包上界 **1 个**声明（N1） |
-| 可搬的中层 | `buildPendingState`，闭包**上界** 19 声明 / 386 行（N4）——**不超过**此数 |
-| **不可搬**（**当时** 2026-11-10 实测，闭包 ≈ 整个文件） | `appendTransitionCard`（336 声明 / 13,390 行）、`graftSliceAndInjectUnlocked`（254 / 8,805）、`buildInjectionPlan` / `buildTape` / `renderTaskBoard` / `renderInstructionCard` / `classifyAgentCommand` / `recoverGraftTransactions`（同为 245 / 7,774） |
+| 最小叶子（**当时**（2026-11-10 实测）） | `classifyAgentCommand`，**8 声明 / 108 行** |
+| 小叶子（**当时**（2026-11-10 实测）） | `renderTaskBoard` **9 / 339**；`buildPendingState` **10 / 217**；`renderInstructionCard` **13 / 457**；`recoverGraftTransactions` **24 / 495** |
+| 中叶子（**当时**（2026-11-10 实测）） | `buildTape` **65 / 2,413**；`buildInjectionPlan` **115 / 4,498**；`graftSliceAndInjectUnlocked` **143 / 5,782** |
+| `calculateAdaptiveDepth`（**当时**（2026-11-10 实测）） | **2 / 124**（原上界写 1 / 135，同量级） |
+| **不是模块级声明，不可搬**（**当时**（2026-11-10 实测）） | `appendTransitionCard` —— AST 实测它在 `apply()` 函数体内部（enclosure 链 `FunctionDeclaration:apply > Block`，apply 跨 11333..13676，它在 11774）。**它可达**：7 个调用点全在 apply 内，是迁移完成时写「[接续] 已转移」卡片的真实路径。**不可搬 ≠ 不可达**——要搬它必须把 `ctx` / `transitionCards` / `openStepOf` 改成参数，那是依赖倒置。 |
 
-**根函数需要的是依赖倒置，不是位移。** 上表最后一行的函数闭包之所以巨大，是因为它们直接读模块级的存储路径、全局状态与彼此。要把它们搬出去，必须把那些依赖**改成参数传进来**——那会**改函数签名，属于行为面改动**，必须**单独立项、单独裁定**，不许混进任何搬运节点。这是本节的结论，也是一个独立的项目。
+**上一版这张表错在哪（留档，因为它是一类错误的样本）**：它把**同一个 245 / 7,774** 写给了七个不同函数——那是一份**共同上界**，不是各自的闭包。实测后 8 处被推翻：`renderTaskBoard` 245→**9**、`classifyAgentCommand` 245→**8**、`buildTape` 245→**65**……只有 `graftSliceAndInjectUnlocked`(143/5,782) 与 `buildInjectionPlan`(115/4,498) 仍是「大」的量级。另外 `appendTransitionCard` 的 336/13,390 **不是它的测量值**，是 `apply()` 的闭包被误标。
+
+**列 0 不是作用域的证据（第二次踩）**：`appendTransitionCard` 在列 0 声明，看起来是顶层，实际在 `apply()` 内。这与规则 24（`splitByShape` 那次）是同一个坑。判据只能用 AST 的 enclosure 链或 `sf.statements` 的名字清单，不能用缩进。
+
+**根函数需要的是依赖倒置，不是位移。** 上表「中叶子」里的函数闭包之所以仍大，是因为它们直接读模块级的存储路径、全局状态与彼此。要把它们搬出去，必须把那些依赖**改成参数传进来**——那会**改函数签名，属于行为面改动**，必须**单独立项、单独裁定**。
 
 **闭包若含模块级可变状态（`let` / 可变 `const`）→ 停止搬运。** 那不是闭包，是共享状态；搬它会把「一处状态」变成「两处状态」。
 
