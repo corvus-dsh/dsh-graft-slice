@@ -107,19 +107,42 @@ test('v0.9.7: the imperative-opening list is declared ONCE and the scorer uses i
    * What CAN be asserted honestly: the source no longer carries a second, truncated copy. That is the
    * defect, stated as a property of the code, and it goes red the moment someone pastes one back.
    */
-  const { readFileSync } = await import('node:fs')
-  const { fileURLToPath } = await import('node:url')
-  const sourcePath = fileURLToPath(new URL('../src/index.ts', import.meta.url))
-  const source = readFileSync(sourcePath, 'utf8')
+  /**
+   * ── N0c: THE SCOPE IS ALL OF `src/**`, NOT `src/index.ts` ──────────────────────────────────────────
+   *
+   * This assertion exists because a SECOND copy of the imperative list is how the 46.7% truncation
+   * happened (164/351 chars, 19 verbs lost). But it counted matches in `src/index.ts` only — so a
+   * second copy pasted into ANY OTHER source file kept it green, and the export/extraction refactors
+   * this project is doing are exactly what moves code out of index.ts.
+   *
+   * "Exactly once" is a statement about the TREE. It must therefore be counted across the tree, and the
+   * artifact cannot substitute: `src/core/ignition.ts.bak-cut` exists in src but is never inlined into
+   * `index.js` (proven by v125), so reading the artifact would miss a copy placed there.
+   */
+  const { countAcrossSource, productionSourceFiles } = await import('./fixtures/source-scan.mjs')
 
-  // The distinctive opening of the imperative list. It must appear exactly once — at its declaration.
-  const openings = [...source.matchAll(/\^\(请\|必须\|禁止\|不要\|不能\|不得\|务必/gu)]
+  // Denominator first (rule 27): a traversal that found nothing would make this test vacuously green.
+  const scanned = productionSourceFiles().length
+  assert.ok(scanned > 10, `the traversal found only ${scanned} source files; it is not scanning src/**`)
+
+  const perFile = countAcrossSource(/\^\(请\|必须\|禁止\|不要\|不能\|不得\|务必/gu)
+  const openings = perFile.reduce((sum, entry) => sum + entry.count, 0)
   assert.equal(
-    openings.length,
+    openings,
     1,
-    `the imperative-opening list must be declared exactly once; found ${openings.length} copies.\n` +
+    `the imperative-opening list must be declared exactly once ACROSS ALL OF src/**; found ${openings} copies in ` +
+      `${JSON.stringify(perFile)}.\n` +
       'A second copy is how the 46.7% truncation (164/351 chars, 19 verbs lost) happened.',
   )
+
+  /**
+   * The POSITIVE half stays on `src/index.ts`: it asserts that a named constant is REFERENCED, which can
+   * only be checked where the reference lives. Moving that text would turn this red — loudly — which is
+   * the acceptable direction (N0c only widens the "must not exist" / "exactly once" class).
+   */
+  const { readFileSync } = await import('node:fs')
+  const { fileURLToPath } = await import('node:url')
+  const source = readFileSync(fileURLToPath(new URL('../src/index.ts', import.meta.url)), 'utf8')
 
   // And the scorer must reference the named constant, not re-spell the list.
   assert.match(

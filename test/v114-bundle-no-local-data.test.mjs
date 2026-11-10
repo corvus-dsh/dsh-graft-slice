@@ -110,21 +110,28 @@ test('E3 self-test: each rule fires on a synthetic violation (so the check is no
   }
 })
 
-test('E3: the metadata file is not reachable from the entry point (the structural guarantee)', () => {
-  // The split is only real if production cannot import it. A comment cannot enforce that; the
-  // import graph can. This asserts no PRODUCTION file imports the contracts module.
-  const sources = [
-    new URL('../src/index.ts', import.meta.url),
-    new URL('../src/core/task-state.ts', import.meta.url),
-    new URL('../src/core/host-shape.ts', import.meta.url),
-    new URL('../src/core/state.ts', import.meta.url),
-  ]
-  for (const url of sources) {
-    const text = readFileSync(url, 'utf8')
-    assert.doesNotMatch(
-      text,
-      /from\s*['"][^'"]*model-wording\.contracts/u,
-      `${url.pathname.split('/').at(-1)} imports the metadata module; production must not`,
-    )
-  }
+test('E3: the metadata file is not reachable from the entry point (the structural guarantee)', async () => {
+  /**
+   * ── N0c: "PRODUCTION" MEANS ALL OF `src/**`, NOT FOUR NAMED FILES ────────────────────────────────
+   *
+   * The claim is "production does not depend on the metadata module". The code used to check four
+   * hard-coded files, so every module extracted from `index.ts` became a fifth file nobody checked —
+   * the guarantee quietly shrank with each refactor, which is the same defect shape as rule 31
+   * (a conclusion wider than its evidence).
+   *
+   * A NEGATIVE assertion must traverse all of src/** and must NOT read the artifact: a forbidden import
+   * in a file that is never inlined (`ignition.ts.bak-cut` is such a file, proven by v125) would be
+   * invisible in the bundle.
+   */
+  const { sourceFilesMatching, productionSourceFiles } = await import('./fixtures/source-scan.mjs')
+
+  const scanned = productionSourceFiles().length
+  assert.ok(scanned > 10, `the traversal found only ${scanned} source files; it is not scanning src/**`)
+
+  const importers = sourceFilesMatching(/from\s*['"][^'"]*model-wording\.contracts/u)
+  assert.deepEqual(
+    importers,
+    [],
+    `production source must not import the metadata module; these do: ${JSON.stringify(importers)}`,
+  )
 })
