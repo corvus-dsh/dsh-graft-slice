@@ -27,14 +27,24 @@
  * The obvious worry is that these tests exercise a STALE bundle rather than the source: `src/index.ts`
  * could be edited, the build forgotten, and every assertion below would pass against yesterday's code.
  *
- * That cannot happen, because the docs gate compares the two BYTE FOR BYTE. Editing only `src` and
- * running the gates produces:
+ * That cannot happen, because TWO checks compare the two BYTE FOR BYTE, and one of them runs in this
+ * very suite:
  *
- *     FAIL build: index.js is exactly composeBundle(src/) — 862832 vs 862817 bytes
+ *   * `scripts/check-docs.mjs` — the release gate ("index.js is exactly composeBundle(src/)");
+ *   * `test/v122-artifact-freshness.test.mjs` — beside the tests that DEPEND on freshness, so a stale
+ *     artifact fails here rather than relying on someone remembering to run the gate.
  *
- * So a stale artifact fails the build, not the test. Reading the artifact is not merely acceptable here
- * — it is the point: these tests assert what SHIPS, through its real export surface, rather than a
- * source path no consumer ever takes.
+ * ── AND WHY NO BYTE COUNTS APPEAR ABOVE ─────────────────────────────────────────────────────────
+ *
+ * An earlier version of this comment quoted the two byte counts from a probe run. They were accurate the
+ * day they were written and would rot silently — measured again with the same class of edit, the delta
+ * was 12 bytes, not the 15 quoted. A number in a comment reads as verified while nothing verifies it.
+ *
+ * The rule that replaced it: a number in a comment must either be reproducible by a test, or be labelled
+ * as an example. v122 IS that test, so this header states the mechanism and points there instead.
+ *
+ * Reading the artifact is not merely acceptable here — it is the point: these tests assert what SHIPS,
+ * through its real export surface, rather than a source path no consumer ever takes.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
