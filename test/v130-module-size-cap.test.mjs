@@ -100,7 +100,21 @@ function walkEveryTsBearingFile(dir, relative = '', out = []) {
     const full = join(dir, entry)
     const rel = relative === '' ? entry : `${relative}/${entry}`
     if (statSync(full).isDirectory()) { walkEveryTsBearingFile(full, rel, out); continue }
-    if (/\.ts(?:\.|$)/u.test(entry)) out.push(rel)
+    /**
+     * ── A DIFFERENT PREDICATE ON PURPOSE (N6b) ────────────────────────────────────────────────
+     *
+     * The first version tested the SAME regex literal as `scan()` — `/\.ts(?:\.|$)/u` — twenty lines
+     * apart. That is not an independent implementation: changing the filter in both places kept
+     * `deepEqual` green while the assertion text claimed "a changed filter must fail HERE". Measured by
+     * the user, and it is the v126 lesson repeating: the pattern was reused, so its weakness was too.
+     *
+     * `String.prototype.includes('.ts')` has no regex semantics to share, so a filter edit on one side
+     * genuinely disagrees with the other. It is deliberately LOOSER than the scan (it would also accept
+     * `foo.tsx`), which is the right direction: a looser reference set makes the scan's narrowness a
+     * failure rather than an agreement.
+     */
+    if (!entry.includes('.ts')) continue
+    out.push(rel)
   }
   return out
 }
@@ -108,10 +122,23 @@ function walkEveryTsBearingFile(dir, relative = '', out = []) {
 const expected = walkEveryTsBearingFile(SRC).filter((rel) => rel !== 'index.ts').sort()
 
 test('cap: the scan covers EVERY .ts-bearing file under src/ except index.ts (independent walk)', () => {
+  /**
+   * ── WHAT THIS ASSERTION DOES AND DOES NOT COVER (N6b) ────────────────────────────────────────
+   *
+   * COVERS: a dropped directory, a dropped file, a scan that stops early, and any change to the scan's
+   * file predicate — because the reference set is computed with a DIFFERENT predicate (`includes`).
+   *
+   * DOES NOT COVER: a change that makes `scan()` and the reference agree by both being wrong in the same
+   * way, e.g. a renamed helper used by both, or a directory the walk itself cannot descend into. Measured:
+   * narrowing BOTH predicates to `.tsx` makes them agree — and is then caught by the `>= 20` denominator
+   * below, not by the independent walk. Saying so is the point: the previous message promised "a changed
+   * filter must fail HERE", which was false while both sides shared one regex literal.
+   */
   const actual = files.map((file) => file.rel).sort()
   assert.deepEqual(actual, expected,
-    'the cap scan and an independent whole-tree walk disagree. A narrowed scan (a dropped directory, a ' +
-      'dropped file, a changed filter) must fail HERE rather than quietly reporting fewer violations.')
+    'the cap scan and an independent walk disagree. The reference set uses `includes(".ts")`, not the ' +
+      'scan\'s regex, so a narrowed scan (dropped directory, dropped file, changed predicate, early ' +
+      'stop) fails HERE rather than quietly reporting fewer violations.')
   assert.ok(expected.length >= 20,
     `the independent walk found only ${expected.length} files — the tree, not the gate, has shrunk`)
   assert.deepEqual(scannedDirs.length > 0, true,

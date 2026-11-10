@@ -59,7 +59,20 @@ test('N0c: the scanned set covers every `.ts`-bearing file under src/ (and exclu
           // not a directory
         }
       }
-      if (/\.ts(?:\.|$)/u.test(entry)) out.push(relative(SRC_ROOT, full).split('\\').join('/'))
+      /**
+     * ── A DIFFERENT PREDICATE, BECAUSE "INDEPENDENT" WAS NOT TRUE (N6b) ─────────────────────────
+     *
+     * This walk used to apply the SAME `/\.ts(?:\.|$)/u` literal as the helper it checks, twenty lines
+     * below it. So a change to that filter, made in both places, kept `deepEqual` green while the
+     * assertion read "a filter change has to disagree with THIS list". The list was not independent;
+     * it was the same opinion written twice.
+     *
+     * `includes('.ts')` shares no regex semantics with the helper, and it is deliberately LOOSER (it
+     * would also accept `foo.tsx`), which is the safe direction: a looser reference set turns the
+     * helper's narrowness into a failure instead of an agreement.
+     */
+    if (!entry.includes('.ts')) continue
+    out.push(relative(SRC_ROOT, full).split('\\').join('/'))
     }
     return out
   }
