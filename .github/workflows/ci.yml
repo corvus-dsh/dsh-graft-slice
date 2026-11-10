@@ -126,6 +126,21 @@ jobs:
       # they differ; without this env var a declared change would be indistinguishable from an
       # accident, and the honest fix would be to switch the gate off. The subject line is enough —
       # the convention puts the marker there.
+      # ── THE DOCUMENTATION GATES, NOW ACTUALLY RUN ─────────────────────────────────────────────
+      #
+      # These existed and were never run here, so the same commit could have CI green while
+      # `check-readme-counts` was red (measured: ARCHITECTURE quoted a stale line count). The
+      # workflow file itself says it: "A gate nobody runs is a comment."
+      #
+      # They run AFTER `npm test` on purpose: a behavioural break should fail with a test name to
+      # read, not with a documentation mismatch that is a symptom of it.
+      - name: Documentation counts match the code
+        run: node scripts/check-readme-counts.mjs
+
+      # The pass/skip SPLIT, not just the total: a guard that quietly becomes a skip keeps the total
+      # identical, and that is exactly how coverage shrinks without anyone noticing.
+      - name: README test tally (passed + skipped == total, all measured)
+        run: node scripts/check-readme-tally.mjs
       - name: Bundle contract, including the export surface
         env:
           GRAFT_COMMIT_MESSAGE: ${{ github.event.head_commit.message || github.event.pull_request.title }}
