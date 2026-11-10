@@ -58,7 +58,20 @@ const countLines = (file) => {
   return parts[parts.length - 1] === '' ? parts.length - 1 : parts.length
 }
 
-const SCANNED_DIRS = ['core', 'contracts', 'utils']
+/**
+ * ── THE DIRECTORY SET IS DISCOVERED, NOT LISTED (user ruling, N5c) ───────────────────────────────
+ *
+ * The first version hard-coded `['core', 'contracts', 'utils']`. That made every FUTURE directory a
+ * blind spot: dropping `src/newarea/x.ts` into the tree would simply not be scanned, and the root-file
+ * assertion below could not notice it (it only looks at `.ts` files directly under `src/`).
+ *
+ * A gate that enforces a rule must itself obey the rule that it has no hidden scope. So the directory
+ * list comes from the filesystem.
+ */
+const scannedDirs = readdirSync(SRC)
+  .filter((entry) => statSync(join(SRC, entry)).isDirectory())
+  .sort()
+
 function scan(dir, relative = '') {
   const out = []
   for (const entry of readdirSync(dir).sort()) {
@@ -71,12 +84,38 @@ function scan(dir, relative = '') {
   return out
 }
 
-const files = SCANNED_DIRS.flatMap((name) => scan(join(SRC, name), name))
+const files = scannedDirs.flatMap((name) => scan(join(SRC, name), name))
 
-test('cap: the scan has a denominator (an empty or narrow walk must not pass)', () => {
-  assert.ok(files.length >= 15,
-    `scanned only ${files.length} module file(s). An empty or narrow walk would report no violations — ` +
-      'which is how a gate becomes a comment (rule 27: no denominator, no conclusion).')
+/**
+ * ── AN INDEPENDENT WHOLE-TREE WALK, NOT A MAGIC FLOOR (user ruling, N5c) ─────────────────────────
+ *
+ * `>= 15` was a floor against 23 real files: dropping EIGHT files still passed. The denominator has to
+ * be the actual set, computed by a SECOND implementation (the v126 pattern), so that a narrowed scan
+ * has to disagree with an independent walk rather than with a constant.
+ *
+ * Scope: every `.ts`-bearing file under `src/` EXCEPT `src/index.ts` (which TD-1 is decomposing).
+ */
+function walkEveryTsBearingFile(dir, relative = '', out = []) {
+  for (const entry of readdirSync(dir).sort()) {
+    const full = join(dir, entry)
+    const rel = relative === '' ? entry : `${relative}/${entry}`
+    if (statSync(full).isDirectory()) { walkEveryTsBearingFile(full, rel, out); continue }
+    if (/\.ts(?:\.|$)/u.test(entry)) out.push(rel)
+  }
+  return out
+}
+
+const expected = walkEveryTsBearingFile(SRC).filter((rel) => rel !== 'index.ts').sort()
+
+test('cap: the scan covers EVERY .ts-bearing file under src/ except index.ts (independent walk)', () => {
+  const actual = files.map((file) => file.rel).sort()
+  assert.deepEqual(actual, expected,
+    'the cap scan and an independent whole-tree walk disagree. A narrowed scan (a dropped directory, a ' +
+      'dropped file, a changed filter) must fail HERE rather than quietly reporting fewer violations.')
+  assert.ok(expected.length >= 20,
+    `the independent walk found only ${expected.length} files — the tree, not the gate, has shrunk`)
+  assert.deepEqual(scannedDirs.length > 0, true,
+    'no sub-directory under src/ was discovered; the scan would be empty by construction')
 })
 
 test('cap: every in-scope module is at or under 800 lines', () => {
