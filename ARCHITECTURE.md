@@ -118,6 +118,10 @@
 
 **口径限制（必须一并引用）**：`scripts/closure.mjs` 只沿**同一个文件**内的模块级声明扩展闭包，跨文件依赖按定义算「导入」而不计入。因此同一目标在 index.ts 里和在它自己的模块里，数字会不同（上表第二、三行就是这个差）。要判断「能不能干净搬走」，看的是它**当前所在文件**里的数字。
 
+**⑥ 的验收口径（2026-11-10 改准）**：`scripts/demo.mjs` 的头注释写明「DSH services are replaced by the local fake harness, so this never touches the live profile or the real session store」。所以它是**「端到端（假 harness）」**，**不是真机切片**——它证明的是 `apply()` 注册 → 工具定义 → 切片计划 → 持久写序（create → append → flush → close）→ 冷读回验 → 退休闸门 这条**代码路径**真的走得通，且源日志是真实的 `session.v4.jsonl.zstd`；它**不**证明实时 profile 与真实 session store 上无副作用。
+
+**阶段内降级为「端到端（假 harness）」，真机在阶段收尾补验**（本次裁定）。理由是一次覆盖累积效应比每节点各欠一次更诚实：每个搬运节点都不触碰运行时语义（纯位移），逐节点做真机切片的边际信息接近零，而阶段收尾时一次性在实时 profile 上验收，能同时覆盖 N1..N10 的累积结果。因此**N1 那笔不再算欠账**——它由阶段收尾那一次统一补验。
+
 **⑧ 性能判据的口径（钉死，2026-11-10 裁定）**：`dsh-paradise/scripts/bench-prestep.mjs` 的 T1 **只有 `n=50` 那一档可以用于「退化 ≤10%」判定**；`n=1` 与 `n=10` 两档必须记为「**测不出（spread > 阈值）**」，**不许声称通过**。原因是实测的：`n=10` 档的 `spread(p95)` 在本机两次运行分别是 15% 与 44%，而它两次的 p95 只差 14% —— **不确定性大于差值**，任何方向的结论都不可辩。`n=50` 档在同两次运行里是 2.76 → 2.10 ms（比值 0.76），spread 55% / 121%，但绝对差 0.66 ms 明显大于档内抖动的常见幅度，且方向与「多一个内联模块、产物 872,914 → 873,014 字节」的预期一致（可以忽略）。若将来 `n=50` 的 spread 也压不住差值，同样记「测不出」，而不是挑一个方向写进去。
 
 **这张表的数字来自仪器修正之后的一次重测（2026-11-10，本轮）。上一轮的每一个闭包数字都偏小，原因是仪器本身有缺陷——见下。每个数字的口径：`scripts/closure.mjs <symbol>`，TypeScript 5.9.3 编译器 API，`declarations` = 闭包内模块级声明数，`lines` = 合并重叠区间后的行数。TS 来自工作区上层 `node_modules`（`npm i --no-save`），**不在本仓、CI 不能复跑**——引用时须一并注明。**
@@ -150,7 +154,7 @@
 | 为什么现在不动 | 见下方 TD-7：本轮只搬了「与彼岸层真正重叠」的两块。剩下的搬运是纯位移，不减复杂度，且 84 个测试文件直接 import 那些区域的 30 个符号 |
 | 退出条件（可验收） | ① 按职责拆成 `session-slice.ts` / `tape.ts` / `injection.ts` / `ledger.ts` / `guards.ts` / `console.ts` / `tools.ts` 等模块，每个 ≤ 800 行；② `index.ts` 只保留 `apply()` 装配与再导出，≤ 300 行；③ **拆前后测试数不变、全绿**；④ `scripts/build.mjs` 的产物字节差异仅来自模块边界（banner 与 import 语句）；⑤ 每个模块导出面的 `grep` 参考计数与拆前一致（防止顺手删了导出） |
 | 建议节奏 | 一次只搬一个模块，搬完立刻跑全量 + 真机切片一次；不与其他行为改动混在同一次提交 |
-| 进度 | ✅ `core/host-shape.ts`（v7.6，996 行：身份元数据 / 四个消息构造器 / materializeTape / buildInjectionEvents / assertColdLog / extractActiveGoalChange / 系统头与红线）<br>✅ `core/ignition.ts`（v7.6，921 行 → v7.7 1,005 行：点火通道 + 每目标准入 + 持久队列 + 重试 + 回滚）<br>✅ `core/paradise-write.ts`（v7.7，240 行：彼岸层桥接 —— 懒加载、按 ctx 缓存、具名拒绝）<br>✅ `core/task-state.ts`（G5，564 行：`extractTaskState` + `checkTaskBoundary` + `checkSafeHarbor` + 它们共用的 `splitSentences` / `orderedBySeq` / todo 与 report 的解析助手；**纯搬运，导出面 180 不变，测试 598 不变**）<br>✅ `core/command-guard.ts`（N1，222 行：命令风险扫描器 —— 7 个正则常量 + `escapesWorkspace` / `verbInCommandPosition` / `expandKnownRoots` / `pathTokensOf` / `isInsideWorkspace` + `CommandRisk` / `CommandAssessment` / `classifyAgentCommand`；**纯搬运，`verify-pure-move` IDENTICAL（19098 = 19098），导出面 182 不变，测试 708 不变**）<br>✅ `core/command-policy.ts`（N2，99 行：命令策略层 —— `CommandVerdict` / `CommandPolicyVerdict` / `SafetyMode` / `PolicyDecision` / `policyDecision` / `scanAgentCommand` / `evaluateCommandPolicy`；**纯搬运，`verify-pure-move` IDENTICAL（19098 = 19098），导出面 182 不变，测试 708 不变，真机切片已执行**）<br>⏳ 存储/账本层（约 1,517 行，但 `recoverGraftTransactions` 闭包含 7 个 `let`，按本表判据**当前不可搬**）<br>⏳ 工具注册层（约 4,119 行） |
+| 进度 | ✅ `core/host-shape.ts`（v7.6，996 行：身份元数据 / 四个消息构造器 / materializeTape / buildInjectionEvents / assertColdLog / extractActiveGoalChange / 系统头与红线）<br>✅ `core/ignition.ts`（v7.6，921 行 → v7.7 1,005 行：点火通道 + 每目标准入 + 持久队列 + 重试 + 回滚）<br>✅ `core/paradise-write.ts`（v7.7，240 行：彼岸层桥接 —— 懒加载、按 ctx 缓存、具名拒绝）<br>✅ `core/task-state.ts`（G5，564 行：`extractTaskState` + `checkTaskBoundary` + `checkSafeHarbor` + 它们共用的 `splitSentences` / `orderedBySeq` / todo 与 report 的解析助手；**纯搬运，导出面 180 不变，测试 598 不变**）<br>✅ `core/command-guard.ts`（N1，222 行：命令风险扫描器 —— 7 个正则常量 + `escapesWorkspace` / `verbInCommandPosition` / `expandKnownRoots` / `pathTokensOf` / `isInsideWorkspace` + `CommandRisk` / `CommandAssessment` / `classifyAgentCommand`；**纯搬运，`verify-pure-move` IDENTICAL（19098 = 19098），导出面 182 不变，测试 708 不变**）<br>✅ `core/command-policy.ts`（N2，99 行：命令策略层 —— `CommandVerdict` / `CommandPolicyVerdict` / `SafetyMode` / `PolicyDecision` / `policyDecision` / `scanAgentCommand` / `evaluateCommandPolicy`；**纯搬运，`verify-pure-move` IDENTICAL（19098 = 19098），导出面 182 不变，测试 708 不变，端到端（假 harness）已跑**）<br>⏳ 存储/账本层（约 1,517 行，但 `recoverGraftTransactions` 闭包含 7 个 `let`，按本表判据**当前不可搬**）<br>⏳ 工具注册层（约 4,119 行） |
 
 ### TD-7 存储层与工具层「未搬移」（P2，v7.6 登记）
 
@@ -304,6 +308,19 @@
 | **明确不并入 S3** | **本条目不属于 S3 模块化搬运的任何节点，也不作为搬运节点的前置。** 搬运节点（N1..N10）只搬**闭包闭合的模块级符号**；`apply()` 的拆分是**依赖倒置 + handler 提取**，须单独立项、单独裁定。把两者混在一起会让「纯位移可验证」这条判据失效——因为 handler 提取不可能保持内容行多重集合不变。 |
 | 记一条实测事实（供将来拆分时用） | `appendTransitionCard`（L11774..11840，67 行）在 `apply()` 内，7 个调用点全在 apply 内，**可达但不可搬**（不是模块级声明）。它是 `apply()` 体积里最小的一块，搬它只减 2.9%。 |
 | 退出条件 | ① 先产出一份 `apply()` 的 handler 清单（每个 `ctx.on(...)` 的名称、行数、依赖集），作为独立提案的输入；② 拆分的验收必须是「行为面等价」而不是「纯位移」——即 `verify-pure-move` **不适用**，改用「注册的事件名集合 + 每个 handler 的输入输出不变」；③ 在完成 ① 之前，本条目不动手。 |
+
+## TD-22 命令护栏的 `GLOBAL_SEARCH` 分支有真实误报面：`|` 模式串与 `/` 分隔符（P2，2026-11-10 登记）
+
+| 项 | 内容 |
+|---|---|
+| 现状（**当时** 2026-11-10 实测） | `classifyAgentCommand` 的全局搜索分支在**两种普通命令上**判 `destructive`。本会话实测两次被拦，均在正常工作时。 |
+| 触发样例 ①：`/` 作为分隔符 | `git commit -m "... check-readme-counts / check-readme-tally / verify-bundle"` —— 提交信息里的**空格斜杠空格**命中 `ESCAPING_ROOT` 的 `(?:^\|[\s"'),;=,])/(?=$|[\s"'),;])` 分支，被判成「扫根目录」。改走 `git commit -F 文件` 即通过。 |
+| 触发样例 ②：带 `\|` 的模式串 | `Get-ChildItem -Filter '*.md' \| Select-Object Name; Select-String -Path *.md -Pattern 'C2\|backlog'` —— 管道符被当作命令分段，搜索动词 + 分段后的内容被判成全局搜索。改用 glob / grep 工具即通过。 |
+| 为什么不是 bug-free 的边界问题 | 两次都**不是**在扫根目录：一次是在写提交说明，一次是在读本仓自己的 md。护栏把「词/符号出现在参数位」当成了动作 —— 这正是 v112/v123 守住的那一类（`Format-Table` 不是 `format`；`rg "diskpart"` 不是 `diskpart`），只是这次发生在 `/` 与 `\|` 上。 |
+| 修法方向（未实施） | `ESCAPING_ROOT` 的斜杠分支应要求**路径上下文**（如出现在 `rg `/`ls `/`Get-ChildItem ` 之后，或后面紧跟路径分隔或结尾），而不是任意空格包裹的单个 `/`。分段逻辑应只在**命令位**判断搜索动词，与 v112 的 `verbInCommandPosition` 同一条思路。 |
+| 为什么本轮不改 | 改它要动**行为面**（会改变真实命令的判定），属于「改函数签名/判定逻辑」范畴，须单独立项与裁定；而本轮的任务是纯位移搬运。**登记在此，不顺手改。** |
+| 退出条件 | ① 先写能红证明：上面两个样例必须从 `destructive` 变为 `safe`；② 真正的根扫描（`rg `/`、`Get-ChildItem -Recurse C:\`）必须仍然是 `destructive`（v112/v123 的 D4 已钉住这两条）；③ 两条一起过，才可合并。 |
+
 ## TD-14 `hard` 与 `strong` 是两份强调词表，并集更合理但会改变加权（P2，2026-11-09 登记）
 
 | 项 | 内容 |

@@ -259,6 +259,29 @@ for (const [name, marker, keyword] of coverage) {
   )
 }
 
+/**
+ * ── META: A PASS-COUNT FLOOR, BECAUSE "0 FAIL" IS NOT "ALL CHECKS PRESENT" ────────────────────────
+ *
+ * Measured on N2: this gate reported **26 facts and 0 failures** after the command policy moved out of
+ * index.ts. The missing check was not failing — it had stopped existing, because its marker was looked
+ * for in one file only. That fix (scan all of src/, missing marker = FAILURE) closed THAT instance, but
+ * the same shape can arrive by another route: delete a coverage row, delete a `check(...)` call, or
+ * make a loop iterate over nothing. In all of those the output still reads `N facts agree`.
+ *
+ * A floor is the only assertion that notices a CHECK disappearing rather than a check failing. It is a
+ * lower bound on purpose: adding facts is normal, losing one is the failure. `27` is today's measured
+ * count (`node scripts/check-docs.mjs`), not a target.
+ */
+const FACT_FLOOR = 27
+if (checks.length < FACT_FLOOR) {
+  checks.push({
+    id: 'meta: pass-count floor',
+    ok: false,
+    detail: `only ${checks.length} facts ran; the floor is ${FACT_FLOOR}. A check disappeared — that is ` +
+      'not "0 failures", it is a smaller gate. Silence here reads as agreement.',
+  })
+}
+
 // Report -------------------------------------------------------------------
 for (const item of checks) {
   process.stdout.write(`${item.ok ? 'PASS' : 'FAIL'}  ${item.id}  — ${item.detail}\n`)
