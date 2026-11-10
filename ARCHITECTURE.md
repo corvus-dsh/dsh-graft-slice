@@ -99,13 +99,28 @@
 
 | 事实 | **现状**（2026-11-10 用 `scripts/closure.mjs` + typescript 5.9.3 **实测**，非上界） |
 |---|---|
-| 最小叶子（**当时**（2026-11-10 实测）） | `classifyAgentCommand`，**8 声明 / 108 行** |
-| 小叶子（**当时**（2026-11-10 实测）） | `renderTaskBoard` **9 / 339**；`buildPendingState` **10 / 217**；`renderInstructionCard` **13 / 457**；`recoverGraftTransactions` **24 / 495** |
-| 中叶子（**当时**（2026-11-10 实测）） | `buildTape` **65 / 2,413**；`buildInjectionPlan` **115 / 4,498**；`graftSliceAndInjectUnlocked` **143 / 5,782** |
-| `calculateAdaptiveDepth`（**当时**（2026-11-10 实测）） | **2 / 124**（原上界写 1 / 135，同量级） |
+| 最小叶子（**当时**（2026-11-10 实测，仪器修正后）） | `policyDecision` **4 / 8**；`classifyAgentCommand` **15 / 119** |
+| 小叶子（**当时**（2026-11-10 实测，仪器修正后）） | `calculateAdaptiveDepth` **2 / 124**；`stripHostNoise` **7 / 35**；`renderTaskBoard` **12 / 348**；`renderInstructionCard` **16 / 466**；`buildPendingState` **19 / 229**；`scanAgentCommand` **17 / 130**；`evaluateCommandPolicy` **20 / 166** |
+| 中叶子（**当时**（2026-11-10 实测，仪器修正后）） | `buildTape` **84 / 2,446**；`buildInjectionPlan` **155 / 4,560** |
+| **含模块级可变状态 → 停止搬运**（**当时**（2026-11-10 实测，仪器修正后）） | `recoverGraftTransactions` **34 / 505，7 个 `let`**；`graftSliceAndInjectUnlocked` **190 / 5,851，7 个 `let`**；`graftSliceAndInject` **195 / 5,903，7 个 `let`**。按 TD-1 自己的判据（L114「那不是闭包，是共享状态」），这三个**不是候选节点**，直到依赖被参数化。 |
+| `apply()`（**当时**（2026-11-10 实测）） | **312 / 10,852，16 个 `let`**（见 TD-21） |
 | **不是模块级声明，不可搬**（**当时**（2026-11-10 实测）） | `appendTransitionCard` —— AST 实测它在 `apply()` 函数体内部（enclosure 链 `FunctionDeclaration:apply > Block`，apply 跨 11333..13676，它在 11774）。**它可达**：7 个调用点全在 apply 内，是迁移完成时写「[接续] 已转移」卡片的真实路径。**不可搬 ≠ 不可达**——要搬它必须把 `ctx` / `transitionCards` / `openStepOf` 改成参数，那是依赖倒置。 |
 
-**上一版这张表错在哪（留档，因为它是一类错误的样本）**：它把**同一个 245 / 7,774** 写给了七个不同函数——那是一份**共同上界**，不是各自的闭包。实测后 8 处被推翻：`renderTaskBoard` 245→**9**、`classifyAgentCommand` 245→**8**、`buildTape` 245→**65**……只有 `graftSliceAndInjectUnlocked`(143/5,782) 与 `buildInjectionPlan`(115/4,498) 仍是「大」的量级。另外 `appendTransitionCard` 的 336/13,390 **不是它的测量值**，是 `apply()` 的闭包被误标。
+**这张表的数字来自仪器修正之后的一次重测（2026-11-10，本轮）。上一轮的每一个闭包数字都偏小，原因是仪器本身有缺陷——见下。每个数字的口径：`scripts/closure.mjs <symbol>`，TypeScript 5.9.3 编译器 API，`declarations` = 闭包内模块级声明数，`lines` = 合并重叠区间后的行数。TS 来自工作区上层 `node_modules`（`npm i --no-save`），**不在本仓、CI 不能复跑**——引用时须一并注明。**
+
+**仪器曾经是瞎的（本轮发现并修复，是本轮最重要的产出，比任何搬运都重要）**：`closure.mjs` 原先用 `statement.name?.text` 取顶层声明名。这对 `FunctionDeclaration` 成立，对 `const` / `let` / `var` **不成立**——变量语句的名字在 `declarationList.declarations[i].name` 上，`statement.name` 是 `undefined`。后果有两个，同一个原因：
+
+① **每一个模块级常量对闭包都不可见**。`classifyAgentCommand` 读 7 个模块级正则常量（`UNCONFINABLE_VERB` / `DESTRUCTIVE_VERB` / `SEARCH_VERB` / `RECURSIVE_FLAG` / `ESCAPING_ROOT` / `SYSTEM_DIR` / `SEGMENT_START`），仪器报 **8 声明、一个常量都没有**。若按「先搬最小闭包」执行，搬走的会是函数，7 个正则留在原地——要么形成回指 import 成环，要么复制字面量，两种都不是纯位移。
+
+② **`mutable` 判据结构上不可能为真**。它只在那个从未执行的变量分支里计算，所以 `mutable` 恒为 `none`。TD-1 L114 写着「闭包若含模块级可变状态 → 停止搬运」——这条 STOP CONDITION **从未真正生效过**，而它偏偏是在 `recoverGraftTransactions` 这种含 7 个 `let` 的目标上最该生效。一条不可能触发的停止条件比没有更糟：它读起来像「已检查、无问题」。
+
+修正后重测，被推翻的差值：`classifyAgentCommand` 8→**15**、`buildPendingState` 10→**19**、`renderTaskBoard` 9→**12**、`renderInstructionCard` 13→**16**、`buildTape` 65→**84**、`buildInjectionPlan` 115→**155**、`graftSliceAndInjectUnlocked` 143→**190**、`recoverGraftTransactions` 24→**34**。**所有「叶子/中叶子」的排序结论未变，但「可变状态」这一整类从「不存在」变成「三个目标必须停」。**
+
+**修好但没钉住的修复，等于下一个人的陷阱**（这是 v126 的教训，这里再犯一次就是第三次）：新增 `test/v127-closure-instrument.test.mjs` 四条判据把仪器钉住——① 7 个 `const` 必须是闭包成员；② `recoverGraftTransactions` 的 `let` 必须被报为可变；③ 纯叶子 `calculateAdaptiveDepth` 必须报 `none`（防误报）；④ 被原地修改的 `const` 对象也必须算可变（这条是**探针**发现的：第一版只测 `ts.isIdentifier(node.left)`，`obj.n += 1` 的左侧是属性访问，于是原地修改的 `const` 被当成不可变，实测「预期可变、工具说 none」）。
+
+能红证明：把变量分支改回不可达（`if (false && ts.isVariableStatement(...))`）→ **3 条红**，红在 `v127:75:10`、`v127:98:10`、`v127:128:10`；还原 `byte-identical=true`（`82cb8aa0260b`）。
+
+**再上一版这张表错在哪（留档，因为它是一类错误的样本；注意这是「上界当测量」那一类，与上面「仪器瞎了」是两类不同的错）**：它把**同一个 245 / 7,774** 写给了七个不同函数——那是一份**共同上界**，不是各自的闭包。实测后 8 处被推翻：`renderTaskBoard` 245→**9**、`classifyAgentCommand` 245→**8**、`buildTape` 245→**65**……只有 `graftSliceAndInjectUnlocked`(143/5,782) 与 `buildInjectionPlan`(115/4,498) 仍是「大」的量级。另外 `appendTransitionCard` 的 336/13,390 **不是它的测量值**，是 `apply()` 的闭包被误标。
 
 **列 0 不是作用域的证据（第二次踩）**：`appendTransitionCard` 在列 0 声明，看起来是顶层，实际在 `apply()` 内。这与规则 24（`splitByShape` 那次）是同一个坑。判据只能用 AST 的 enclosure 链或 `sf.statements` 的名字清单，不能用缩进。
 

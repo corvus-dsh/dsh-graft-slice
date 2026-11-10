@@ -88,22 +88,106 @@ function measureWithTypeScript(ts) {
   })
   const checker = program.getTypeChecker()
 
-  /** All module-scope declarations of a source file, keyed by name. */
+  /**
+   * ── A VARIABLE STATEMENT HAS NO `.name` — AND THAT MADE THE TOOL BLIND ────────────────────────
+   *
+   * The first version keyed every module-scope declaration on `statement.name?.text`. For
+   * `FunctionDeclaration` / `ClassDeclaration` / `InterfaceDeclaration` that works. For
+   * `const` / `let` / `var` it does NOT: the names live on
+   * `statement.declarationList.declarations[i].name`, and `statement.name` is `undefined`.
+   *
+   * Measured consequence on `classifyAgentCommand`: it reads SEVEN module-level regex constants
+   * (`UNCONFINABLE_VERB`, `DESTRUCTIVE_VERB`, `SEARCH_VERB`, `RECURSIVE_FLAG`, `ESCAPING_ROOT`,
+   * `SYSTEM_DIR`, `SEGMENT_START`) and the tool reported **8 declarations, none of them a constant**.
+   * Moving that closure "as measured" would have carried the functions and left every regex behind,
+   * producing either an import cycle or duplicated literals — and `verify-pure-move` would have
+   * served as the wreckage report rather than a warning.
+   *
+   * The same blindness made `mutable` structurally unable to be non-empty: it was computed only
+   * inside the variable branch, which never ran. So the plan's STOP CONDITION ("closure contains
+   * module-level mutable state") could never fire. Two defects, one cause.
+   *
+   * Reassignment detection is what makes `mutable` honest for `const` too: a `const` that is
+   * assigned elsewhere (`=`, `+=`, `??=`, …) is mutable state in every sense that matters for a move.
+   */
   function moduleDeclarations(sourceFile) {
+    /**
+     * ── A `const` OBJECT IS STILL MUTABLE STATE ────────────────────────────────────────────────
+     *
+     * Detecting reassignment via `ts.isIdentifier(node.left)` alone MISSES the commonest mutation
+     * there is: `reassignedConstant.n += 1` / `list[0] = x`. The left-hand side there is a
+     * PropertyAccessExpression / ElementAccessExpression, so the identifier test is false and the
+     * `const` was reported as immutable.
+     *
+     * Measured (probe `n1-mutable-proof`, case `bumpConst`): expected mutable, tool said `none`.
+     * A closure that mutates a module const object behaves exactly like one that mutates a `let`
+     * after the move — both share writable state across module boundaries — so the root identifier
+     * of the assignment target is what must be recorded.
+     */
+    const rootIdentifierOf = (node) => {
+      let current = node
+      while (
+        ts.isPropertyAccessExpression(current)
+        || ts.isElementAccessExpression(current)
+        || ts.isParenthesizedExpression(current)
+        || ts.isNonNullExpression(current)
+      ) {
+        current = current.expression
+      }
+      return ts.isIdentifier(current) ? current.text : undefined
+    }
+
+    const assignedSomewhere = new Set()
+    const visitAssignments = (node) => {
+      if (
+        ts.isBinaryExpression(node)
+        && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+        && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+      ) {
+        const root = rootIdentifierOf(node.left)
+        if (root !== undefined) assignedSomewhere.add(root)
+      }
+      ts.forEachChild(node, visitAssignments)
+    }
+    visitAssignments(sourceFile)
+
     const map = new Map()
+    const span = (node) => ({
+      start: sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1,
+      end: sourceFile.getLineAndCharacterOfPosition(node.getEnd()).line + 1,
+    })
+
     for (const statement of sourceFile.statements) {
+      if (ts.isVariableStatement(statement)) {
+        const isConst = (statement.declarationList.flags & ts.NodeFlags.Const) !== 0
+        const { start, end } = span(statement)
+        for (const declaration of statement.declarationList.declarations) {
+          if (!ts.isIdentifier(declaration.name)) continue // destructuring: not a module-scope NAME
+          const name = declaration.name.text
+          map.set(name, {
+            name,
+            file: sourceFile.fileName,
+            start,
+            end,
+            lines: end - start + 1,
+            mutable: !isConst || assignedSomewhere.has(name),
+            kind: isConst ? 'const' : 'let/var',
+            node: statement,
+          })
+        }
+        continue
+      }
       const name = statement.name?.text
       if (name === undefined) continue
-      const start = sourceFile.getLineAndCharacterOfPosition(statement.getStart(sourceFile)).line + 1
-      const end = sourceFile.getLineAndCharacterOfPosition(statement.getEnd()).line + 1
+      const { start, end } = span(statement)
       map.set(name, {
         name,
         file: sourceFile.fileName,
         start,
         end,
         lines: end - start + 1,
-        mutable: ts.isVariableStatement(statement)
-          && (statement.declarationList.flags & ts.NodeFlags.Const) === 0,
+        mutable: false,
+        kind: ts.SyntaxKind[statement.kind],
         node: statement,
       })
     }
@@ -189,12 +273,14 @@ function measureWithTypeScript(ts) {
       lines += end - start + 1
     }
 
-    const mutable = [...included.values()].filter((d) => d.mutable).map((d) => d.name).sort()
+    const mutable = [...included.values()].filter((d) => d.mutable).map((d) => `${d.name} (${d.kind})`).sort()
     return {
       declarations: included.size,
       lines,
       mutable,
-      members: [...included.values()].map((d) => `${relative(SRC, d.file).split('\\').join('/')}:${d.name}`).sort(),
+      members: [...included.values()]
+        .map((d) => `${relative(SRC, d.file).split('\\').join('/')}:${d.name} [${d.kind}]${d.mutable ? ' MUTABLE' : ''}`)
+        .sort(),
     }
   }
 }
