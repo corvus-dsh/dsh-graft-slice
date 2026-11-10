@@ -130,19 +130,65 @@ test('cap: the scan covers EVERY .ts-bearing file under src/ except index.ts (in
    *
    * DOES NOT COVER: a change that makes `scan()` and the reference agree by both being wrong in the same
    * way, e.g. a renamed helper used by both, or a directory the walk itself cannot descend into. Measured:
-   * narrowing BOTH predicates to `.tsx` makes them agree — and is then caught by the `>= 20` denominator
-   * below, not by the independent walk. Saying so is the point: the previous message promised "a changed
-   * filter must fail HERE", which was false while both sides shared one regex literal.
+   * narrowing BOTH predicates to `.tsx` makes them agree — and is then caught by the four NAME pins below
+   * (they disappear from both sets), not by the independent walk. Saying so is the point: the previous
+   * message promised "a changed filter must fail HERE", which was false while both sides shared one regex.
    */
   const actual = files.map((file) => file.rel).sort()
   assert.deepEqual(actual, expected,
     'the cap scan and an independent walk disagree. The reference set uses `includes(".ts")`, not the ' +
       'scan\'s regex, so a narrowed scan (dropped directory, dropped file, changed predicate, early ' +
       'stop) fails HERE rather than quietly reporting fewer violations.')
-  assert.ok(expected.length >= 20,
-    `the independent walk found only ${expected.length} files — the tree, not the gate, has shrunk`)
   assert.deepEqual(scannedDirs.length > 0, true,
     'no sub-directory under src/ was discovered; the scan would be empty by construction')
+})
+
+/**
+ * ── THE FOUR BOUNDARY SAMPLES, PINNED BY NAME (N6c — the last round on this gate) ────────────────
+ *
+ * The previous version closed with `expected.length >= 20` against 24 real files, and its message said a
+ * coordinated narrowing "is caught by the >= 20 denominator". That was true only for dropping FIVE or
+ * more: dropping 1–4 still passed. A floor is one number away from being four numbers too wide.
+ *
+ * Names, not counts — the v126 lesson, applied here. Each pin exists for a different reason, so each
+ * catches a different way the set can shrink:
+ *
+ *   core/ignition.ts.bak-cut  the PREDICATE boundary: contains ".ts" but does not end in it
+ *   core/ignition.ts          an EXEMPT module must still be in the scanned set (a ceiling means the
+ *   core/host-shape.ts        file is watched, not ignored) — both exemptions, not just one
+ *   utils/serialize.ts        the DEEPEST directory: proves the walk descends rather than reading one level
+ *
+ * ── STOP CONDITION, AND WHAT STILL IS NOT COVERED ───────────────────────────────────────────────
+ *
+ * This is the last round on v130 (user ruling). Measured residual, stated rather than papered over:
+ * removing an UNPINNED file from BOTH implementations still passes (dropping `utils/logger.ts`,
+ * `core/layout.ts`, `core/ledger.ts`, `contracts/types.ts` together measured GREEN). Only the four
+ * pinned names are protected by name.
+ *
+ * That residual is the same shape as "edit the pins themselves": it takes two coordinated edits in this
+ * file, which a diff shows. Guarding it further would mean pinning every filename — a list that then
+ * needs its own maintenance and has no boundary meaning. So the pins carry the boundary samples, and the
+ * coordinated-removal case is left to review.
+ */
+test('cap: the scanned set is pinned BY NAME at four boundary samples', () => {
+  const scanned = new Set(files.map((file) => file.rel))
+  const walked = new Set(expected)
+  const PINNED = [
+    ['core/ignition.ts.bak-cut', 'the predicate boundary sample'],
+    ['core/ignition.ts', 'an exempt module must still be scanned'],
+    ['core/host-shape.ts', 'the other exempt module must still be scanned'],
+    ['utils/serialize.ts', 'the deepest directory sample'],
+  ]
+
+  const missingFromScan = PINNED.filter(([name]) => !scanned.has(name)).map(([name]) => name)
+  assert.deepEqual(missingFromScan, [],
+    'the cap scan is missing a pinned file: ' + missingFromScan.join(', ') +
+      '. A set that shrank by 1–4 files is still ≥ 20, so only a NAME pin catches it.')
+
+  const missingFromWalk = PINNED.filter(([name]) => !walked.has(name)).map(([name]) => name)
+  assert.deepEqual(missingFromWalk, [],
+    'the independent walk is missing a pinned file: ' + missingFromWalk.join(', ') +
+      '. Both sides are pinned, so narrowing either one is visible here.')
 })
 
 test('cap: every in-scope module is at or under 800 lines', () => {
