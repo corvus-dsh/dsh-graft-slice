@@ -120,13 +120,37 @@
 
 **N5+ 的排序三条（用户 2026-11-10 裁定）**：① `mutable=none` 是**硬前提**（不满足即出局，不进排序）；② 通过者按**闭包升序**；③ **被其它簇引用者先搬** —— 第三条**只有实测能定**：搬之前要先量「目标闭包的成员里，有多少同时出现在其它候选的闭包里」，重叠越多越该先搬（先剥掉的叶子会让后来者的闭包一起变小，N1→N2 已经实测到一次：`scanAgentCommand` 17/130 → 2/11）。
 
+**N5+ 的两两闭包交集矩阵（**当时**（2026-11-10 实测，`node ..\_scratch\n5-overlap.mjs`，成员名取自 `scripts/closure.mjs` 的输出）**：
+
+| 候选 | 声明 / 行 | mutable | 被几个其它候选的闭包包含 |
+|---|---|---|---|
+| `buildPendingState` | 19 / 229 | none | **2**（`buildTape`、`buildInjectionPlan`） |
+| `renderTaskBoard` | 12 / 348 | none | **3**（`renderInstructionCard`、`buildTape`、`buildInjectionPlan`） |
+| `renderInstructionCard` | 16 / 466 | none | 2（`buildTape`、`buildInjectionPlan`） |
+| `buildTape` | 83 / 2,445 | none | 1（`buildInjectionPlan`） |
+| `buildInjectionPlan` | 145 / 4,400 | none | 0 |
+
+交集不是「部分重叠」，而是**完全包含**（`A ∩ B == A` 对每一对成立），所以候选之间是一个**包含格**：
+
+    buildPendingState (19) ⊂ buildTape ⊂ buildInjectionPlan
+    renderTaskBoard (12) ⊂ renderInstructionCard (16) ⊂ buildTape ⊂ buildInjectionPlan
+
+**用户提出的假设已被证实**：`renderTaskBoard ∈ renderInstructionCard 的闭包 = true`，反向 `= false`；共享成员 12 个（即 `renderTaskBoard` 的全部成员，含 `BOARD_COLUMNS` / `BOARD_TRAILER` / `sameTextHead` / `truncateForDisplay` / `wrapTruncated` 等）。
+
+**两条规则在这里给出不同答案，必须说清**：按**声明数**升序 → `renderTaskBoard`（12）先；按**行数**升序 → `buildPendingState`（229）先。规则 ② 没有指定度量。用规则 ③ 打破平局：`renderTaskBoard` 被 **3** 个其它候选包含，`buildPendingState` 被 **2** 个包含 —— 因此 **N5 = `renderTaskBoard`（12 / 348）**，N6 = `renderInstructionCard`（搬走 N5 后应从 16 掉到 4），N7 = `buildPendingState`（19），之后才是 `buildTape` / `buildInjectionPlan` 这两个大家伙。
+
 **口径限制（必须一并引用）**：`scripts/closure.mjs` 只沿**同一个文件**内的模块级声明扩展闭包，跨文件依赖按定义算「导入」而不计入。因此同一目标在 index.ts 里和在它自己的模块里，数字会不同（上表第二、三行就是这个差）。要判断「能不能干净搬走」，看的是它**当前所在文件**里的数字。
 
 **⑥ 的验收口径（2026-11-10 改准）**：`scripts/demo.mjs` 的头注释写明「DSH services are replaced by the local fake harness, so this never touches the live profile or the real session store」。所以它是**「端到端（假 harness）」**，**不是真机切片**——它证明的是 `apply()` 注册 → 工具定义 → 切片计划 → 持久写序（create → append → flush → close）→ 冷读回验 → 退休闸门 这条**代码路径**真的走得通，且源日志是真实的 `session.v4.jsonl.zstd`；它**不**证明实时 profile 与真实 session store 上无副作用。
 
 **阶段内降级为「端到端（假 harness）」，真机在阶段收尾补验**（本次裁定）。理由是一次覆盖累积效应比每节点各欠一次更诚实：每个搬运节点都不触碰运行时语义（纯位移），逐节点做真机切片的边际信息接近零，而阶段收尾时一次性在实时 profile 上验收，能同时覆盖 N1..N10 的累积结果。因此**N1 那笔不再算欠账**——它由阶段收尾那一次统一补验。
 
-**⑧ 性能判据的口径（钉死，2026-11-10 裁定）**：`dsh-paradise/scripts/bench-prestep.mjs` 的 T1 **只有 `n=50` 那一档可以用于「退化 ≤10%」判定**；`n=1` 与 `n=10` 两档必须记为「**测不出（spread > 阈值）**」，**不许声称通过**。原因是实测的：`n=10` 档的 `spread(p95)` 在本机两次运行分别是 15% 与 44%，而它两次的 p95 只差 14% —— **不确定性大于差值**，任何方向的结论都不可辩。`n=50` 档在同两次运行里是 2.76 → 2.10 ms（比值 0.76），spread 55% / 121%，但绝对差 0.66 ms 明显大于档内抖动的常见幅度，且方向与「多一个内联模块、产物 872,914 → 873,014 字节」的预期一致（可以忽略）。若将来 `n=50` 的 spread 也压不住差值，同样记「测不出」，而不是挑一个方向写进去。
+**⑧ 性能判据的口径（第三次改准，2026-11-10 裁定；前两版都不成立）**：
+
+- **单次运行不可判定。** `dsh-paradise/scripts/bench-prestep.mjs` 的 T1 在本机测到的 `spread(p95)`：n=1 档 939%–1624%，n=10 档 15%–101%，**n=50 档 44%–101%**。三档全部落在「不确定性大于差值」的量级，所以**任何单次读数都不能用来判「退化 ≤10%」**。
+- **每节点只贴读数与比值，判定栏一律写「不可判定（spread > 阈值）」**，不写「都在 ≤10% 内」这类结论。历史读数按**独立读数**记录，不得读成趋势：`1.92 → 2.34 → 2.45 ms`（对基线 2.76 ms 的比值 0.70 / 0.85 / 0.89）是三次独立测量，**不是**一条上升曲线。
+- **只有阶段收尾那一次可以判定**：同一基线、同一机器、**跑 5 次取中位数**，与基线的 5 次中位数相比，判「退化 ≤10%」，并同时报 **min / median / max**。这是唯一有统计意义的比较位置。
+- 若届时 5 次的中位数差异仍小于 min–max 跨度，同样记「不可判定」，**不挑方向写结论**。
 
 **这张表的数字来自仪器修正之后的一次重测（2026-11-10，本轮）。上一轮的每一个闭包数字都偏小，原因是仪器本身有缺陷——见下。每个数字的口径：`scripts/closure.mjs <symbol>`，TypeScript 5.9.3 编译器 API，`declarations` = 闭包内模块级声明数，`lines` = 合并重叠区间后的行数。TS 来自工作区上层 `node_modules`（`npm i --no-save`），**不在本仓、CI 不能复跑**——引用时须一并注明。**
 
