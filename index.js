@@ -7711,6 +7711,13 @@ function neutralizeStructure(text        )         {
                       
               
                                  
+     
+                                                                                                        
+                                                                    
+     
+                       
+                                                                                         
+                    
  
 
 /**
@@ -7732,10 +7739,129 @@ function neutralizeStructure(text        )         {
  * continuation is skipped and the search walks backwards to the last message
  * that actually said what to do.
  */
-function extractGoal(events                             )             {
+/**
+ * ── C1: WHERE THE GOAL COMES FROM, IN PRIORITY ORDER ────────────────────────────────────────────
+ *
+ * The goal field's semantics were never defined, and the same omission caused two measured failures:
+ * a FINISHED initial request labelled 「当前要做的事」 (the target re-did the whole task), and a pasted
+ * REPORT rendered as 「原始用户要求」 (the target answered a report it was never given).
+ *
+ * The ruling settles it: the goal is the session's TASK, then the STRUCTURE it sits in, and only then
+ * a guess from the transcript. The three layers carry different things and are never blended:
+ *
+ *   task       goal/change objective — what the session was set to do
+ *   structure  the DAG's current node and blocker — where it is, ONE node only
+ *   transcript the last substantive human messages — a fallback, arrives with a seq pointer
+ *
+ * \`goalLayer\` records WHICH layer answered, so a reader (and a test) can tell a declared objective from
+ * an inferred one. Without it, "the goal is X" is indistinguishable from "I guessed X".
+ */
+                                                        
+
+/**
+ * Layer 1: the session's own objective.
+ *
+ * \`extractActiveGoalChange\` already answers "is there an ACTIVE goal", and it deliberately returns
+ * undefined for a clear/complete/abandon tail — a finished goal must not be resurrected as this
+ * session's task. That is exactly what layer 1 needs, so it is reused rather than re-derived.
+ */
+function objectiveOf(events                             )                                                  {
+  const change = extractActiveGoalChange(events)
+  if (change === undefined) return undefined
+  const goal = change.goal
+  if (!isRecord(goal)) return undefined
+  const objective = typeof goal.objective === 'string' ? goal.objective.trim() : ''
+  if (objective.length === 0) return undefined
+  let seq                    
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index]?.type !== 'goal/change') continue
+    const candidate = Number(events[index].seq)
+    if (Number.isSafeInteger(candidate)) seq = candidate
+    break
+  }
+  return seq === undefined ? { objective } : { objective, seq }
+}
+
+/**
+ * Layer 2: the DAG's current node — ONE node, as a boundary.
+ *
+ * Hard rule 1 in code: this returns a single line. Node bodies (a full SKILL.md, historical
+ * observations, the dependency chain) are NOT carried. A node is a signpost, not luggage; dragging its
+ * contents into the goal message spends the target's window on structure instead of work.
+ *
+ * \`memory_graph_read\` renders nodes as \`- [Node] id — title\` inside a phase block. This takes the
+ * first node whose title does not already say done/completed, which is "current" by the graph's own
+ * ordering, and keeps only id + title.
+ */
+function currentDagNode(graphText                    )                     {
+  if (typeof graphText !== 'string' || graphText.trim().length === 0) return undefined
+  /**
+   * ── THE ID MUST NOT CONSUME THE SEPARATOR (measured the hard way) ─────────────────────────────
+   *
+   * A lazy `([^\n]+?)` before the em dash split `n-s1b-2 — 契约化…` at its FIRST hyphen, yielding the
+   * id `n` and the title `s1b-2 — 契约化…`. Node ids are hyphenated in practice, so the id is matched as
+   * a token that stops at whitespace, and the separator must have whitespace around it.
+   */
+  const nodeLine = /^[ \t]*[-*]?[ \t]*\[Node\][ \t]*([^\s—]+)[ \t]+—[ \t]+([^\n]+)$/gmu
+  for (const match of graphText.matchAll(nodeLine)) {
+    const id = match[1].trim()
+    const title = match[2].trim()
+    if (/(?:done|completed|已完成)/iu.test(title)) continue
+    // Boundaries only: the run collapses whitespace and truncates, so a long title cannot become a body.
+    return `${id} — ${title}`.replace(/\s+/gu, ' ').slice(0, 160)
+  }
+  return undefined
+}
+
+function extractGoal(events                             , dagText         )             {
+  /**
+   * ── LAYERS 1 AND 2 ANSWER BEFORE THE TRANSCRIPT IS READ AT ALL ─────────────────────────────────
+   *
+   * This ordering is the fix, not a detail. With an objective present there is nothing to infer, so the
+   * question "is this human message a requirement or a pasted report?" — the question C1 was blocked on
+   * — simply does not arise. That is why this was held for a ruling instead of patched with a
+   * report-shape regex: the regex would have been guessing at layer 3 while a declaration was available.
+   */
+  const declared = objectiveOf(events)
+  if (declared !== undefined) {
+    return {
+      goal: truncateEnd(declared.objective, 4000).text,
+      source: 'user',
+      goalLayer: 'objective',
+      ...(declared.seq === undefined ? {} : { sourceSeq: declared.seq }),
+    }
+  }
+
+  /**
+   * Layer 2: the DAG's current node, when layer 1 is silent.
+   *
+   * ONE line, as a boundary — rule 1. The node says WHERE the work is, never WHAT it contains; the
+   * carrier (`context/memory-graph` or the rendered `memory_graph_read` text) is the caller's business,
+   * so this takes the rendered text and extracts the single node line.
+   */
+  const dagNode = currentDagNode(dagText)
+  if (dagNode !== undefined) {
+    return {
+      goal: truncateEnd(dagNode, 4000).text,
+      source: 'user',
+      goalLayer: 'dag-node',
+    }
+  }
+
   const humans = events.filter(
     (event) => event.type === 'user/message' && event.data?.source?.kind === 'user' && textOfMessage(event.data).length > 0,
   )
+  /** The seq of the newest human message — the pointer layer 3 hands back instead of the body. */
+  const newestHumanSeq = ()                     => {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index]
+      if (event?.type !== 'user/message') continue
+      if (isGraftAuthored(event.data?.source)) continue
+      const candidate = Number(event.seq)
+      if (Number.isSafeInteger(candidate)) return candidate
+    }
+    return undefined
+  }
   const bareAcknowledgement =
     /^(请?继续(吧|工作|推进)?|继续|好的?|可以|嗯+|行|ok|okay|go on|continue|yes|y|proceed|go)[\s.!。！?？]*$/iu
   /**
@@ -7796,21 +7922,32 @@ function extractGoal(events                             )             {
   if (anchors.length > 0) {
     const ordered = anchors.reverse()
     const joined = ordered.map((line) => truncateEnd(line, 1600).text).join('\n')
-    return { goal: truncateEnd(joined, 4000).text, source: 'user' }
+    /**
+     * Layer 3: the transcript. It stays a FALLBACK, and it arrives with a pointer rather than as the
+     * whole body — `sourceSeq` names where the words are, so a reader who needs them spends one tool
+     * call instead of the injection spending its window on them.
+     */
+    const newestSeq = newestHumanSeq()
+    return {
+      goal: truncateEnd(joined, 4000).text,
+      source: 'user',
+      goalLayer: 'transcript',
+      ...(newestSeq === undefined ? {} : { sourceSeq: newestSeq }),
+    }
   }
   const human = humans[0]
   if (human) {
-    return { goal: truncateEnd(normalizeText(textOfMessage(human.data)), 4000).text, source: 'user' }
+    return { goal: truncateEnd(normalizeText(textOfMessage(human.data)), 4000).text, source: 'user', goalLayer: 'transcript' }
   }
   const anyUser = events.find((event) => event.type === 'user/message' && textOfMessage(event.data).length > 0)
   if (anyUser) {
-    return { goal: truncateEnd(normalizeText(textOfMessage(anyUser.data)), 4000).text, source: 'fallback-user' }
+    return { goal: truncateEnd(normalizeText(textOfMessage(anyUser.data)), 4000).text, source: 'fallback-user', goalLayer: 'transcript' }
   }
   const assistant = events.find((event) => event.type === 'assistant/message' && textOfMessage(event.data?.message).length > 0)
   if (assistant) {
-    return { goal: truncateEnd(normalizeText(textOfMessage(assistant.data?.message)), 4000).text, source: 'assistant' }
+    return { goal: truncateEnd(normalizeText(textOfMessage(assistant.data?.message)), 4000).text, source: 'assistant', goalLayer: 'transcript' }
   }
-  return { goal: 'Continue the migrated work.', source: 'placeholder' }
+  return { goal: 'Continue the migrated work.', source: 'placeholder', goalLayer: 'transcript' }
 }
 
 /**
@@ -9485,9 +9622,14 @@ export function renderInstructionCard(input                      )         {
  * (it exercises the real function, not a copy) without widening the plugin's
  * public surface for production callers.
  */
-export function extractGoalForTest(events                             )             {
-  return extractGoal(events)
+export function extractGoalForTest(events                             , dagText         )             {
+  return extractGoal(events, dagText)
 }
+
+/**
+ * C1 hard rule 1 is exercised through `extractGoalForTest` (see the `dagText` parameter), so it needs
+ * no export of its own: `verify-bundle` keeps the surface at 182.
+ */
 
 /**
  * v7.0 (adopted from dsh-rollover-snapshot): render one turn with a reachable seq.
