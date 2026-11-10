@@ -3733,22 +3733,67 @@ const TERMINAL_PUNCT = /[。！？.!?]/u
  * Detected by QUOTING SYMMETRY, never by content: a text that opens with `"` but does not close with
  * one is a fragment of a JSON string; one that also ends in `",` is a JSON array element.
  *
- * nearMiss: `必须 在提交前检查 "U+FFFD" 为 0。` — quotes appear INSIDE the sentence, which is normal
- * prose. The rule only looks at the first and last non-space characters.
+ * ── THE THIRD BRANCH WAS UNANCHORED, AND IT ATE REAL CONSTRAINTS (measured, reported to me) ──────
+ *
+ * The original non-anchored branch was `":\s*"` — matched ANYWHERE. So a Chinese sentence that merely
+ * QUOTES a JSON key/value was judged a fragment:
+ *
+ *     必须 在提交前确认 engines 里 "node": ">=22" 这一项没有降低。     → LOST (S1_JSON)
+ *     禁止 把 "kind": "plugin" 这种标记换成 user，那会伪造人类来源。  → LOST (S1_JSON)
+ *
+ * The same rule without the quotes was KEPT, which is the tell: the rule was reacting to punctuation
+ * INSIDE a sentence rather than to the sentence being a fragment. As this file's own header says, a
+ * shape rule that kills a real constraint is worse than no rule.
+ *
+ * ── WHY THE DISCRIMINATOR IS DENSITY, NOT PRESENCE ───────────────────────────────────────────────
+ *
+ * "Contains `": "`" is true of both a rule that mentions a key and a quoted payload. Measured on the
+ * 8258-text window: only 9 texts are rejected exclusively by this branch, and ALL of them are a report
+ * or log line quoting a JSON payload — none is a standalone rule. So the branch keeps its power by
+ * requiring the JSON quoting to DOMINATE the text, which is the shape difference between
+ * "payload pasted into a message" and "sentence that happens to quote a key".
+ *
+ * nearMiss (and the regression tripwire): `必须 确认 "node": ">=22" 未降低。` — it contains the
+ * branch-triggering shape AND is prose, so it fails the density test and is kept. The PREVIOUS near
+ * miss had no colon at all, never reached this branch, and therefore could not have caught the defect.
  */
 function isJsonFragment(text        )          {
   const trimmed = text.trim()
   const startsQuoted = trimmed.startsWith('"') || trimmed.startsWith('["') || trimmed.startsWith('{"')
   if (!startsQuoted) {
-    // A bare `": [` / `",` / `": {` is still a JSON shape even without a leading quote.
-    return /^":\s*[[{]|",\s*$|":\s*"/u.test(trimmed)
+    // Anchored shapes: a bare `": [` / `",` at the edges is a JSON fragment however short it is.
+    if (/^":\s*[[{]|",\s*$/u.test(trimmed)) return true
+    /**
+     * The in-line `": "` shape, kept but no longer absolute: it counts only when the JSON punctuation
+     * is what the text is MADE OF. `quoteRuns` counts every `": "` run; `proseRuns` counts clause
+     * punctuation. A rule sentence has prose runs and few quote runs; a pasted payload has the reverse.
+     */
+    if (/":\s*"/u.test(trimmed)) {
+      const quoteRuns = (trimmed.match(/":\s*"/gu) ?? []).length
+      const proseRuns = (trimmed.match(/[，。；！？：]/gu) ?? []).length
+      // A payload dominates: at least two key/value runs, or more quote runs than clause punctuation.
+      if (quoteRuns >= 2 || quoteRuns > proseRuns) return true
+      return false
+    }
+    return false
   }
   const endsQuoted = trimmed.endsWith('"') || trimmed.endsWith('",') || trimmed.endsWith('":')
-  // A correctly quoted ONE-LINE string with no trailing comma is legitimate prose in quotes if it
-  // also ends in terminal punctuation inside the quotes; otherwise it is treated as a fragment.
+  /**
+   * ── S1b: A VERSION NUMBER IS NOT A SENTENCE ENDING (found while fixing S1a) ────────────────────
+   *
+   * This branch decides "legitimate prose in quotes?" by asking whether the inner text ends in
+   * terminal punctuation — and `TERMINAL_PUNCT` includes `.`, so `{"name": "x", "version": "1.0.0",`
+   * was treated as finished prose because of the dots in `1.0.0`. A JSON OBJECT FRAGMENT therefore
+   * entered the candidate pool — the opposite direction from S1a, which dropped real rules.
+   *
+   * The discriminator cannot be "contains a dot": `1.0.0` inside a real sentence is normal. What
+   * separates them is where the dot sits. A dot between digits is part of a NUMBER, not a full stop;
+   * a sentence ends at punctuation that is not flanked by digits.
+   */
   if (endsQuoted) {
-    const inner = trimmed.replace(/^"/u, '').replace(/"[,:]?$/u, '')
-    return !TERMINAL_PUNCT.test(inner)
+    const inner = trimmed.replace(/^"/u, '').replace(/"[",:]?$/u, '')
+    const sentenceEnded = /[。！？!?]|(?<![0-9])\.(?![0-9])/u.test(inner)
+    return !sentenceEnded
   }
   return true
 }
@@ -15027,11 +15072,53 @@ const COMMAND_TOOL_NAMES = new Set([
 /** Search/enumeration verbs: these are what turn a path into a filesystem sweep. */
 const SEARCH_VERB =
   /\b(?:rg|ripgrep|grep|findstr|select-string|sls|get-childitem|gci|dir|ls|find|where\.exe|get-item|resolve-path|tree)\b/iu
-/** Destructive verbs. Grouped so the workspace-confinement rule can exempt them. */
+/**
+ * Destructive verbs. Grouped so the workspace-confinement rule can exempt them.
+ *
+ * ── D1: `format` IS SEPARATED FROM THE FORMATTING CMDLETS (measured: 5 of 11 ordinary reads blocked) ─
+ *
+ * A bare `\bformat\b` also matches `Format-Table` and `Format-List` — the PowerShell cmdlets that
+ * RENDER objects in a pipeline. In a read-only command they are formatting, not formatting-a-disk:
+ *
+ *       Get-ChildItem -Force 'D:\x' | Format-Table     ← a READ, and this one was DENIED
+ *
+ * So `format` counts only when it is NOT followed by `-` (the cmdlet suffix) and not part of a longer
+ * word. `format D:` still matches (no dash); `Format-Volume` is matched by its own branch so the more
+ * common PowerShell spelling is caught too.
+ *
+ * ── D3': THE MISSED DETECTION (dangerous, so it does not wait for D3) ────────────────────────────
+ *
+ * `Format-Volume -DriveLetter D -Force` was ALLOWED while `format D: /q` was denied: the guard caught
+ * the cmd.exe spelling and missed the PowerShell one, i.e. it missed the more common form on this
+ * platform. `format-volume` is therefore its own alternative.
+ */
 const DESTRUCTIVE_VERB =
-  /\b(?:rm|del|erase|rd|rmdir|remove-item|ri|del|format|diskpart|mkfs|shutdown|stop-computer|clear-disk)\b/iu
-/** Recursion/force flags that turn a delete into an unbounded one. */
-const RECURSIVE_FLAG = /(?:-recurse\b|\/s\b|-r\b|-rf\b|-fr\b|--recursive\b|\/q\b|-force\b)/iu
+  /\b(?:rm|del|erase|rd|rmdir|remove-item|ri|diskpart|mkfs|shutdown|stop-computer|clear-disk)\b|\bformat-volume\b|\bformat(?![\w-])/iu
+
+/**
+ * Verbs that are destructive in EVERY form — there is no workspace-scoped version to confine them to.
+ *
+ * `Remove-Item .\build\x.log` is cleanup. `Format-Volume -DriveLetter D` destroys everything on a
+ * volume, and no relative path can make it smaller. Asking "is the target inside the workspace?" of
+ * such a command answers a question that does not apply — and, measured, the answer made it ALLOWED:
+ * there is no `-Recurse` to trigger the confinement branch and `D:` alone is deliberately not an
+ * escaping root. Naming the class lets the denial say what it is instead of falling through to "safe".
+ */
+const UNCONFINABLE_VERB = /\b(?:format-volume|diskpart|clear-disk|mkfs|shutdown|stop-computer)\b|\bformat(?![\w-])/iu
+/**
+ * Flags that make a delete UNBOUNDED — able to reach beyond the path written on the line.
+ *
+ * ── D2: `-Force` IS NOT IN THIS SET, AND ITS PRESENCE WAS A BUG IN THE OTHER DIRECTION ───────────
+ *
+ * It used to be here, and the effect was backwards. The confinement rule reads
+ * "deny if `recursive && outsideWorkspace`", so a flag that counted as recursion GRANTED the exemption
+ * to anything inside the workspace — the one flag that makes a wipe SILENT was the flag that made it
+ * look confined.
+ *
+ * `-Force` in PowerShell means "do not prompt / include hidden"; `New-Item`, `Copy-Item` and
+ * `Set-Content` all use it as ordinary friction removal.
+ */
+const RECURSIVE_FLAG = /(?:-recurse\b|\/s\b|-r\b|-rf\b|-fr\b|--recursive\b|\/q\b)/iu
 /**
  * A path that escapes any workspace: a drive root, `/`, a home shortcut, or an
  * environment root. Deliberately narrow — `C:\Users\<user>\project\src` is NOT
@@ -15048,6 +15135,31 @@ const SYSTEM_DIR =
 
 function escapesWorkspace(text        )          {
   return ESCAPING_ROOT.test(text) || SYSTEM_DIR.test(text)
+}
+
+/**
+ * ── D1: A VERB MUST BE IN COMMAND POSITION, OR IT IS DATA ────────────────────────────────────────
+ *
+ * Matching a destructive word ANYWHERE denies `rg "format" src/` — a search for the WORD `format` —
+ * which is the same failure this rule is being fixed for, one layer down. The word is a verb only at
+ * the START of a command segment; anywhere else it is an argument.
+ *
+ * Segments start at the beginning and after a pipe, semicolon, `&&`, `||`, or an opening parenthesis.
+ * A few wrappers are skipped so `sudo rm -rf` still counts: their verb is the one after the wrapper.
+ */
+const SEGMENT_START = /(?:^|[|;&]\s*|\()\s*(?:(?:sudo|doas|env|command|exec|&)\s+)*(?<verb>[A-Za-z][\w.-]*)/gu
+
+/** Does `pattern` match a word sitting in COMMAND POSITION? */
+function verbInCommandPosition(text        , pattern        )          {
+  for (const match of text.matchAll(SEGMENT_START)) {
+    const verb = match.groups?.verb ?? ''
+    pattern.lastIndex = 0
+    if (pattern.test(verb)) {
+      pattern.lastIndex = 0
+      return true
+    }
+  }
+  return false
 }
 
 function commandTextOf(args         )         {
@@ -15156,7 +15268,23 @@ export function classifyAgentCommand(command        , workspace = '')           
   if (raw.trim().length === 0) return { risk: 'safe' }
   const text = expandKnownRoots(raw)
 
-  if (DESTRUCTIVE_VERB.test(text)) {
+  if (verbInCommandPosition(text, UNCONFINABLE_VERB)) {
+    /**
+     * Checked BEFORE the confinement branch on purpose. Reaching that branch first would produce
+     * "target is not provably inside the workspace", which is true but beside the point — a caller
+     * could reasonably conclude that pointing it INSIDE the workspace would be allowed.
+     */
+    return {
+      risk: 'destructive',
+      code: 'DESTRUCTIVE_COMMAND',
+      reason:
+        'DESTRUCTIVE_COMMAND：该命令会销毁整个卷/磁盘或系统状态，不存在“限制在工作区内”的版本。' +
+        `当前工作区：${workspace.trim().length > 0 ? workspace : '(未知)'}。` +
+        '这类命令一律拒绝；如果确实需要，请用户手动执行。',
+    }
+  }
+
+  if (verbInCommandPosition(text, DESTRUCTIVE_VERB)) {
     const escaping = escapesWorkspace(text)
     const recursive = RECURSIVE_FLAG.test(text)
     const workspaceKnown = workspace.trim().length > 0

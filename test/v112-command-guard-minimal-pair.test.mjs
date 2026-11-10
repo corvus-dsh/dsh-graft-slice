@@ -30,41 +30,35 @@ import { classifyAgentCommand } from '../index.js'
 const WORKSPACE = 'D:\\持久层能力架构'
 const riskOf = (command) => classifyAgentCommand(command, WORKSPACE).risk
 
-test('D1: a formatting cmdlet is not a destructive verb — even beside -Force', (t) => {
+test('D1: a formatting cmdlet is not a destructive verb — even beside -Force', () => {
   /**
-   * ── SKIPPED: PENDING TD-16. The defect is REAL and REPRODUCED; the fix is not shipped. ─────────
-   *
-   * Measured on the current build:
-   *     Get-ChildItem -Force 'D:\x'                 → safe
-   *     Get-ChildItem 'D:\x' | Format-Table          → safe
-   *     Get-ChildItem -Force 'D:\x' | Format-Table   → DENY   ← ordinary read refused
-   *
    * The two factors must appear TOGETHER; testing either alone reports "does not reproduce", which is
    * exactly the mistake this file's first draft made. Historical measurement (source session,
    * seq=5630): 5 of 11 ordinary read-only commands were blocked.
-   *
-   * The sandbox proved the fix costs nothing: D1+D2 → 639/640 green with zero existing regressions.
-   * It is skipped here only because production is frozen pending the ruling.
    */
-  t.skip('pending TD-16 ruling: Format-Table beside -Force is currently DENIED')
+  assert.notEqual(riskOf("Get-ChildItem -Force 'D:\\x'"), 'destructive', 'only -Force is a read')
+  assert.notEqual(riskOf("Get-ChildItem 'D:\\x' | Format-Table"), 'destructive', 'only Format-Table is a read')
+
+  // And together — the shape that WAS denied.
+  assert.notEqual(
+    riskOf("Get-ChildItem -Force 'D:\\x' | Format-Table"),
+    'destructive',
+    'Format-Table in a read-only pipeline must not be read as the VERB "format"',
+  )
+  assert.notEqual(riskOf("Get-ChildItem -Force 'D:\\x' | Format-List"), 'destructive', 'Format-List counts as formatting')
+  assert.notEqual(riskOf("Get-ChildItem -Recurse 'D:\\x' | Format-Table"), 'destructive', '-Recurse + formatting is a read')
 })
 
-test('D1 control: a REAL format is still destructive', (t) => {
+test('D1 control: a REAL format is still destructive — in BOTH spellings', () => {
   /**
-   * ── SKIPPED: PENDING TD-16, AND THE REASON IS ITSELF A FINDING ─────────────────────────────────
-   *
-   * `format D: /q` is denied TODAY, but `Format-Volume -DriveLetter D -Force` is ALLOWED — the guard
-   * catches the cmd.exe spelling and misses the PowerShell one. That is a HOLE, not a false positive:
-   * the more common form on this platform is the one that gets through.
-   *
-   * The sandbox fix closes it with an `UNCONFINABLE_VERB` class (verbs with no workspace-scoped form),
-   * denied before the confinement question is asked. Until the ruling, the hole stands — asserting the
-   * fixed behaviour here would just be a failing test for code that is not shipped.
+   * `Format-Volume -DriveLetter D -Force` was ALLOWED while `format D: /q` was denied: the guard caught
+   * the cmd.exe spelling and missed the PowerShell one, i.e. it missed the more common form on this
+   * platform. That is a MISSED DETECTION, not a false positive, and the ruling required it to be fixed
+   * together with D1+D2 rather than waiting behind the disputed D3.
    */
-  t.skip('pending TD-16 ruling: Format-Volume is currently ALLOWED (cmd.exe `format D:` is denied)')
-
-  // What holds today and must keep holding after any fix.
   assert.equal(riskOf('format D: /q'), 'destructive', 'cmd.exe format of a drive is destructive')
+  assert.equal(riskOf('Format-Volume -DriveLetter D -Force'), 'destructive', 'Format-Volume is a real format')
+  assert.equal(riskOf('Format-Volume -DriveLetter D'), 'destructive', 'Format-Volume without -Force too')
 })
 
 test('D2: -Force alone does not turn an inside-workspace delete into an unbounded one', () => {
@@ -72,6 +66,24 @@ test('D2: -Force alone does not turn an inside-workspace delete into an unbounde
   assert.notEqual(riskOf('New-Item -ItemType Directory -Path .\\out -Force'), 'destructive', 'mkdir -Force is not a delete')
   assert.notEqual(riskOf('Copy-Item a.txt b.txt -Force'), 'destructive', 'overwrite copy is not a delete')
   assert.notEqual(riskOf('Remove-Item .\\tmp\\x.log -Force'), 'destructive', 'deleting ONE file inside the workspace is confined')
+
+  /**
+   * ── THE CASE THAT ACTUALLY MOVES (found by differential testing) ─────────────────────────────
+   *
+   * A single-file delete OUTSIDE the workspace. This is the shape `-Force`-as-recursion got wrong:
+   * the confinement rule denies `recursive && outsideWorkspace`, so treating `-Force` as recursion
+   * turned an ordinary one-file delete of a path elsewhere on the disk into a denial, and — the same
+   * bug, seen from the other side — it EXEMPTED a real recursive delete inside the workspace.
+   *
+   * Without this assertion the D2 fix is unobservable: the earlier version only tested paths inside
+   * the workspace, where the verdict does not change.
+   */
+  assert.notEqual(riskOf("Remove-Item -Force 'D:\\other\\x.log'"), 'destructive', 'one file outside the workspace is still one file')
+  assert.notEqual(
+    riskOf("Remove-Item -Force 'D:\\other\\x.log','D:\\other\\y.log'"),
+    'destructive',
+    'two explicit files is not an unbounded delete',
+  )
 })
 
 test('D2 control: a recursive delete is still destructive wherever it points', (t) => {
@@ -92,7 +104,7 @@ test('D2 control: a recursive delete is still destructive wherever it points', (
    * So this assertion documents the PROPOSED behaviour and is skipped until TD-16 is ruled on. It is
    * not deleted: a deleted test is an argument nobody can re-open.
    */
-  t.skip('pending TD-16 ruling: recursive delete inside the workspace is currently ALLOWED')
+  t.skip('TD-17 ruled to KEEP this behaviour: recursive delete inside the workspace stays ALLOWED')
 
   // The controls that DO hold today, asserted unconditionally below.
   assert.equal(riskOf('Remove-Item -Recurse C:\\'), 'destructive', 'recursive delete of a drive root')
@@ -119,4 +131,28 @@ test('D4: the global-search rule is untouched by this change', () => {
   assert.equal(riskOf("Get-ChildItem -Recurse 'C:\\'"), 'destructive', 'sweeping a drive root is still a GLOBAL_SEARCH')
   assert.equal(riskOf('rg / src'), 'destructive', 'searching from the filesystem root is still a GLOBAL_SEARCH')
   assert.equal(riskOf('Get-ChildItem -Recurse src/'), 'safe', 'recursing through a relative path is ordinary work')
+})
+
+test('D5: a destructive WORD in an argument position is data, not a verb', () => {
+  /**
+   * ── WHY THIS CASE EXISTS (found by differential testing, not by reasoning) ────────────────────
+   *
+   * Reverting the command-position guard changed NO verdict among the 24 candidates I first tried,
+   * and that looked like "the guard is unnecessary". The real reason was that those candidates were
+   * protected by something else. These two are the pair that IS decided by position:
+   *
+   *     echo rm -rf /                      → allowed  (rm is an ARGUMENT of echo)
+   *     node -e "..." && rm -rf /          → denied   (rm starts the second segment)
+   *
+   * Without the guard, `echo rm -rf /` is denied — and a guard that refuses to PRINT a command is
+   * exactly the "blocks ordinary work" failure the ruling is fixing.
+   */
+  assert.notEqual(riskOf('echo rm -rf /'), 'destructive', 'rm as an argument to echo is data')
+  assert.notEqual(riskOf('Select-String -Pattern "Remove-Item" -Path src/'), 'destructive', 'searching for the word is not the act')
+  assert.notEqual(riskOf('git commit -m "format D:"'), 'destructive', 'a commit message mentioning it is not it')
+
+  // ...and the same verb in COMMAND POSITION is still caught, including after a segment separator.
+  assert.equal(riskOf('node -e "console.log(1)" && rm -rf /'), 'destructive', 'the second segment really does wipe')
+  assert.equal(riskOf('echo done | Remove-Item -Recurse C:\\\\'), 'destructive', 'piped into a destructive verb')
+  assert.equal(riskOf('& format D: /q'), 'destructive', 'the call operator does not launder a verb')
 })

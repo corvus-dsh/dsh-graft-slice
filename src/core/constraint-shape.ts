@@ -90,22 +90,67 @@ const TERMINAL_PUNCT = /[。！？.!?]/u
  * Detected by QUOTING SYMMETRY, never by content: a text that opens with `"` but does not close with
  * one is a fragment of a JSON string; one that also ends in `",` is a JSON array element.
  *
- * nearMiss: `必须 在提交前检查 "U+FFFD" 为 0。` — quotes appear INSIDE the sentence, which is normal
- * prose. The rule only looks at the first and last non-space characters.
+ * ── THE THIRD BRANCH WAS UNANCHORED, AND IT ATE REAL CONSTRAINTS (measured, reported to me) ──────
+ *
+ * The original non-anchored branch was `":\s*"` — matched ANYWHERE. So a Chinese sentence that merely
+ * QUOTES a JSON key/value was judged a fragment:
+ *
+ *     必须 在提交前确认 engines 里 "node": ">=22" 这一项没有降低。     → LOST (S1_JSON)
+ *     禁止 把 "kind": "plugin" 这种标记换成 user，那会伪造人类来源。  → LOST (S1_JSON)
+ *
+ * The same rule without the quotes was KEPT, which is the tell: the rule was reacting to punctuation
+ * INSIDE a sentence rather than to the sentence being a fragment. As this file's own header says, a
+ * shape rule that kills a real constraint is worse than no rule.
+ *
+ * ── WHY THE DISCRIMINATOR IS DENSITY, NOT PRESENCE ───────────────────────────────────────────────
+ *
+ * "Contains `": "`" is true of both a rule that mentions a key and a quoted payload. Measured on the
+ * 8258-text window: only 9 texts are rejected exclusively by this branch, and ALL of them are a report
+ * or log line quoting a JSON payload — none is a standalone rule. So the branch keeps its power by
+ * requiring the JSON quoting to DOMINATE the text, which is the shape difference between
+ * "payload pasted into a message" and "sentence that happens to quote a key".
+ *
+ * nearMiss (and the regression tripwire): `必须 确认 "node": ">=22" 未降低。` — it contains the
+ * branch-triggering shape AND is prose, so it fails the density test and is kept. The PREVIOUS near
+ * miss had no colon at all, never reached this branch, and therefore could not have caught the defect.
  */
 function isJsonFragment(text: string): boolean {
   const trimmed = text.trim()
   const startsQuoted = trimmed.startsWith('"') || trimmed.startsWith('["') || trimmed.startsWith('{"')
   if (!startsQuoted) {
-    // A bare `": [` / `",` / `": {` is still a JSON shape even without a leading quote.
-    return /^":\s*[[{]|",\s*$|":\s*"/u.test(trimmed)
+    // Anchored shapes: a bare `": [` / `",` at the edges is a JSON fragment however short it is.
+    if (/^":\s*[[{]|",\s*$/u.test(trimmed)) return true
+    /**
+     * The in-line `": "` shape, kept but no longer absolute: it counts only when the JSON punctuation
+     * is what the text is MADE OF. `quoteRuns` counts every `": "` run; `proseRuns` counts clause
+     * punctuation. A rule sentence has prose runs and few quote runs; a pasted payload has the reverse.
+     */
+    if (/":\s*"/u.test(trimmed)) {
+      const quoteRuns = (trimmed.match(/":\s*"/gu) ?? []).length
+      const proseRuns = (trimmed.match(/[，。；！？：]/gu) ?? []).length
+      // A payload dominates: at least two key/value runs, or more quote runs than clause punctuation.
+      if (quoteRuns >= 2 || quoteRuns > proseRuns) return true
+      return false
+    }
+    return false
   }
   const endsQuoted = trimmed.endsWith('"') || trimmed.endsWith('",') || trimmed.endsWith('":')
-  // A correctly quoted ONE-LINE string with no trailing comma is legitimate prose in quotes if it
-  // also ends in terminal punctuation inside the quotes; otherwise it is treated as a fragment.
+  /**
+   * ── S1b: A VERSION NUMBER IS NOT A SENTENCE ENDING (found while fixing S1a) ────────────────────
+   *
+   * This branch decides "legitimate prose in quotes?" by asking whether the inner text ends in
+   * terminal punctuation — and `TERMINAL_PUNCT` includes `.`, so `{"name": "x", "version": "1.0.0",`
+   * was treated as finished prose because of the dots in `1.0.0`. A JSON OBJECT FRAGMENT therefore
+   * entered the candidate pool — the opposite direction from S1a, which dropped real rules.
+   *
+   * The discriminator cannot be "contains a dot": `1.0.0` inside a real sentence is normal. What
+   * separates them is where the dot sits. A dot between digits is part of a NUMBER, not a full stop;
+   * a sentence ends at punctuation that is not flanked by digits.
+   */
   if (endsQuoted) {
-    const inner = trimmed.replace(/^"/u, '').replace(/"[,:]?$/u, '')
-    return !TERMINAL_PUNCT.test(inner)
+    const inner = trimmed.replace(/^"/u, '').replace(/"[",:]?$/u, '')
+    const sentenceEnded = /[。！？!?]|(?<![0-9])\.(?![0-9])/u.test(inner)
+    return !sentenceEnded
   }
   return true
 }
