@@ -99,7 +99,7 @@
 
 | 事实 | **现状**（2026-11-10 用 `scripts/closure.mjs` + typescript 5.9.3 **实测**，非上界） |
 |---|---|
-| 最小叶子（**当时**（2026-11-10 实测，仪器修正后）） | `policyDecision` **4 / 8**；`classifyAgentCommand` **15 / 119** |
+| 最小叶子（**当时**（2026-11-10 实测，仪器修正后）） | `policyDecision` **4 / 8**；~~`classifyAgentCommand` **15 / 119**~~ → **N1 已搬**（见 TD-1 进度行的 `core/command-guard.ts`） |
 | 小叶子（**当时**（2026-11-10 实测，仪器修正后）） | `calculateAdaptiveDepth` **2 / 124**；`stripHostNoise` **7 / 35**；`renderTaskBoard` **12 / 348**；`renderInstructionCard` **16 / 466**；`buildPendingState` **19 / 229**；`scanAgentCommand` **17 / 130**；`evaluateCommandPolicy` **20 / 166** |
 | 中叶子（**当时**（2026-11-10 实测，仪器修正后）） | `buildTape` **84 / 2,446**；`buildInjectionPlan` **155 / 4,560** |
 | **含模块级可变状态 → 停止搬运**（**当时**（2026-11-10 实测，仪器修正后）） | `recoverGraftTransactions` **34 / 505，7 个 `let`**；`graftSliceAndInjectUnlocked` **190 / 5,851，7 个 `let`**；`graftSliceAndInject` **195 / 5,903，7 个 `let`**。按 TD-1 自己的判据（L114「那不是闭包，是共享状态」），这三个**不是候选节点**，直到依赖被参数化。 |
@@ -131,12 +131,12 @@
 
 | 项 | 内容 |
 |---|---|
-| 现状 | **`src/index.ts` 13,827 行 / 13,301 非空**（v0.9.5 之后；G5 搬运后为 12,887，搬运前为 13,271）。**行数口径：`wc -l`** —— `content.split(/\r?\n/)`，且文件以换行结尾时不计末尾空项；非空行 = 该数组中 `trim().length > 0` 的个数。已抽出 `core/host-shape.ts`（996 行）、`core/ignition.ts`（1,005 行）、`core/paradise-write.ts`（240 行）与 `core/task-state.ts`（564 行，G5）。剩余部分仍含 90+ 导出、约 60 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册 |
+| 现状 | **`src/index.ts` 13,615 行 / 13,102 非空**（N1 搬运之后；N1 之前为 13,827 / 13,301）。**行数口径：`wc -l`** —— `content.split(/\r?\n/)`，且文件以换行结尾时不计末尾空项；非空行 = 该数组中 `trim().length > 0` 的个数。已抽出 `core/host-shape.ts`（996 行）、`core/ignition.ts`（1,005 行）、`core/paradise-write.ts`（240 行）、`core/task-state.ts`（564 行，G5）与 `core/command-guard.ts`（222 行，N1）。剩余部分仍含 90+ 导出、约 50 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册 |
 | 影响 | 单文件让「改 A 碰坏 B」的排查成本变高；diff review 困难；IDE 索引与增量构建变慢；新人无法按职责分层阅读 |
 | 为什么现在不动 | 见下方 TD-7：本轮只搬了「与彼岸层真正重叠」的两块。剩下的搬运是纯位移，不减复杂度，且 84 个测试文件直接 import 那些区域的 30 个符号 |
 | 退出条件（可验收） | ① 按职责拆成 `session-slice.ts` / `tape.ts` / `injection.ts` / `ledger.ts` / `guards.ts` / `console.ts` / `tools.ts` 等模块，每个 ≤ 800 行；② `index.ts` 只保留 `apply()` 装配与再导出，≤ 300 行；③ **拆前后测试数不变、全绿**；④ `scripts/build.mjs` 的产物字节差异仅来自模块边界（banner 与 import 语句）；⑤ 每个模块导出面的 `grep` 参考计数与拆前一致（防止顺手删了导出） |
 | 建议节奏 | 一次只搬一个模块，搬完立刻跑全量 + 真机切片一次；不与其他行为改动混在同一次提交 |
-| 进度 | ✅ `core/host-shape.ts`（v7.6，996 行：身份元数据 / 四个消息构造器 / materializeTape / buildInjectionEvents / assertColdLog / extractActiveGoalChange / 系统头与红线）<br>✅ `core/ignition.ts`（v7.6，921 行 → v7.7 1,005 行：点火通道 + 每目标准入 + 持久队列 + 重试 + 回滚）<br>✅ `core/paradise-write.ts`（v7.7，240 行：彼岸层桥接 —— 懒加载、按 ctx 缓存、具名拒绝）<br>✅ `core/task-state.ts`（G5，564 行：`extractTaskState` + `checkTaskBoundary` + `checkSafeHarbor` + 它们共用的 `splitSentences` / `orderedBySeq` / todo 与 report 的解析助手；**纯搬运，导出面 180 不变，测试 598 不变**）<br>⏳ 存储/账本层（约 1,517 行）<br>⏳ 工具注册层（约 4,119 行） |
+| 进度 | ✅ `core/host-shape.ts`（v7.6，996 行：身份元数据 / 四个消息构造器 / materializeTape / buildInjectionEvents / assertColdLog / extractActiveGoalChange / 系统头与红线）<br>✅ `core/ignition.ts`（v7.6，921 行 → v7.7 1,005 行：点火通道 + 每目标准入 + 持久队列 + 重试 + 回滚）<br>✅ `core/paradise-write.ts`（v7.7，240 行：彼岸层桥接 —— 懒加载、按 ctx 缓存、具名拒绝）<br>✅ `core/task-state.ts`（G5，564 行：`extractTaskState` + `checkTaskBoundary` + `checkSafeHarbor` + 它们共用的 `splitSentences` / `orderedBySeq` / todo 与 report 的解析助手；**纯搬运，导出面 180 不变，测试 598 不变**）<br>✅ `core/command-guard.ts`（N1，222 行：命令风险扫描器 —— 7 个正则常量 + `escapesWorkspace` / `verbInCommandPosition` / `expandKnownRoots` / `pathTokensOf` / `isInsideWorkspace` + `CommandRisk` / `CommandAssessment` / `classifyAgentCommand`；**纯搬运，`verify-pure-move` IDENTICAL（19098 = 19098），导出面 182 不变，测试 708 不变**）<br>⏳ 存储/账本层（约 1,517 行，但 `recoverGraftTransactions` 闭包含 7 个 `let`，按本表判据**当前不可搬**）<br>⏳ 工具注册层（约 4,119 行） |
 
 ### TD-7 存储层与工具层「未搬移」（P2，v7.6 登记）
 

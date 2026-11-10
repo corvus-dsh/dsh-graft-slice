@@ -74,6 +74,21 @@ export function normaliseContentLine(line) {
   // A bare re-export list: `{ a }`, `{ a, b }`, `{ a as b }`, `* from './x.js'` — all plumbing.
   if (/^\s*\{[^{}]*\}\s*;?\s*$/u.test(withoutKeyword)) return ''
   if (/^\s*\*\s*(?:as\s+\w+\s*)?from\s+['"]/u.test(withoutKeyword)) return ''
+  /**
+   * ── `export type { … }` IS THE SAME PLUMBING, IN THE TYPE FLAVOUR ────────────────────────────────
+   *
+   * Found by N1: moving `classifyAgentCommand` forced index.ts to re-export two interfaces
+   * (`CommandAssessment`, `CommandRisk`) that its signature names. The re-export line
+   * `export type { CommandAssessment, CommandRisk }` normalised to `type { … }`, which is not a bare
+   * brace list, so the move measured **+1 content line** and the checker said "not pure".
+   *
+   * That was a gap in the RULE, not in the move: the reason bare re-exports are excluded — "a pure move
+   * necessarily produces them, so they are the move's plumbing, not its content" — applies verbatim to
+   * a type-only re-export. Excluding it weakens nothing: a DUPLICATED declaration still shows up line by
+   * line, which is the failure this multiset exists to catch.
+   */
+  if (/^\s*type\s*\{[^{}]*\}\s*;?\s*$/u.test(withoutKeyword)) return ''
+  if (/^\s*type\s*\*\s*(?:as\s+\w+\s*)?from\s+['"]/u.test(withoutKeyword)) return ''
   return withoutKeyword
 }
 
@@ -181,10 +196,22 @@ function selfTest() {
   const plumbingDiff = firstDifference(ms(base), ms(plumbing))
   const dupDiff = firstDifference(ms(base), ms(duplicated))
 
+  /**
+   * Self-test 3: the TYPE-flavoured re-export must be plumbing too (found by N1). Kept as its own case
+   * because the first version of this rule only recognised bare brace lists and reported a legitimate
+   * `export type { A, B }` as an added content line.
+   */
+  const typedPlumbing = ['export interface A { x: number }', 'export type B = string',
+    'function f() {', '  return 1', '}', 'export type { A, B }', 'export { f }']
+  const typedBase = ['export interface A { x: number }', 'export type B = string',
+    'function f() {', '  return 1', '}']
+  const typedDiff = firstDifference(ms(typedBase), ms(typedPlumbing))
+
   console.log('self-test 1 (import/export plumbing only): ' + (plumbingDiff === undefined ? 'IDENTICAL as required' : 'FALSE POSITIVE — ' + describe(plumbingDiff)))
   console.log('self-test 2 (content duplicated):          ' + (dupDiff !== undefined ? 'DIFFERENT as required' : 'FALSE NEGATIVE — the multiset missed a duplicate'))
+  console.log('self-test 3 (type re-export is plumbing):  ' + (typedDiff === undefined ? 'IDENTICAL as required' : 'FALSE POSITIVE — ' + describe(typedDiff)))
 
-  const ok = plumbingDiff === undefined && dupDiff !== undefined
+  const ok = plumbingDiff === undefined && dupDiff !== undefined && typedDiff === undefined
   if (dupDiff !== undefined) console.log(describe(dupDiff))
   console.log(ok ? '\nSELF-TEST PASS' : '\nSELF-TEST FAIL')
   return ok
