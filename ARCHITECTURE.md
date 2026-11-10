@@ -93,6 +93,21 @@
 
 ### TD-1 `dsh-graft-slice/src/index.ts` 单文件过大（P2，非阻塞）
 
+**节点边界 = 闭包闭合的簇；`index.ts` 从叶子往根剥（S3 / N0，2026-11-10）**
+
+拆分不是按「一个函数」切，而是按**闭包闭合**切：一个可搬的节点，是它的依赖闭包**完全落在它自己内部**（不引用 `index.ts` 里的其它符号）的那一簇。因此搬运顺序必须是**从叶子往根**——每剥掉一个叶子，上层目标的闭包就会变小；只有当某个根函数的闭包小到闭合，它才可以搬。
+
+| 事实 | **当时**（2026-11-10，S3 闭包实测；**上界**，非结论） |
+|---|---|
+| 最干净的叶子 | `calculateAdaptiveDepth`，闭包上界 **1 个**声明（N1） |
+| 可搬的中层 | `buildPendingState`，闭包**上界** 19 声明 / 386 行（N4）——**不超过**此数 |
+| **不可搬**（**当时** 2026-11-10 实测，闭包 ≈ 整个文件） | `appendTransitionCard`（336 声明 / 13,390 行）、`graftSliceAndInjectUnlocked`（254 / 8,805）、`buildInjectionPlan` / `buildTape` / `renderTaskBoard` / `renderInstructionCard` / `classifyAgentCommand` / `recoverGraftTransactions`（同为 245 / 7,774） |
+
+**根函数需要的是依赖倒置，不是位移。** 上表最后一行的函数闭包之所以巨大，是因为它们直接读模块级的存储路径、全局状态与彼此。要把它们搬出去，必须把那些依赖**改成参数传进来**——那会**改函数签名，属于行为面改动**，必须**单独立项、单独裁定**，不许混进任何搬运节点。这是本节的结论，也是一个独立的项目。
+
+**闭包若含模块级可变状态（`let` / 可变 `const`）→ 停止搬运。** 那不是闭包，是共享状态；搬它会把「一处状态」变成「两处状态」。
+
+
 | 项 | 内容 |
 |---|---|
 | 现状 | **`src/index.ts` 13,827 行 / 13,301 非空**（v0.9.5 之后；G5 搬运后为 12,887，搬运前为 13,271）。**行数口径：`wc -l`** —— `content.split(/\r?\n/)`，且文件以换行结尾时不计末尾空项；非空行 = 该数组中 `trim().length > 0` 的个数。已抽出 `core/host-shape.ts`（996 行）、`core/ignition.ts`（1,005 行）、`core/paradise-write.ts`（240 行）与 `core/task-state.ts`（564 行，G5）。剩余部分仍含 90+ 导出、约 60 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册 |
@@ -303,7 +318,7 @@
 | 交接内容的来源 | `prepareSlice` 的 `review` 全部来自自动提取：`pending-state` 来自 `buildPendingState`，后者读 `extractTaskState` 的 `openTodos`，后者读 **`todo_write` 事件**。 |
 | 后果（机制，不是猜测） | 模型想交接时，**它能表达的唯一方式是触发自动提取**；而自动提取读的是**它上一轮写的 TODO** —— 那正是它此刻想覆盖的东西。于是：**轮次中途的「我想交接什么」无法表达；未更新 TODO 时，交接单反映的是上一轮状态。** |
 | 建议修法（初版提议，2026-11-09） | 新增**可选** `handover?: { goal?, pending?, constraints?, notes? }`：提供则**覆盖**对应字段；`review` 里标注「本段由模型提供」；**`digest` 必须把 `handover` 计入** —— 否则「用户审阅的是这一版」这条保证失效（digest 是审阅对象的指纹）。<br>**⚠️ 本行的字段清单已被 2026-11-10 裁定否决**：`goal` 与 `constraints` **不加**（理由见下方裁定行）。实际落地的是 `handover?: { pending?, notes? }`。保留本行是为了留下「提议过什么、为什么被否」的记录，**不是**仍然有效的方案。 |
-| 与 G5 的关系 | G5 要搬的 `buildPendingState` / `renderTaskBoard` **正是这套自动提取的实现**。所以在 TD-11 的方案定下来之前，**G5 只搬 `extractTaskState` / `checkTaskBoundary` / `checkSafeHarbor` 三件套**，不搬 `buildPendingState` / `renderTaskBoard` —— 避免搬完就改。<br>**2026-11-10 更新：这条限制的理由已经用尽。** TD-11 已裁定并实现（见状态行），「搬完就改」的情形不会发生了 —— `buildPendingState` / `renderTaskBoard` 现在可以搬（记作 **G5b**），不再需要为 TD-11 让路。**这条限制是临时的，不是永久的**：留着不写清楚，下一个人会以为 G5 仍然只有三件套。 |
+| 与 G5 的关系 | G5 要搬的 `buildPendingState` / `renderTaskBoard` **正是这套自动提取的实现**。所以在 TD-11 的方案定下来之前，**G5 只搬 `extractTaskState` / `checkTaskBoundary` / `checkSafeHarbor` 三件套**，不搬 `buildPendingState` / `renderTaskBoard` —— 避免搬完就改。<br>**2026-11-10 更新：这条限制的理由已经用尽** —— TD-11 已裁定并实现（见状态行），「搬完就改」的情形不会发生了。<br>**2026-11-10 再订正（S3 / N0）：上一句「`buildPendingState` / `renderTaskBoard` 现在可以搬」只对了一半。** 按闭包实测（`S3-PLAN.md` §四，上界数字）：`buildPendingState` 是叶子（闭包上界 19 声明 / 386 行，记作 **N4**，可搬）；而 `renderTaskBoard` 的闭包是 **245 声明 / 7,774 行**——与 `buildInjectionPlan` / `buildTape` / `classifyAgentCommand` **同一个闭包**，也就是整个文件。**搬它等于搬整个文件**，因此它**不可搬**，记在 §六 的「明确不做」里。<br>教训：**「TD-11 解除了限制」只解除了「搬完就改」这一个理由，不代表目标函数因此就变得可搬。** 可搬与否由**闭包**决定；把「另一个理由消失了」当成「这个结论成立了」，是同一类错误的又一实例。 |
 | 本轮已做（仅声明，不接线） | `GraftConfig` 新增 `handoverEditable?: boolean`，**默认 `false`**。配置注释与本节都写明：**尚未接线，无论取值如何行为不变**。沿用 `focusAfterGraft` 的口径——**不发布一个不生效却不标注的开关**。 |
 | **裁定（2026-11-10）：只落 `pending` 与 `notes` 两个入参；`goal` 与 `constraints` 明确不加** | **① 不加 `goal`**：`goal` 已由 TD-18 的三层语义接管（objective > DAG > transcript）。再加一个入参就是**两个来源写同一个字段**——必然产生「哪个赢」的新歧义，而这个歧义刚刚才被裁掉。<br>**② 不加 `constraints`（这条最重要）**：约束入参会让模型在交接时**手工注入约束**，从而绕过 `shapeOfConstraint` 与 `droppedByShape` 的整条审计链——那是本轮刚建起来的防线。**模型不能手写红线**：约束只能来自源会话的抽取（经判据）或继承（经判据）。<br>**③ 加 `pending` 与 `notes`**：前者覆盖「⏭️ 待开始」列（模型确实知道下一件事，而 `openTodos` 读的是它上一轮写的 TODO），后者是补充说明。这两者**不与任何工具派生事实争夺同一字段**。<br>**④ 三条硬要求**：`digest` 必须计入 `handover`（digest 是「用户审阅的是这一版」的指纹，漏掉它这条保证失效）；`review` 必须标注「本段由模型提供」；**模型提供的内容不得并入工具派生的列**（与 TD-19 的设计前置条件①同源：自述与事实分栏）。 |
 | **状态（2026-11-10）：已裁定并实现** | 落地形态 —— `graft_prepare` 新增可选 `handover?: { pending?, notes? }`（schema 里 `additionalProperties: false`：**未声明字段报错，不静默丢弃**——静默丢弃会让调用方以为自己已经交了一条约束）；`pending` **替换**看板「⏭️ 待开始」列，且**列头标注「（模型提供）」**；`notes` 作为**独立带标题段落**（`**模型提供的内容（不是工具测量的事实）**`）追加在 pending-state 块末尾，**不并入任何工具派生的列**；`digestOfPlan` 把 `handover` **显式**计入被哈希对象（不只经由 chunks）；`review` 打印「【本段由模型提供】待开始 N 条、备注 M 条（不是工具测量的事实）」；`PreparedSlice` 记录 `handoverPendingCount` / `handoverNoteCount`。测试：`test/v124-handover-minimal.test.mjs`（6 条，含**反向**结构性断言：schema 里既无 `constraints` 也无 `goal`）。<br>**一处必须说准的边界**：不提供 `handover` 时**渲染文本逐字节不变**（列头无标注、notes 段是空串），但 `digestOfPlan` 的哈希输入对象**多了一个恒为空的 `handover` 字段**，所以 digest 的十六进制取值与本版本之前**不同**。同一版本内 `graft_prepare` → `graft_commit` 的比较不受影响。因此「不提供时行为不变」按**测试数字与渲染文本**成立，**不**按 digest 取值成立。 |
