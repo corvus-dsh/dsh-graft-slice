@@ -116,7 +116,21 @@
 
 `buildTape` 84 → **83**（**当时**（2026-11-10 实测））：它引用的一个声明随 N2 移出，成为导入。这不是退化，是闭包的定义——导入不属于闭包。
 
-**N4 之后剩余候选（**当时**（2026-11-10 实测），同一口径）**：`buildPendingState` **19 / 229**、`renderTaskBoard` **12 / 348**、`renderInstructionCard` **16 / 466**、`buildTape` **83 / 2,445**、`buildInjectionPlan` **155 / 4,560**（N2 前值，未重测）——**四个仍 `mutable=none`，都是候选**；另三个（`recoverGraftTransactions` / `graftSliceAndInjectUnlocked` / `graftSliceAndInject`）仍是 7 个 `let`，**不是候选**。
+**N7 之后全表重测（**当时**（2026-11-10 实测，同一口径）**：
+
+| 目标 | 闭包（声明 / 行） | mutable | 现在在哪 | 判定 |
+|---|---|---|---|---|
+| `renderInstructionCard` | **4 / 118** | none | `core/instruction-card.ts`（已搬） | — |
+| `renderTaskBoard` | **12 / 348** | none | `core/task-board.ts`（已搬） | — |
+| `buildPendingState` | **19 / 229** | none | `core/pending-state.ts`（已搬） | — |
+| `buildTape` | **48 / 1,750** | none | index.ts | **容器**（> 800 行上限，不是候选） |
+| `buildInjectionPlan` | **110 / 3,705** | none | index.ts | **容器**（> 800 行上限，不是候选） |
+
+**搬完 N7 之后，`buildTape` 从 83 / 2,445 掉到 48 / 1,750，`buildInjectionPlan` 从 145 / 4,400 掉到 110 / 3,705** —— 因为 `buildPendingState` 那 19 个声明从它们两人的闭包里退出去成了导入。两个仍然**远超 800 行上限**，按硬上限仍不是候选。
+
+**重叠矩阵在 N7 之后失效了，而且这是正确的结果**：`_scratch/n5-overlap.mjs` 现在打不出任何非空交集 —— 因为 `closure.mjs` 只沿**同文件**声明扩展，而三个叶子已经各自成模块。格子里的「谁被谁引用」在它们分居不同文件之后不再由闭包表达，而由 **import 边**表达（`task-board → instruction-card`、`command-guard → command-policy`）。换句话说：**包含格在叶子被剥掉之后自然消失，不是矩阵坏了。**
+
+**搬运队列：空。** 阶段 2 可搬的叶子已经吃完；剩下的两个大家伙是**容器**，要进队列必须先做依赖倒置把它们剥到 ≤ 800 行 —— 那是行为面改动（改签名 / 提 handler），须单独立项。
 
 **N5+ 的排序三条（用户 2026-11-10 裁定，度量已定死）**：① `mutable=none` 是**硬前提**（不满足即出局，不进排序）；② 通过者按**声明数升序**（**行数只作第二指标报告**）—— 理由是**声明数 = 耦合面**：每个声明都要穿一层 import / 再导出，而 `verify-pure-move` 恰恰把 import/export 行排除在不变式之外，所以行数不增加正确性风险，只增加 review 成本；③ **被其它簇引用者先搬**（先剥掉的叶子会让后来者的闭包一起变小，N1→N2 已实测：`scanAgentCommand` 17/130 → 2/11）。
 
