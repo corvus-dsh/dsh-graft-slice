@@ -95,7 +95,7 @@
 
 | 项 | 内容 |
 |---|---|
-| 现状 | **`src/index.ts` 13,663 行 / 13,138 非空**（v0.9.5 之后；G5 搬运后为 12,887，搬运前为 13,271）。**行数口径：`wc -l`** —— `content.split(/\r?\n/)`，且文件以换行结尾时不计末尾空项；非空行 = 该数组中 `trim().length > 0` 的个数。已抽出 `core/host-shape.ts`（996 行）、`core/ignition.ts`（1,005 行）、`core/paradise-write.ts`（240 行）与 `core/task-state.ts`（564 行，G5）。剩余部分仍含 90+ 导出、约 60 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册 |
+| 现状 | **`src/index.ts` 13,827 行 / 13,301 非空**（v0.9.5 之后；G5 搬运后为 12,887，搬运前为 13,271）。**行数口径：`wc -l`** —— `content.split(/\r?\n/)`，且文件以换行结尾时不计末尾空项；非空行 = 该数组中 `trim().length > 0` 的个数。已抽出 `core/host-shape.ts`（996 行）、`core/ignition.ts`（1,005 行）、`core/paradise-write.ts`（240 行）与 `core/task-state.ts`（564 行，G5）。剩余部分仍含 90+ 导出、约 60 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册 |
 | 影响 | 单文件让「改 A 碰坏 B」的排查成本变高；diff review 困难；IDE 索引与增量构建变慢；新人无法按职责分层阅读 |
 | 为什么现在不动 | 见下方 TD-7：本轮只搬了「与彼岸层真正重叠」的两块。剩下的搬运是纯位移，不减复杂度，且 84 个测试文件直接 import 那些区域的 30 个符号 |
 | 退出条件（可验收） | ① 按职责拆成 `session-slice.ts` / `tape.ts` / `injection.ts` / `ledger.ts` / `guards.ts` / `console.ts` / `tools.ts` 等模块，每个 ≤ 800 行；② `index.ts` 只保留 `apply()` 装配与再导出，≤ 300 行；③ **拆前后测试数不变、全绿**；④ `scripts/build.mjs` 的产物字节差异仅来自模块边界（banner 与 import 语句）；⑤ 每个模块导出面的 `grep` 参考计数与拆前一致（防止顺手删了导出） |
