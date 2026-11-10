@@ -26,13 +26,25 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripTypeScriptTypes } from 'node:module'
-import { pathToFileURL } from 'node:url'
 
-const SOURCE = 'D:/持久层能力架构/dsh-graft-slice/src/core/store-layer.ts'
+/**
+ * ── RESOLVE THE MODULE RELATIVE TO THIS FILE, NEVER BY ABSOLUTE PATH ─────────────────────────────
+ *
+ * The first version hard-coded `D:/持久层能力架构/dsh-graft-slice/src/core/store-layer.ts`. It passed
+ * locally and **failed on CI** with
+ *
+ *     ENOENT: no such file or directory, open 'D:/鎸佷箙灞傝兘鍔涙灦鏋?dsh-graft-slice/src/core/store-layer.ts'
+ *
+ * — the checkout lives at `/home/runner/work/dsh-graft-slice/dsh-graft-slice`, and the Chinese path
+ * was also mangled by the log encoding. A test that only works on the author's disk is not a test.
+ */
+const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
+const SOURCE = join(REPO, 'src', 'core', 'store-layer.ts')
 const OUT_DIR = mkdtempSync(join(tmpdir(), 'dsh-store-layer-'))
 const OUT_FILE = join(OUT_DIR, 'store-layer.mjs')
 
