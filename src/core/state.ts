@@ -378,6 +378,10 @@ export interface PreparedSlice {
   pointerCount: number
   tapeChars: number
   review: string
+  /** TD-11: how many `handover.pending` items the review carried (0 = none supplied). */
+  handoverPendingCount?: number
+  /** TD-11: how many `handover.notes` items the review carried (0 = none supplied). */
+  handoverNoteCount?: number
   /** v7.4: the reviewed chunk bodies, for tail-vs-history comparison at commit. */
   chunks?: Array<{ kind: string; text: string }>
 }

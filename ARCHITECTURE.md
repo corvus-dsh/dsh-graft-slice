@@ -294,7 +294,7 @@
 | 若要实现的正确形态 | ① observer 孵化（用户点击触发）→ **默认跳转**（保留现状）；② graft 自动切片（水位触发）→ **默认不跳**，面板给「→ 跳到新会话」按钮；③ graft 手动切片（模型主动调用）→ `focusAfterGraft: 'always'` 时跳转；④ 多会话场景 → 面板显示「刚才 N 个会话完成切片」的列表，**而不是跳到某一个**。 |
 | 退出条件（可验收） | ① `'never'` 下行为与今天完全一致（测试数字不变）；② `'manual-only'` 只在工具主动调用路径跳转，自动路径不跳；③ `'always'` 覆盖两种路径；④ 多会话完成时**不**产生跳转，而是列出条目；⑤ 用测试固定「自动路径永不抢焦点」这一条——它是这个功能存在的理由。 |
 
-## TD-11 `graft_prepare` 没有内容入参：交接内容 100% 自动提取（P1，2026-11-09 登记）
+## TD-11 `graft_prepare` 没有内容入参：交接内容 100% 自动提取（P1，2026-11-09 登记 → **2026-11-10 已裁定并实现**）
 
 | 项 | 内容 |
 |---|---|
@@ -302,12 +302,13 @@
 | **事实补充（两段式只实现了第一段）** | `graft_prepare` → 检查 → `graft_commit` 两段确实存在，但**第二段只能同意 digest，不能修改内容**（`graft_commit` 只接受 `preparedId` + `digest`，`src/index.ts:12733-12745`）。所以「先检查**并更新**交接内容再交接」的**「更新」那一半从未实现**——这**不是故障，是缺口**。失败时它会报错，而这个缺口不会：它一直安静地给出上一轮的提取结果。 |
 | 交接内容的来源 | `prepareSlice` 的 `review` 全部来自自动提取：`pending-state` 来自 `buildPendingState`，后者读 `extractTaskState` 的 `openTodos`，后者读 **`todo_write` 事件**。 |
 | 后果（机制，不是猜测） | 模型想交接时，**它能表达的唯一方式是触发自动提取**；而自动提取读的是**它上一轮写的 TODO** —— 那正是它此刻想覆盖的东西。于是：**轮次中途的「我想交接什么」无法表达；未更新 TODO 时，交接单反映的是上一轮状态。** |
-| 建议修法 | 新增**可选** `handover?: { goal?, pending?, constraints?, notes? }`：提供则**覆盖**对应字段；`review` 里标注「本段由模型提供」；**`digest` 必须把 `handover` 计入** —— 否则「用户审阅的是这一版」这条保证失效（digest 是审阅对象的指纹）。 |
-| 与 G5 的关系 | G5 要搬的 `buildPendingState` / `renderTaskBoard` **正是这套自动提取的实现**。所以在 TD-11 的方案定下来之前，**G5 只搬 `extractTaskState` / `checkTaskBoundary` / `checkSafeHarbor` 三件套**，不搬 `buildPendingState` / `renderTaskBoard` —— 避免搬完就改。 |
+| 建议修法（初版提议，2026-11-09） | 新增**可选** `handover?: { goal?, pending?, constraints?, notes? }`：提供则**覆盖**对应字段；`review` 里标注「本段由模型提供」；**`digest` 必须把 `handover` 计入** —— 否则「用户审阅的是这一版」这条保证失效（digest 是审阅对象的指纹）。<br>**⚠️ 本行的字段清单已被 2026-11-10 裁定否决**：`goal` 与 `constraints` **不加**（理由见下方裁定行）。实际落地的是 `handover?: { pending?, notes? }`。保留本行是为了留下「提议过什么、为什么被否」的记录，**不是**仍然有效的方案。 |
+| 与 G5 的关系 | G5 要搬的 `buildPendingState` / `renderTaskBoard` **正是这套自动提取的实现**。所以在 TD-11 的方案定下来之前，**G5 只搬 `extractTaskState` / `checkTaskBoundary` / `checkSafeHarbor` 三件套**，不搬 `buildPendingState` / `renderTaskBoard` —— 避免搬完就改。<br>**2026-11-10 更新：这条限制的理由已经用尽。** TD-11 已裁定并实现（见状态行），「搬完就改」的情形不会发生了 —— `buildPendingState` / `renderTaskBoard` 现在可以搬（记作 **G5b**），不再需要为 TD-11 让路。**这条限制是临时的，不是永久的**：留着不写清楚，下一个人会以为 G5 仍然只有三件套。 |
 | 本轮已做（仅声明，不接线） | `GraftConfig` 新增 `handoverEditable?: boolean`，**默认 `false`**。配置注释与本节都写明：**尚未接线，无论取值如何行为不变**。沿用 `focusAfterGraft` 的口径——**不发布一个不生效却不标注的开关**。 |
 | **裁定（2026-11-10）：只落 `pending` 与 `notes` 两个入参；`goal` 与 `constraints` 明确不加** | **① 不加 `goal`**：`goal` 已由 TD-18 的三层语义接管（objective > DAG > transcript）。再加一个入参就是**两个来源写同一个字段**——必然产生「哪个赢」的新歧义，而这个歧义刚刚才被裁掉。<br>**② 不加 `constraints`（这条最重要）**：约束入参会让模型在交接时**手工注入约束**，从而绕过 `shapeOfConstraint` 与 `droppedByShape` 的整条审计链——那是本轮刚建起来的防线。**模型不能手写红线**：约束只能来自源会话的抽取（经判据）或继承（经判据）。<br>**③ 加 `pending` 与 `notes`**：前者覆盖「⏭️ 待开始」列（模型确实知道下一件事，而 `openTodos` 读的是它上一轮写的 TODO），后者是补充说明。这两者**不与任何工具派生事实争夺同一字段**。<br>**④ 三条硬要求**：`digest` 必须计入 `handover`（digest 是「用户审阅的是这一版」的指纹，漏掉它这条保证失效）；`review` 必须标注「本段由模型提供」；**模型提供的内容不得并入工具派生的列**（与 TD-19 的设计前置条件①同源：自述与事实分栏）。 |
+| **状态（2026-11-10）：已裁定并实现** | 落地形态 —— `graft_prepare` 新增可选 `handover?: { pending?, notes? }`（schema 里 `additionalProperties: false`：**未声明字段报错，不静默丢弃**——静默丢弃会让调用方以为自己已经交了一条约束）；`pending` **替换**看板「⏭️ 待开始」列，且**列头标注「（模型提供）」**；`notes` 作为**独立带标题段落**（`**模型提供的内容（不是工具测量的事实）**`）追加在 pending-state 块末尾，**不并入任何工具派生的列**；`digestOfPlan` 把 `handover` **显式**计入被哈希对象（不只经由 chunks）；`review` 打印「【本段由模型提供】待开始 N 条、备注 M 条（不是工具测量的事实）」；`PreparedSlice` 记录 `handoverPendingCount` / `handoverNoteCount`。测试：`test/v124-handover-minimal.test.mjs`（6 条，含**反向**结构性断言：schema 里既无 `constraints` 也无 `goal`）。<br>**一处必须说准的边界**：不提供 `handover` 时**渲染文本逐字节不变**（列头无标注、notes 段是空串），但 `digestOfPlan` 的哈希输入对象**多了一个恒为空的 `handover` 字段**，所以 digest 的十六进制取值与本版本之前**不同**。同一版本内 `graft_prepare` → `graft_commit` 的比较不受影响。因此「不提供时行为不变」按**测试数字与渲染文本**成立，**不**按 digest 取值成立。 |
+| **为什么 `pending` 可以覆盖日志** | 这是**唯一**一处「模型压过日志」的写入，且它是有理由的：`openTodos` 读的是模型**自己上一轮写的 `todo_write`** —— 那正是它此刻想更正的东西。压制**不静默**：列头标出来源，digest 覆盖 provenance，`review` 明说。 |
 | 退出条件（可验收） | ① 提供 `handover` 时，review 与 digest **都**反映它（且提供与不提供的 digest 不同）；② 不提供时行为**不变**（测试数字不变）；③ 一条能红测试：把 `pending` 写进 `handover`，断言看板「待开始」列出现它，且该条的来源标注为「模型提供」；④ 一条**反向**测试：`handover` 里不得存在能写进 `constraints` 的路径（结构性断言：schema 里没有该字段）。 |
-| 退出条件（可验收） | ① 模型提供 `handover` 时，`review` 与 `digest` **都**反映它；② 不提供时行为不变（现状 **604 条测试**全绿）；③ digest 变化必须能被「用户确认过的 digest」检查捕获（提供与不提供是两份不同的 digest）。 |
 
 ## 本次发版（v0.22）**不做**的事
 

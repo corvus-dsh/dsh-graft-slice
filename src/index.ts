@@ -4070,6 +4070,15 @@ export interface TaskBoardInput {
   /** The next actions, in order. First one is the immediate next step. */
   pending: readonly string[]
   /**
+   * TD-11: WHERE the pending list came from.
+   *
+   * `'model'` means the model supplied it through `graft_prepare`'s `handover.pending` — a
+   * deliberate statement made at handoff time. It is labelled in the heading because a reader
+   * must be able to tell "the model just told me this" from "the plugin read it out of the log".
+   * Absent means the transcript (the historical default) and gets no label.
+   */
+  pendingSource?: 'transcript' | 'model'
+  /**
    * v0.32 P1: a todo_write exists even when every item is completed.
    *
    * The empty-pending fallback below is for a session that never wrote a plan.
@@ -4372,7 +4381,11 @@ export function renderTaskBoard(input: TaskBoardInput): string {
 
   // ⏭️ 待开始 — the next action FIRST, rest after. This is the column the ignition
   // prompt points at, so its first item has to be the real next step.
-  lines.push('', `**${BOARD_COLUMNS.todo}**`)
+  // TD-11: say WHERE the list came from. A model-supplied list is a deliberate statement made at
+  // handoff time; unlabelled, it would read as tool-derived and silently outrank the log.
+  const pendingHeading =
+    input.pendingSource === 'model' ? `**${BOARD_COLUMNS.todo}**（模型提供）` : `**${BOARD_COLUMNS.todo}**`
+  lines.push('', pendingHeading)
   const pending = input.pending.map((item) => item.replace(/\s+/gu, ' ').trim()).filter((item) => item.length > 0)
   if (pending.length === 0) {
     // v0.32 P1: "the written list is finished" is NOT "there is no plan".
@@ -4512,6 +4525,8 @@ export interface InstructionCardInput {
   inProgress?: string
   /** v0.20: further next actions (openTodos), after the prose body. */
   pending?: readonly string[]
+  /** TD-11: forwarded to `renderTaskBoard` so the 待开始 heading can carry its source label. */
+  pendingSource?: 'transcript' | 'model'
   /**
    * v0.32 P1: a written todo list exists, even when every item is completed.
    *
@@ -4595,6 +4610,7 @@ export function renderInstructionCard(input: InstructionCardInput): string {
     ...(input.semantic.outcome === undefined ? {} : { outcome: input.semantic.outcome }),
     ...(input.inProgress === undefined ? {} : { inProgress: input.inProgress }),
     pending: boardPending,
+    ...(input.pendingSource === undefined ? {} : { pendingSource: input.pendingSource }),
     ...(input.hasWrittenPlan === true ? { hasWrittenPlan: true } : {}),
     stopPoint: input.stopPoint,
     ...(input.sourceSessionId === undefined ? {} : { sourceSessionId: input.sourceSessionId }),
@@ -4758,6 +4774,13 @@ export function buildTape(
    * plan is finished.
    */
   hasWrittenPlan = false,
+  /**
+   * TD-11: the pending list came from the model's `handover`, not from the transcript.
+   *
+   * Threaded as a boolean rather than as the list itself: the caller has already substituted the
+   * items into `openTodos`, and the board only needs to know how to LABEL them.
+   */
+  pendingFromModel = false,
 ): GraftTape {
   const sliced = events.filter((event) => Number(event.seq) <= boundary.boundarySeq)
   const calls = new Map<string, CallRecord>()
@@ -5177,6 +5200,7 @@ export function buildTape(
     ...(sourceMarkGoal.revisions > 0 ? { goalRevisions: sourceMarkGoal.revisions } : {}),
     ...(openTurnInstruction === undefined ? {} : { inProgress: openTurnInstruction }),
     pending: openTodos,
+    ...(pendingFromModel ? { pendingSource: 'model' as const } : {}),
     ...(hasWrittenPlan ? { hasWrittenPlan: true } : {}),
     stopPoint: {
       ...(typeof boundary.lastTurn === 'number' ? { turn: boundary.lastTurn } : {}),
@@ -5584,6 +5608,33 @@ export function renderMemoryContext(input: MemoryContextInput): string | undefin
   return lines.join('\n')
 }
 
+/**
+ * TD-11: the content the MODEL supplies for a handoff, via `graft_prepare`'s `handover`.
+ *
+ * ── WHY THERE ARE EXACTLY TWO FIELDS, AND WHAT IS EXCLUDED ───────────────────────────────────
+ *
+ * No `goal`. TD-18 gives `goal` a three-layer definition (objective > dag-node > transcript).
+ * A second writer for the same field would re-introduce precisely the "which one wins"
+ * ambiguity that ruling removed — and that ambiguity has already cost one incident
+ * (ANALYSIS-BRIEF §4.4: a finished request labelled "current", so the target redid it).
+ *
+ * **No `constraints`, permanently.** A constraint parameter would let the model write a red line
+ * straight into the handoff, bypassing `shapeOfConstraint` and `droppedByShape` — the audit chain
+ * the whole constraint pipeline is built around. Constraints may only enter by extraction from
+ * the source log, or by inheritance, and both go through the shape judge. The model cannot
+ * author a red line. That is not a size limit; it is the boundary.
+ *
+ * `pending` and `notes` are safe because they share no field with any tool-derived fact:
+ * `pending` replaces the 待开始 column and is LABELLED as model-supplied where it renders, and
+ * `notes` is its own labelled section. Neither can be read as a measured fact.
+ */
+export interface ModelHandover {
+  /** Replaces the 待开始 column. Labelled 「模型提供」 in the heading. */
+  readonly pending?: readonly string[]
+  /** Appended to the pending-state block as a labelled section. */
+  readonly notes?: readonly string[]
+}
+
 export function buildInjectionPlan(
   log: SessionLogSnapshotLike,
   config: GraftConfig,
@@ -5602,6 +5653,13 @@ export function buildInjectionPlan(
      * which produces no chunk at all — not an empty heading claiming memory knew nothing.
      */
     memoryContext?: MemoryContextInput
+    /**
+     * TD-11: content the model supplied for THIS handoff (`graft_prepare`'s `handover`).
+     *
+     * See `ModelHandover`: no `goal` (TD-18 owns that field) and no `constraints` (the model
+     * may not author a red line). `pending` replaces the transcript list; `notes` is appended.
+     */
+    handover?: ModelHandover
   },
 ): GraftPlan {
   const settings = normalizeConfig(config)
@@ -5685,15 +5743,36 @@ export function buildInjectionPlan(
   // verification section describes the project the source was working in. Reading it
   // after the fact is what would let the probe report on the wrong directory.
   const cwd = log.session?.cwd
+  // TD-11: the model may have stated what comes next. Only non-empty strings count — a blank or
+  // whitespace-only entry is not a statement and must not shadow the transcript list.
+  const handoverPending = (options?.handover?.pending ?? [])
+    .map((item) => String(item).replace(/\s+/gu, ' ').trim())
+    .filter((item) => item.length > 0)
+  const handoverNotes = (options?.handover?.notes ?? [])
+    .map((item) => String(item).replace(/\s+/gu, ' ').trim())
+    .filter((item) => item.length > 0)
+  /**
+   * TD-11 rule 3: the model's own words get their OWN labelled section, so nothing it says can be
+   * read as a measured fact. They are never merged into a tool-derived column.
+   */
+  const handoverNotesBlock =
+    handoverNotes.length === 0
+      ? ''
+      : `\n\n**模型提供的内容（不是工具测量的事实）**\n${handoverNotes.map((note) => `- ${note}`).join('\n')}`
   const tape = buildTape(
     events,
     boundary,
     effectiveSettings,
     typeof log.session?.id === 'string' ? log.session.id : undefined,
-    taskStateForPending.openTodos,
+    // TD-11: a model-supplied `pending` REPLACES the transcript-derived list. This is the one
+    // place the model outranks the log, and it is deliberate: `openTodos` is read from the
+    // model's OWN earlier todo_write — the very thing it may be correcting at handoff time.
+    // The substitution is labelled in the board (`pendingSource`), never silent.
+    handoverPending.length > 0 ? handoverPending : taskStateForPending.openTodos,
     availableTools,
     typeof cwd === 'string' ? cwd : undefined,
     taskStateForPending.todoSeq !== undefined,
+    handoverPending.length > 0,
   )
   if (typeof cwd !== 'string' || cwd.length === 0 || !isAbsolutePath(cwd)) {
     throw graftError(
@@ -6053,7 +6132,10 @@ export function buildInjectionPlan(
   }
   chunks.push({
     kind: 'pending-state',
-    text: tape.pendingStateText,
+    // TD-11: the model's `notes` ride this chunk as a labelled section. Putting them here rather
+    // than in a chunk kind of their own keeps the chunk union and its priority list unchanged —
+    // and they are still hashed by `digestOfPlan`, because chunks are what it hashes.
+    text: tape.pendingStateText + handoverNotesBlock,
     truncated: false,
   })
 
@@ -7848,17 +7930,27 @@ function sliceDigest(_input: {
   return createHash('sha256').update(JSON.stringify(_input)).digest('hex')
 }
 
-function digestOfPlan(plan: any): string {
+function digestOfPlan(plan: any, handover?: ModelHandover): string {
   // v7.4 P1-2: hash exactly what the user reviews — the goal plus every injected
   // chunk (`buildInjectionPlan` exposes the tape as chunks, not as turns, so an
   // earlier draft that hashed `plan.turns` hashed an empty array and every plan
   // digested the same way).
+  //
+  // TD-11: `handover` is hashed EXPLICITLY, not merely through its effect on the chunks. If the
+  // model's `pending` happened to equal the transcript list, the rendered text would be identical
+  // and a chunk-only hash would collide — yet the review still differs, because the board then
+  // says 「模型提供」. The digest is the fingerprint of what the user approved, provenance
+  // included, so provenance is hashed.
   const chunks = Array.isArray(plan?.chunks)
     ? plan.chunks.map((chunk: any) => [String(chunk?.kind ?? ''), String(chunk?.text ?? '')])
     : []
   const constraints: string[] = Array.isArray(plan?.constraints) ? plan.constraints.map(String) : []
+  const handoverDigest = {
+    pending: (handover?.pending ?? []).map(String),
+    notes: (handover?.notes ?? []).map(String),
+  }
   return createHash('sha256')
-    .update(JSON.stringify({ goal: String(plan?.goal ?? ''), constraints, chunks }))
+    .update(JSON.stringify({ goal: String(plan?.goal ?? ''), constraints, chunks, handover: handoverDigest }))
     .digest('hex')
 }
 
@@ -7875,6 +7967,11 @@ export async function prepareSlice(
   config: GraftConfig,
   sourceSessionId: string,
   targetSessionId?: string,
+  /**
+   * TD-11: content the model supplies for this handoff. Optional — absent means the historical
+   * behaviour, where everything is extracted from the log.
+   */
+  handover?: ModelHandover,
 ): Promise<PreparedSlice> {
   const settings = normalizeConfig(config)
   const sourceId = asNonEmptyString(sourceSessionId, 'sourceSessionId')
@@ -7882,8 +7979,9 @@ export async function prepareSlice(
   if (!hasClosedTurn(raw.events)) {
     throw graftError('NO_CLOSED_TURN', `session "${sourceId}" has no closed turn yet; nothing to review`)
   }
-  const plan = buildInjectionPlan(raw, settings)
-  const digest = digestOfPlan(plan)
+  const plan = buildInjectionPlan(raw, settings, undefined, 'regex-fallback', undefined,
+    handover === undefined ? undefined : { handover })
+  const digest = digestOfPlan(plan, handover)
   const sourceLastSeq = Number(raw.events.at(-1)?.seq ?? 0)
   const boundarySeq = Number(plan?.boundary?.boundarySeq ?? 0)
   // v7.4 P1-2: the tape is exposed as `chunks`, so read the review material from
@@ -7897,6 +7995,10 @@ export async function prepareSlice(
   const goal = String(plan?.goal ?? '')
   const tapeChars = Number(plan?.totalTapeChars ?? 0)
   const turnCount = Number(plan?.recentTurnCount ?? 0)
+  // TD-11: counted for the review label. The board's 待开始 column was already substituted by
+  // `buildInjectionPlan`; here we only need the counts, to state WHAT the user is approving.
+  const handoverPendingCount = (handover?.pending ?? []).filter((item) => String(item).trim().length > 0).length
+  const handoverNoteCount = (handover?.notes ?? []).filter((item) => String(item).trim().length > 0).length
 
   const preparedId = `prep-${digest.slice(0, 12)}-${Date.now().toString(36)}`
   const target = typeof targetSessionId === 'string' && targetSessionId.length > 0
@@ -7916,6 +8018,11 @@ export async function prepareSlice(
     '【进度与下一步】',
     pendingStateText.slice(0, 900),
     '',
+    // TD-11: the review must SAY that part of it came from the model. The user approves a digest,
+    // so the provenance of what they are approving has to be on screen, not only in the data.
+    ...(handoverPendingCount === 0 && handoverNoteCount === 0
+      ? []
+      : ['', `【本段由模型提供】待开始 ${handoverPendingCount} 条、备注 ${handoverNoteCount} 条（不是工具测量的事实）`]),
     constraints.length > 0 ? `【约束 ${constraints.length} 条】\n- ${constraints.slice(0, 10).join('\n- ')}` : '【约束】无',
     '',
     ...(leftoverWarningLine() === undefined ? [] : ['', leftoverWarningLine()]),
@@ -7938,6 +8045,10 @@ export async function prepareSlice(
     pointerCount: Number(plan?.pointerCount ?? 0),
     tapeChars,
     review,
+    // TD-11: kept on the record so `graft_commit`/debug tooling can tell that this review carried
+    // model-supplied content, and which kind. The digest already covers it structurally.
+    handoverPendingCount,
+    handoverNoteCount,
     // v7.4: keep the chunk bodies so commit can tell a stale TAIL (expected while
     // the session slices itself) from a changed HISTORY (a real reason to refuse).
     chunks: (Array.isArray(plan?.chunks) ? plan.chunks : []).map((chunk: any) => ({
@@ -12977,6 +13088,37 @@ async function appendTransitionCard(
             'Slice a source that was already migrated (retired or transferred). Default false — ' +
             're-slicing a handed-off conversation is how two divergent targets appear.',
         },
+        handover: {
+          type: 'object',
+          /**
+           * TD-11: the model's own handoff content. Two fields, and the exclusions are the design
+           * (see `ModelHandover`): no `goal` (TD-18 owns that field) and no `constraints` — a model
+           * may not author a red line, because that would bypass `shapeOfConstraint`.
+           *
+           * `additionalProperties: false` is deliberate: an undeclared field must fail loudly
+           * rather than be silently dropped, which is how a caller would come to believe it had
+           * supplied a constraint.
+           */
+          description:
+            'Optional content YOU supply for this handoff, overriding the extracted defaults. ' +
+            '`pending` replaces the 待开始 column (labelled 「模型提供」 there); `notes` is appended ' +
+            'as a labelled section. Constraints and the goal are NOT settable here on purpose: ' +
+            'constraints may only be extracted from the source log (they pass a shape judge), and ' +
+            'the goal comes from the session objective.',
+          properties: {
+            pending: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Next actions, in order. Replaces the transcript-derived 待开始 list.',
+            },
+            notes: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Extra context for the target, rendered as its own labelled section.',
+            },
+          },
+          additionalProperties: false,
+        },
       },
       required: [],
       additionalProperties: false,
@@ -13013,11 +13155,33 @@ async function appendTransitionCard(
         )
       }
       assertResliceAllowed(sourceSessionId, args.allowReslice === true)
+      /**
+       * TD-11: read the optional `handover`. Only `pending` and `notes` are read; anything else
+       * in the object is ignored rather than silently accepted (the schema already refuses
+       * undeclared fields, so reaching here with one means a caller bypassed validation —
+       * ignoring unknown keys is the fail-closed half of that pair).
+       */
+      const rawHandover = isRecord(args.handover) ? args.handover : undefined
+      const asStringList = (value: unknown): string[] | undefined => {
+        if (!Array.isArray(value)) return undefined
+        const items = value.filter((item): item is string => typeof item === 'string')
+        return items.length === 0 ? undefined : items
+      }
+      const handoverPending = rawHandover === undefined ? undefined : asStringList(rawHandover.pending)
+      const handoverNotes = rawHandover === undefined ? undefined : asStringList(rawHandover.notes)
+      const handover =
+        handoverPending === undefined && handoverNotes === undefined
+          ? undefined
+          : {
+              ...(handoverPending === undefined ? {} : { pending: handoverPending }),
+              ...(handoverNotes === undefined ? {} : { notes: handoverNotes }),
+            }
       return prepareSlice(
         ctx,
         settings,
         sourceSessionId,
         typeof args.targetSessionId === 'string' && args.targetSessionId.length > 0 ? args.targetSessionId : undefined,
+        handover,
       )
     },
   })
