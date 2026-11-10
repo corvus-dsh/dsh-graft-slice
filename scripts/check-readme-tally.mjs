@@ -74,11 +74,25 @@ export function measureSuite() {
    * Without this split the gate had to choose between a permanent false red on CI and a hole where
    * "skipped 2→4, total unchanged" stayed green. Splitting makes the documented number exact everywhere.
    */
+  /**
+   * ── TAP PRINTS SKIPS AS BOTH `ok … # SKIP` AND `not ok … # SKIP` ────────────────────────────────
+   *
+   * Measured: this checkout has `# skipped 2`, and the two lines are
+   *
+   *     ok 369 - D2 control: … # SKIP TD-17 ruled to KEEP this behaviour: …
+   *     not ok 373 - C1: a pasted REPORT … # SKIP pending a ruling on goal semantics
+   *
+   * The second one starts with `not ok` because the test was DECLARED as skipped via `t.skip()` while
+   * still being reported through the failing channel. A classifier keyed on `^ok ` therefore counted
+   * 1 pending when the truth was 2 — the gate's INPUT was wrong, which is the same failure class as the
+   * empty-set green (rule 27): a number with no correct denominator.
+   */
   const RESOURCE_MARKER = /RESOURCE_MISSING|corpus absent|observer source absent|ledger absent|sibling/i
   let pending = 0
   let resource = 0
   for (const line of output.split(/\r?\n/)) {
-    if (!/# SKIP/.test(line)) continue
+    // `ok N - … # SKIP …` OR `not ok N - … # SKIP …`; the directive is what decides, not the status verb.
+    if (!/^(?:not )?ok \d+ - .*# SKIP/u.test(line)) continue
     if (RESOURCE_MARKER.test(line)) resource += 1
     else pending += 1
   }
