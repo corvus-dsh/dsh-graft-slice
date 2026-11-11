@@ -26,7 +26,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -45,20 +45,71 @@ import { stripTypeScriptTypes } from 'node:module'
  */
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
 const SOURCE = join(REPO, 'src', 'core', 'store-layer.ts')
-const OUT_DIR = mkdtempSync(join(tmpdir(), 'dsh-store-layer-'))
-const OUT_FILE = join(OUT_DIR, 'store-layer.mjs')
 
 /**
- * Load the layer from source once. `mode: 'strip'` is what the build uses; the module's only type
- * import is `import type`, which stripping removes — so the emitted file has no imports beyond
- * `node:path`, exactly as in the bundle.
+ * ── EMIT A MIRRORED TREE, NOT A LONE FILE (this took two failed attempts) ───────────────────────
+ *
+ * `store-layer.ts` has TWO runtime imports that survive type stripping:
+ *
+ *     import { join } from 'node:path'
+ *     import { isRecord } from '../utils/serialize.js'
+ *
+ * The first attempt wrote the stripped module into `os.tmpdir()`, so `../utils/serialize.js` resolved
+ * to `%TEMP%/utils/serialize.js` → ERR_MODULE_NOT_FOUND. The second wrote it into `src/core/`, where
+ * the path is right but the SOURCE TREE CONTAINS `.ts`, NOT `.js` → still ERR_MODULE_NOT_FOUND:
+ *
+ *     Cannot find module '…/src/utils/serialize.js'
+ *
+ * So the only correct approach is to MIRROR the real graph: every `.ts` the emitted module reaches at
+ * runtime is stripped into a parallel tree under a temp root that has `{"type":"module"}`, preserving
+ * relative paths. `utils/serialize.ts` has zero imports (measured), so the walk stops there.
  */
-const layer = await (async () => {
-  const source = readFileSync(SOURCE, 'utf8')
-  const emitted = stripTypeScriptTypes(source, { mode: 'strip' })
-  writeFileSync(OUT_FILE, emitted, 'utf8')
-  return import(pathToFileURL(OUT_FILE).href)
-})()
+const EMIT_ROOT = mkdtempSync(join(tmpdir(), 'dsh-store-layer-'))
+writeFileSync(join(EMIT_ROOT, 'package.json'), '{"type":"module"}\n', 'utf8')
+
+const emit = (sourcePath, relativePath) => {
+  const text = readFileSync(sourcePath, 'utf8')
+  const emitted = stripTypeScriptTypes(text, { mode: 'strip' })
+  const outPath = join(EMIT_ROOT, relativePath)
+  mkdirSync(dirname(outPath), { recursive: true })
+  writeFileSync(outPath, emitted, 'utf8')
+
+  // Recurse over RELATIVE runtime specifiers only (`node:` ones are left to the runtime).
+  for (const match of emitted.matchAll(/from\s+'(\.[^']+)'/gu)) {
+    const specifier = match[1]
+    if (!specifier.endsWith('.js')) continue
+    const targetRelative = join(dirname(relativePath), specifier)
+    const targetSource = join(dirname(sourcePath), `${specifier.slice(0, -'.js'.length)}.ts`)
+    emit(targetSource, targetRelative)
+  }
+  return outPath
+}
+
+const EMITTED = emit(SOURCE, join('core', 'store-layer.js'))
+
+/**
+ * ── THE ENVIRONMENT IS AN INPUT, SO NEUTRALISE IT ONCE, UP FRONT ───────────────────────────────
+ *
+ * `resolveStoreDir` reads `DSH_PROFILE_DIR` / `DSH_HOME` / `DSH_PROFILE`. Those are SET on developer
+ * machines (measured: `DSH_PROFILE_DIR` is present here), so any assertion about the fallback or about
+ * "the array must not be taken" depends on the ambient shell unless they are cleared.
+ *
+ * This has to happen BEFORE the tests run and stay cleared, not inside one test: a `delete` performed
+ * after the module loads is still visible to later calls, but doing it per-test made the ordering
+ * fragile — measured: the control case failed because a previous test's `finally` had restored them.
+ */
+const SAVED_ENV = {
+  DSH_PROFILE_DIR: process.env.DSH_PROFILE_DIR,
+  DSH_HOME: process.env.DSH_HOME,
+  DSH_PROFILE: process.env.DSH_PROFILE,
+}
+for (const name of Object.keys(SAVED_ENV)) delete process.env[name]
+
+/**
+ * Import the mirrored tree. `stripTypeScriptTypes(mode:'strip')` is the same call the build makes, so
+ * what loads here is the same code the bundle will contain (minus inlining).
+ */
+const layer = await import(pathToFileURL(EMITTED).href)
 
 const freshDir = () => mkdtempSync(join(tmpdir(), 'dsh-store-dir-'))
 const makeCtx = (dataDir) => ({
@@ -66,6 +117,23 @@ const makeCtx = (dataDir) => ({
   sessions: { get: () => undefined, prepare: () => ({}) },
   sessionQuery: { readSession: async () => ({ session: { id: 'x' } }) },
   get: (name) => (name === 'paths' ? { data: dataDir } : undefined),
+  on: () => () => {},
+})
+
+/**
+ * A context whose `ctx.get('paths')` returns EXACTLY what is passed — no `{ data: … }` wrapping.
+ *
+ * Needed by test ⑦, and the first draft got this wrong: it called `makeCtx({ data: hostDir })`, which
+ * wraps again into `{ data: { data: hostDir } }` — a record whose `.data` is not a string, so the
+ * resolver fell through and the control case failed for a reason that had nothing to do with arrays.
+ * A test helper that silently changes the shape it is asked to provide is the same class of defect as
+ * everything else in this project's "instrument ≠ reality" list.
+ */
+const makeCtxWithRawPaths = (rawPaths) => ({
+  tools: { register: () => () => {} },
+  sessions: { get: () => undefined, prepare: () => ({}) },
+  sessionQuery: { readSession: async () => ({ session: { id: 'x' } }) },
+  get: (name) => (name === 'paths' ? rawPaths : undefined),
   on: () => () => {},
 })
 
@@ -126,7 +194,37 @@ test('v132: the layer is FROZEN (a path set that can be edited is not a constant
     'assigning to a frozen path set must throw in strict mode')
 })
 
-// Cleanup: the temporary emitted module, not the fixture directories (they are per-test temp dirs).
-test.after(() => {
-  try { rmSync(OUT_DIR, { recursive: true, force: true }) } catch { /* best effort */ }
+test('v132 ⑦: an ARRAY from the host does not count as a record (isRecord semantics)', () => {
+  /**
+   * ── FOUND BY READING THE OLD BRANCH, NOT BY A FAILING TEST ──────────────────────────────────────
+   *
+   * The first version tested `paths !== null && typeof paths === 'object'`, which accepts an array.
+   * The implementation this will be diffed against uses `isRecord`:
+   *
+   *     typeof value === 'object' && value !== null && !Array.isArray(value)
+   *
+   * Arrays CAN carry a `.data` property, so the loose test would take `paths.data` where the old code
+   * falls through. That is a divergence on exactly the input that decides which sessions a pre-step
+   * gate refuses — so it is asserted here even though the old code makes it unreachable today.
+   *
+   * ── WHY THIS ASSERTS `scope` AND NOT THE RESULTING DIRECTORY ─────────────────────────────────
+   *
+   * The first draft also asserted `paths.dir === fallbackDir`. It failed — because the machine running
+   * the tests has `DSH_PROFILE_DIR` / `DSH_HOME` set, and branches 3/4 legitimately win over the
+   * fallback. The claim being tested is "an array is not a record", and `scope` states it exactly,
+   * without making the test depend on the ambient environment.
+   */
+  const hostDir = freshDir()
+  const arrayWithData = Object.assign([], { data: hostDir })
+
+  // `SAVED_ENV` was neutralised once at the top of this file, so both halves are environment-independent.
+  // (Doing it per-test was fragile: a previous test's restore put the variables back.)
+  const recordLayer = layer.createStoreLayer(makeCtxWithRawPaths({ data: hostDir }), { fallbackDir: freshDir() })
+  assert.equal(recordLayer.paths.scope, 'paths.data', 'a real record IS taken')
+  assert.equal(recordLayer.paths.dir, hostDir)
+
+  const arrayLayer = layer.createStoreLayer(makeCtxWithRawPaths(arrayWithData), { fallbackDir: freshDir() })
+  assert.notEqual(arrayLayer.paths.scope, 'paths.data',
+    'an ARRAY is not a record — it must fall through instead of reading paths.data')
+  assert.notEqual(arrayLayer.paths.dir, hostDir)
 })

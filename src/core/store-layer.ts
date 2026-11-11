@@ -24,6 +24,7 @@
  */
 
 import { join } from 'node:path'
+import { isRecord } from '../utils/serialize.js'
 import type { PluginContextLike } from './gateway-types.js'
 
 /** The config subset the resolver reads. Structural, so `index.ts` can pass its `GraftConfig` as-is. */
@@ -94,13 +95,24 @@ export function resolveStoreDir(ctx: PluginContextLike | undefined, config: Stor
     // Cordis service proxies may reject undeclared property reads; that is not a resolution failure.
     paths = undefined
   }
-  if (
-    paths !== null
-    && typeof paths === 'object'
-    && typeof (paths as { data?: unknown }).data === 'string'
-    && ((paths as { data: string }).data).length > 0
-  ) {
-    return { dir: (paths as { data: string }).data, scope: 'paths.data' }
+  /**
+   * ── `isRecord`, NOT `typeof === 'object'` (measured divergence, fixed before P2) ────────────────
+   *
+   * The first version tested `paths !== null && typeof paths === 'object'`, which ACCEPTS AN ARRAY.
+   * `isRecord` — the predicate the implementation being diffed uses — rejects arrays explicitly:
+   *
+   *     typeof value === 'object' && value !== null && !Array.isArray(value)
+   *
+   * What the host returns from `ctx.get('paths')` is not ours to decide. `['a','b']` has no `.data`,
+   * so today both versions fall through — but the moment a shape arrives whose meaning depends on the
+   * predicate (`{ 0: …, data: … }` vs an array with a `data` property), P3 would disagree on exactly
+   * the input that decides which sessions a pre-step gate refuses.
+   *
+   * Imported rather than re-implemented: `utils/serialize.ts` has ZERO imports (measured), so sharing
+   * the predicate cannot create a cycle, and a copy would be a second definition waiting to drift.
+   */
+  if (isRecord(paths) && typeof paths.data === 'string' && paths.data.length > 0) {
+    return { dir: paths.data, scope: 'paths.data' }
   }
 
   const profileDir = process.env.DSH_PROFILE_DIR
