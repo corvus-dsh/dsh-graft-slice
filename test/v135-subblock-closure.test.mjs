@@ -145,7 +145,29 @@ test('v135 ①: a whole-declaration RANGE reproduces the whole-declaration CLOSU
   assert.equal(whole.code, 0, whole.output)
   const wholeDeclarations = Number(/declarations\s*: (\d+)/u.exec(whole.output)?.[1])
 
-  const block = run(['--block', 'src/core/adaptive-depth.ts', '17', '141'])
+  /**
+   * ── THE RANGE IS THE FILE'S OWN DECLARATIONS, LOCATED NOT REMEMBERED ────────────────────────────
+   *
+   * This was hard-coded as 17..141. Those numbers were correct on the day they were typed and are
+   * fragile by construction: `core/adaptive-depth.ts` may gain or lose a line, and then this sample
+   * silently measures a different range (or one that no longer ends where it claims).
+   *
+   * The question this sample asks is: "does a whole-file declaration range reproduce the whole-function
+   * closure?" So the range is DERIVED from the file — first declaration line to last line of code.
+   */
+  const adaptiveDepthRange = (() => {
+    const lines = readFileSync(new URL('../src/core/adaptive-depth.ts', import.meta.url), 'utf8').split('\n')
+    const isCode = (line) => {
+      const trimmed = line.trim()
+      return trimmed !== '' && !trimmed.startsWith('//') && !trimmed.startsWith('/*') && !trimmed.startsWith('*')
+    }
+    const first = lines.findIndex((line) => /^(?:export\s+)?(?:interface|type|function|const)\s+/u.test(line))
+    let last = lines.length - 1
+    while (last > 0 && !isCode(lines[last])) last -= 1
+    return { start: first + 1, end: last + 1 }
+  })()
+  assert.ok(adaptiveDepthRange.start > 0, 'adaptive-depth.ts must contain a declaration')
+  const block = run(['--block', 'src/core/adaptive-depth.ts', String(adaptiveDepthRange.start), String(adaptiveDepthRange.end)])
   assert.equal(block.code, 0, block.output)
 
   const localCount = fieldNumber(block.output, 'local declarations')
@@ -221,6 +243,9 @@ test('v135: a range with NO outside dependencies reports an empty set (the viabl
    * The useful answer for a candidate cut is `OUTSIDE declarations: 0` — nothing has to be threaded in.
    * A range of pure comments/whitespace is the simplest such range and must not invent dependencies.
    */
+  // Line 1..5 of index.ts is a shebang-free file header (comments only). This range is NOT a source
+  // address that a move can invalidate: it asserts "a comment-only range reports no dependencies", which
+  // holds at the top of any file. Kept literal deliberately — the point is the CONTENT, not the place.
   const { output, code } = run(['--block', 'src/index.ts', '1', '5'])
   assert.equal(code, 0, output)
   assert.equal(fieldNumber(output, 'OUTSIDE declarations'), 0, 'a comment-only range depends on nothing')
@@ -230,6 +255,8 @@ test('v135: a range with NO outside dependencies reports an empty set (the viabl
 test('v135: an unknown file is a NAMED failure, not a crash', (t) => {
   if (requireCompiler(t) === undefined) return
 
+  // 999999..1000000 is an OUT-OF-RANGE INPUT, not an address: the assertion is that a range beyond the
+  // file is answered with an empty set rather than crashing. A move cannot invalidate it.
   const { output, code } = run(['--block', 'src/index.ts', '999999', '1000000'])
   assert.equal(code, 0, 'a range beyond the file should still be answered (empty), not crash')
   assert.match(output, /block index\.ts/u)
