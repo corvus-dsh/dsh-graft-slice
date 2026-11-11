@@ -72,36 +72,39 @@ const requireCompiler = (t) => {
 }
 
 
-test('v138: comments AND string literals are blanked, and a regex literal cannot swallow the file', () => {
+test('v138: spans come from the COMPILER, not from a second parser', () => {
   /**
-   * Three attempts, three wrong numbers — each found by a NUMBER, not by reading:
+   * ── SIX WRONG ANSWERS, THEN THE PARSER WAS DELETED ──────────────────────────────────────────────
    *
-   *   1. per-line block-comment stripping -> GraftConfig vanished (inject swallowed to L767)
-   *   2. "closed when a { was seen" -> the same
-   *   3. a whole-file character state machine -> it could not tell a REGEX LITERAL from a comment.
-   *      Reproduced at src/index.ts L990: `const SESSION_SCOPE_PATTERN = /(for the rest of this session|…`
-   *      made it swallow the rest of the file, so tokenSet / nearDuplicate / normalizedEqual vanished and
-   *      cluster 1 measured 545 instead of 558.
+   * move-gate used to parse TypeScript spans itself. In one afternoon that scanner produced six
+   * distinct wrong answers (braces-only; per-line block comments; a state machine that could not tell a
+   * regex literal from a comment; object keys read as variables; a bracket counter defeated by
+   * template-literal `${` nesting, which measured buildInjectionPlan at 4,002 lines against the
+   * compiler's 744; and a multi-line signature treated as a closed body).
    *
-   * The rule now is line-oriented: comment-only lines are skipped whole, and a trailing `//` is cut
-   * only when whitespace precedes it. This test pins the THREE things that broke.
+   * The fix is not a better regex. `closure.mjs --declarations` emits the compiler's own span table and
+   * move-gate consumes it, so there is exactly ONE truth about where a declaration starts and ends.
+   *
+   * This test pins that architecture, and the calibration below pins its numbers.
    */
   const gateSource = readFileSync(GATE, 'utf8')
-  assert.match(gateSource, /const COMMENT_ONLY =/u, 'comment-only lines are recognised')
-  assert.match(gateSource, /function cutTrailingLineComment/u, 'a trailing comment is cut, not the whole line')
-  assert.ok(gateSource.includes("line[index + 1] === '/' && index > 0"),
-    'a `//` must be whitespace-led before it counts as a comment — otherwise a regex literal is eaten')
-  assert.ok(gateSource.includes('/\\s/u.test(line[index - 1])'),
-    'the whitespace test is what keeps `a || /x/.test` safe')
-  assert.match(gateSource, /function blankStringLiterals/u, 'a name inside a string is not a reference')
+  assert.ok(gateSource.includes("'--declarations'"),
+    'the gate must ask closure.mjs for the compiler span table')
+  assert.match(gateSource, /declarationTable/, 'and consume it as a table')
+  assert.doesNotMatch(gateSource, /function moduleDeclarations/u,
+    'the hand-written span parser must NOT come back — a second parser is a second truth')
 
-  // behavioural: the three declarations attempt 3 lost must be found
-  const threeOneLiners = gateJson('tokenSet')  // single-name probe keeps this cheap
-  assert.ok(threeOneLiners.A.measured.declarations.length > 0, 'tokenSet must be found')
+  // The two containers are the values this whole phase is built on.
+  const report = gateJson('buildTape')
+  const container = report.A.measured.declarations.find((entry) => entry.name === 'buildTape')
+  assert.deepEqual({ start: container.start, end: container.end, lines: container.lines },
+    { start: 3426, end: 3921, lines: 496 })
 
-  const report = gateJson('extractGoal')
-  assert.ok(report.A.measured.declarations.length > 0)
-  assert.equal(report.A.measured.declarations[0].lines, 208, 'extractGoal is 208 lines')
+  // And the declaration the old scanner lost entirely, because buildInjectionPlan swallowed it.
+  const forced = gateJson('noteForcedCut')
+  assert.equal(forced.A.verdict, 'YES')
+  assert.equal(forced.A.measured.declarations[0].lines, 7,
+    'noteForcedCut was invisible while buildInjectionPlan measured 4,002 lines')
 })
 
 test('v138: C4 can actually DETECT a read of a container local (its 0 must mean something)', (t) => {
@@ -169,7 +172,8 @@ test('v138: the declaration parser reproduces independently-known spans', () => 
   const config = report.A.measured.declarations.find((entry) => entry.name === 'GraftConfig')
   assert.ok(config !== undefined, 'GraftConfig must be FOUND — the first bug made it vanish')
   assert.equal(config.lines, 288, 'the cluster is 288 lines wherever it lives')
-  assert.equal(config.kind, 'type', 'and it is a type, which is why the move is artifact-zero')
+  assert.equal(config.kind, 'InterfaceDeclaration',
+    'the compiler names the kind; a type still compiles to nothing, which is why the move is artifact-zero')
 
   // buildTape is the container C4 depends on; if it is not parsed, C4 is a false pass.
   // Its SIZE is the calibration anchor (496); its line numbers moved by exactly the moved line count.

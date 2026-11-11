@@ -78,74 +78,61 @@ function sourceFiles(dir) {
 }
 
 /**
- * ── LINE-ORIENTED PARSING: THREE ATTEMPTS, THREE WRONG NUMBERS, THEN THIS ──────────────────────────
+ * ── SPANS COME FROM THE COMPILER, NOT FROM A SECOND PARSER ──────────────────────────────────────
  *
- * 1. Braces only, per line. A JSDoc listing braces made `export const inject` (ONE line) swallow to
- *    L767, so GraftConfig vanished and tier A reported "288 lines — YES" for a declaration it never
- *    found.
- * 2. Braces and parens with a `sawBody` flag. `const inject = [...]` has no braces, so it ran to the
- *    next `{` — GraftConfig's again.
- * 3. A whole-file character state machine. It could not tell a REGEX LITERAL from a comment: reproduced
- *    at `src/index.ts` L990, `const SESSION_SCOPE_PATTERN = /(for the rest of this session|…`, where the
- *    scanner entered "line comment" state and swallowed the rest of the file — **tokenSet, nearDuplicate
- *    and normalizedEqual disappeared**, so cluster 1 measured 545 instead of 558.
+ * Six wrong answers in one afternoon, all from a hand-written scanner trying to do what the TypeScript
+ * compiler already does:
  *
- * WHAT IT DOES NOW: a declaration starts only at a line start; comment-only lines are skipped whole;
- * a trailing line comment is cut only when the `//` is preceded by whitespace (so `a || /x/.test` is
- * safe); depth counts `{ ( [` minus `} ) ]` on what remains.
+ *   1. counting only `{}` — `export function buildTape(` opens its brace nine lines later, so the
+ *      function measured 0 lines and tier C4 reported "0 local assignments" (a false PASS)
+ *   2. per-line block-comment stripping — `export const inject` swallowed to L767, GraftConfig vanished
+ *   3. a character state machine that cannot tell a REGEX LITERAL from a comment — L990's
+ *      `/(for the rest …` ate the rest of the file, losing tokenSet / nearDuplicate / normalizedEqual
+ *   4. object-literal keys and property accesses counted as variable reads
+ *   5. a bracket counter that could not handle template-literal `${` nesting — `buildInjectionPlan`
+ *      measured **4,002 lines against the compiler's 744**, swallowing 3,258 lines of unrelated
+ *      declarations (including `noteForcedCut`, which then disappeared from every downstream count and
+ *      made the span sum disagree with the closure by 25 lines)
+ *   6. treating a multi-line signature as a closed body
  *
- * This is not a lexer and does not pretend to be one. It is CALIBRATED: four known spans must match, and
- * three one-line declarations that attempt 3 lost must be found again. Both checks live in
- * test/v138-move-gate.test.mjs.
+ * The lesson is not "write a better regex". It is: **a second parser is a second truth**, and two truths
+ * drift. `closure.mjs --declarations` now emits the compiler's own span table, and this file consumes it.
+ * The calibration (six known spans, plus "span sum == closure lines") lives in test/v138-move-gate.test.mjs.
  */
-const COMMENT_ONLY = /^\s*(?:\/\*|\*|\/\/)/u
+const declarationTable = (() => {
+  const output = execFileSync(process.execPath, [TOOL, '--declarations'], {
+    encoding: 'utf8', maxBuffer: 128 * 1024 * 1024,
+  })
+  // the banner (compiler version + path) precedes the JSON; the table is the last line
+  const json = output.trim().split('\n').pop()
+  const rows = JSON.parse(json)
+  const byName = new Map()
+  for (const row of rows) if (!byName.has(row.name)) byName.set(row.name, row)
+  return { rows, byName }
+})()
 
-/** Cut a trailing `// …` comment, but never inside a string and never a `//` that is not whitespace-led. */
-function cutTrailingLineComment(line) {
-  let quote
-  for (let index = 0; index < line.length; index++) {
-    const char = line[index]
-    if (quote !== undefined) {
-      if (char === '\\') { index += 1; continue }
-      if (char === quote) quote = undefined
-      continue
-    }
-    if (char === "'" || char === '"' || char === '`') { quote = char; continue }
-    if (char === '/' && line[index + 1] === '/' && index > 0 && /\s/u.test(line[index - 1])) {
-      return line.slice(0, index)
-    }
-  }
-  return line
-}
+const indexDeclarations = new Map(
+  declarationTable.rows.filter((row) => row.file === 'index.ts').map((row) => [row.name, row]),
+)
 
-/** Depth contributed by one line, comments removed. */
-function depthOfLine(line) {
-  if (COMMENT_ONLY.test(line)) return 0
-  const code = cutTrailingLineComment(line)
-  let depth = 0
-  for (const char of code) {
-    if (char === '{' || char === '(' || char === '[') depth += 1
-    else if (char === '}' || char === ')' || char === ']') depth -= 1
-  }
-  return depth
-}
+
 
 /**
- * The file's lines with comments AND string literals blanked out, LINE COUNT PRESERVED so a reported
- * line number still points at the real source line.
+ * ── A CLUSTER MAY ALREADY LIVE IN ITS OWN MODULE ────────────────────────────────────────────────
  *
- * ── A NAME INSIDE A STRING IS NOT A REFERENCE — THE THIRD TIME THIS BIT ──────────────────────
+ * The first version parsed only `src/index.ts`, because every target happened to be there. After
+ * GraftConfig moved to `core/graft-config.ts`, tier A reported "0 行 — YES": a pass on something the
+ * gate had not found at all. That is the same failure shape this phase keeps finding (a green number
+ * with no correct denominator), so the gate now resolves a cluster across the whole tree and says
+ * WHICH FILE it found it in.
+ */
+/**
+ * The file's lines with comments AND string literals blanked, LINE COUNT PRESERVED.
  *
- * Measured: `src/contracts/model-wording.contracts.ts:63` contains
- * `'所以本契约只做召回：真正的判定在调用点的 isHumanAuthored / isQuestionLike 两步过滤之后。' +`
- * — a CONTRACT TEST FIXTURE quoting the words. Counting it made tier C2 report
- * `contracts/model-wording.contracts.ts` as a production caller of cluster 1, i.e. a REVIEW that would
- * have blocked a legitimate move.
- *
- * The same defect appeared twice before, one layer up each time: a name in a COMMENT (C2 /
- * GraftConfig), then a name in a COMMENT inside the cluster being scanned (C4 / extractGoal), now a name
- * in a STRING. A scanner that only knows about one of the three will keep producing confident wrong
- * answers, so this one knows about all three.
+ * Kept separate from span parsing on purpose: this function answers "what does this line SAY", and a
+ * hand-rolled answer to that question is good enough (three false-positive sources were found and fixed
+ * here — a name in a comment, a name in a string, a property key). Span parsing is a DIFFERENT question
+ * and is now delegated to the compiler, because a hand-rolled answer to THAT produced six wrong numbers.
  */
 function codeLinesOf(file) {
   const lines = readFileSync(file, 'utf8').split('\n')
@@ -169,7 +156,7 @@ function codeLinesOf(file) {
   return out
 }
 
-/** Replace the CONTENT of string / template literals with spaces, keeping the delimiters and the length. */
+/** Replace the CONTENT of string literals with spaces, keeping delimiters and length. */
 function blankStringLiterals(line) {
   let out = ''
   let index = 0
@@ -190,66 +177,28 @@ function blankStringLiterals(line) {
   return out
 }
 
-function moduleDeclarations(file) {
-  const lines = readFileSync(file, 'utf8').split('\n')
-  const found = new Map()
-  const DECL = /^(?:export\s+)?(?:declare\s+)?(?:async\s+)?(interface|type|function|const|let|var|class)\s+([A-Za-z_$][\w$]*)/u
-
-  for (let index = 0; index < lines.length; index++) {
-    if (COMMENT_ONLY.test(lines[index])) continue
-    const decl = DECL.exec(lines[index])
-    if (decl === null) continue
-    const keyword = decl[1]
-    const name = decl[2]
-    if (found.has(name)) continue
-    const kind = keyword === 'interface' || keyword === 'type' ? 'type'
-      : keyword === 'function' ? 'function'
-        : keyword === 'class' ? 'class' : 'value'
-
-    // `type X = A | B` has no bracketed body and ends on its own line.
-    if (keyword === 'type' && depthOfLine(lines[index]) === 0) {
-      found.set(name, { name, kind, start: index + 1, end: index + 1, lines: 1 })
+/** Cut a trailing `// …`, but never inside a string and never a `//` that is not whitespace-led. */
+function cutTrailingLineComment(line) {
+  let quote
+  for (let index = 0; index < line.length; index++) {
+    const char = line[index]
+    if (quote !== undefined) {
+      if (char === '\\') { index += 1; continue }
+      if (char === quote) quote = undefined
       continue
     }
-
-    let depth = 0
-    let endLine = index
-    for (let cursor = index; cursor < lines.length; cursor++) {
-      depth += depthOfLine(lines[cursor])
-      endLine = cursor
-      if (cursor > index && depth <= 0) break
-      if (cursor === index && depth <= 0) break // a declaration that opens and closes on one line
-      if (cursor - index > 4000) break // safety valve against a malformed file
+    if (char === "'" || char === '"' || char === '`') { quote = char; continue }
+    if (char === '/' && line[index + 1] === '/' && index > 0 && /\s/u.test(line[index - 1])) {
+      return line.slice(0, index)
     }
-
-    found.set(name, { name, kind, start: index + 1, end: endLine + 1, lines: endLine - index + 1 })
-    index = endLine
   }
-  return found
+  return line
 }
 
-/**
- * ── A CLUSTER MAY ALREADY LIVE IN ITS OWN MODULE ────────────────────────────────────────────────
- *
- * The first version parsed only `src/index.ts`, because every target happened to be there. After
- * GraftConfig moved to `core/graft-config.ts`, tier A reported "0 行 — YES": a pass on something the
- * gate had not found at all. That is the same failure shape this phase keeps finding (a green number
- * with no correct denominator), so the gate now resolves a cluster across the whole tree and says
- * WHICH FILE it found it in.
- */
-const indexDeclarations = moduleDeclarations(INDEX)
-
-/** Every module-scope declaration under src/, keyed by name, with the file it came from. */
-const allDeclarations = new Map()
-for (const file of sourceFiles(SRC)) {
-  const rel = relative(SRC, file).split('\\').join('/')
-  for (const [name, span] of moduleDeclarations(file)) {
-    if (!allDeclarations.has(name)) allDeclarations.set(name, { ...span, file: rel })
-  }
-}
+const allDeclarations = declarationTable.byName
 
 /** Resolve a cluster name to wherever it actually lives. */
-const resolveDeclaration = (name) => allDeclarations.get(name) ?? indexDeclarations.get(name)
+const resolveDeclaration = (name) => allDeclarations.get(name)
 
 const runClosure = (name) => {
   try {

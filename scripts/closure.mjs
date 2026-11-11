@@ -305,6 +305,38 @@ function measureWithTypeScript(ts) {
    */
   return {
     closureOf,
+    /**
+     * ── THE AUTHORITATIVE SPAN LIST, SO NOBODY RE-IMPLEMENTS THIS BADLY ──────────────────────────
+     *
+     * `scripts/move-gate.mjs` needs every module-scope declaration with its exact line span. Its first
+     * version parsed the file itself with a hand-written scanner, and that scanner produced SIX distinct
+     * wrong answers in one afternoon — the last of which was `buildInjectionPlan` measured at 4,002 lines
+     * when the compiler says 744, swallowing 3,258 lines of unrelated declarations (including
+     * `noteForcedCut`, which then vanished from every downstream count).
+     *
+     * A second parser is a second truth. The compiler already knows where each declaration starts and
+     * ends (`node.getStart()` / `node.getEnd()`), so this exposes that instead of letting a regex guess.
+     *
+     * Returns `{ name, kind, file, start, end, lines }[]` for every module-scope declaration in the
+     * TypeScript program, sorted by file then start line.
+     */
+    declarationsOf() {
+      const out = []
+      for (const [file, declarations] of perFile) {
+        for (const declaration of declarations.values()) {
+          out.push({
+            name: declaration.name,
+            kind: declaration.kind,
+            mutable: declaration.mutable,
+            file: relative(SRC, file).split('\\').join('/'),
+            start: declaration.start,
+            end: declaration.end,
+            lines: declaration.end - declaration.start + 1,
+          })
+        }
+      }
+      return out.sort((left, right) => left.file.localeCompare(right.file) || left.start - right.start)
+    },
     /** @param {string} file absolute path @param {number} startLine 1-based @param {number} endLine 1-based inclusive */
     subBlockClosureOf(file, startLine, endLine) {
       const sourceFile = perFile.has(file) ? program.getSourceFile(file) : undefined
@@ -522,6 +554,18 @@ const blockRequest = (() => {
     }
     const instrument = measureWithTypeScript(ts)
     const closureOf = instrument.closureOf
+
+    /**
+     * ── `--declarations` : the compiler's span table, for tools that would otherwise re-parse ──────
+     *
+     * Emits JSON so a caller gets exactly what the compiler computed and cannot drift into its own
+     * interpretation. `move-gate.mjs` consumes this; nothing else should ever parse TypeScript spans.
+     */
+    if (process.argv.includes('--declarations')) {
+      console.log(JSON.stringify(instrument.declarationsOf()))
+      process.exit(0)
+    }
+
     if (targets.length === 0) {
       console.log('\ncalibration samples:')
       for (const name of SAMPLES) {
