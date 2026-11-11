@@ -27,7 +27,7 @@
  * identifiers, and its output is cross-checked against the compiler on known samples.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const REPO = fileURLToPath(new URL('..', import.meta.url))
@@ -233,7 +233,7 @@ function measureWithTypeScript(ts) {
     return names
   }
 
-  return function closureOf(targetName) {
+  function closureOf(targetName) {
     let seed
     let seedFile
     for (const [file, declarations] of perFile) {
@@ -282,6 +282,117 @@ function measureWithTypeScript(ts) {
         .map((d) => `${relative(SRC, d.file).split('\\').join('/')}:${d.name} [${d.kind}]${d.mutable ? ' MUTABLE' : ''}`)
         .sort(),
     }
+  }
+
+  /**
+   * ── SUB-BLOCK CLOSURE (added for the containers) ────────────────────────────────────────────────
+   *
+   * `closureOf` measures a whole top-level declaration. Both containers left in `index.ts`
+   * (`buildTape` 48/1,750 and `buildInjectionPlan` 110/3,705) exceed the 800-line cap, so splitting them
+   * means cutting a CLOSED SUB-BLOCK out of the middle — and the decision needs the same question asked
+   * about a line range: *what must travel with this block?*
+   *
+   * Given `(file, startLine, endLine)` it returns:
+   *   - `local`:   module-scope declarations declared INSIDE the range (they move with the block);
+   *   - `outside`: module-scope declarations the range REFERENCES but that are declared OUTSIDE it
+   *                (they must either move too, or be imported — this is the real boundary cost);
+   *   - `mutable`: mutable bindings among both sets (the STOP condition).
+   *
+   * Deliberate limitation, stated so it is not mistaken for a bug: it does not compute transitive
+   * closure of the OUTSIDE set. A sub-block cut is only viable when `outside` is empty or trivially
+   * importable, so reporting the direct outsiders is the useful signal; `closureOf` answers the
+   * transitive question once a candidate exists.
+   */
+  return {
+    closureOf,
+    /** @param {string} file absolute path @param {number} startLine 1-based @param {number} endLine 1-based inclusive */
+    subBlockClosureOf(file, startLine, endLine) {
+      const sourceFile = perFile.has(file) ? program.getSourceFile(file) : undefined
+      if (sourceFile === undefined) {
+        // Fall back to a name lookup: the caller may pass a path that TS normalised differently.
+        const normalised = normalise(file)
+        for (const candidate of program.getSourceFiles()) {
+          if (normalise(candidate.fileName) === normalised) {
+            return this.subBlockClosureOf2(candidate, startLine, endLine)
+          }
+        }
+        return undefined
+      }
+      return this.subBlockClosureOf2(sourceFile, startLine, endLine)
+    },
+    subBlockClosureOf2(sourceFile, startLine, endLine) {
+      const lineOf = (pos) => sourceFile.getLineAndCharacterOfPosition(pos).line + 1
+      const inRange = (node) => {
+        const start = lineOf(node.getStart(sourceFile))
+        const end = lineOf(node.getEnd())
+        return start >= startLine && end <= endLine
+      }
+      const overlapsRange = (node) => {
+        const start = lineOf(node.getStart(sourceFile))
+        const end = lineOf(node.getEnd())
+        return end >= startLine && start <= endLine
+      }
+
+      const declarations = perFile.get(sourceFile.fileName) ?? new Map()
+
+      /** Declarations fully inside the range. */
+      const local = new Map()
+      for (const [name, declaration] of declarations) {
+        if (declaration.start >= startLine && declaration.end <= endLine) local.set(name, declaration)
+      }
+
+      /** Names referenced anywhere inside the range, and declared OUTSIDE it. */
+      const outside = new Map()
+      let referenceCount = 0
+      const visit = (node) => {
+        if (ts.isIdentifier(node) && overlapsRange(node)) {
+          const parent = node.parent
+          const isDeclarationName = parent !== undefined && parent.name === node
+          const isPropertyName = parent !== undefined && ts.isPropertyAccessExpression(parent) && parent.name === node
+          if (!isDeclarationName && !isPropertyName) {
+            referenceCount += 1
+            const name = node.text
+            const declaration = declarations.get(name)
+            if (
+              declaration !== undefined
+              && !local.has(name)
+              && !(declaration.start >= startLine && declaration.end <= endLine)
+            ) {
+              outside.set(name, declaration)
+            }
+          }
+        }
+        ts.forEachChild(node, visit)
+      }
+      visit(sourceFile)
+
+      const describe = (declaration) =>
+        `${relative(SRC, declaration.file).split('\\').join('/')}:${declaration.name} [${declaration.kind}]${declaration.mutable ? ' MUTABLE' : ''}`
+
+      const mutable = [...local.values(), ...outside.values()]
+        .filter((declaration) => declaration.mutable)
+        .map((declaration) => `${declaration.name} (${declaration.kind})`)
+        .sort()
+
+      // Lines: the range itself plus every outside declaration that must travel with it.
+      const spanLines = (declaration) => declaration.end - declaration.start + 1
+      const outsideLines = [...outside.values()].reduce((sum, declaration) => sum + spanLines(declaration), 0)
+
+      return {
+        file: relative(SRC, sourceFile.fileName).split('\\').join('/'),
+        startLine,
+        endLine,
+        rangeLines: endLine - startLine + 1,
+        referenceCount,
+        localDeclarations: local.size,
+        local: [...local.values()].map(describe).sort(),
+        outsideDeclarations: outside.size,
+        outside: [...outside.values()].map(describe).sort(),
+        outsideLines,
+        totalLines: endLine - startLine + 1 + outsideLines,
+        mutable,
+      }
+    },
   }
 }
 
@@ -377,6 +488,24 @@ const isMain = process.argv[1] !== undefined && fileURLToPath(import.meta.url) =
 
 if (isMain) {
   const targets = process.argv.slice(2).filter((arg) => !arg.startsWith('--'))
+
+/**
+ * ── `--block <file> <startLine> <endLine>` (sub-block mode) ─────────────────────────────────────
+ *
+ * Parsed before the targets so the three numbers/arguments are not mistaken for symbol names.
+ */
+const blockRequest = (() => {
+  const index = process.argv.indexOf('--block')
+  if (index < 0) return undefined
+  const file = process.argv[index + 1]
+  const start = Number(process.argv[index + 2])
+  const end = Number(process.argv[index + 3])
+  if (file === undefined || !Number.isInteger(start) || !Number.isInteger(end)) {
+    console.error('usage: node scripts/closure.mjs --block <file> <startLine> <endLine>')
+    process.exit(2)
+  }
+  return { file, start, end }
+})()
   const { ts, path: tsPath, version } = await describeTypeScript()
 
   if (ts !== undefined) {
@@ -391,7 +520,8 @@ if (isMain) {
       console.log(`note: the compiler is NOT inside this package — it comes from the workspace above it.`)
       console.log(`      a fresh clone without that install exits 2 by design (see the fallback message).`)
     }
-    const closureOf = measureWithTypeScript(ts)
+    const instrument = measureWithTypeScript(ts)
+    const closureOf = instrument.closureOf
     if (targets.length === 0) {
       console.log('\ncalibration samples:')
       for (const name of SAMPLES) {
@@ -399,6 +529,31 @@ if (isMain) {
         console.log(result === undefined
           ? `  ${name}: NOT FOUND`
           : `  ${name.padEnd(26)} ${String(result.declarations).padStart(4)} decl / ${String(result.lines).padStart(6)} lines / mutable=${JSON.stringify(result.mutable)}`)
+      }
+    } else if (blockRequest !== undefined) {
+      /**
+       * ── SUB-BLOCK MODE: `--block <file> <startLine> <endLine>` ──────────────────────────────────
+       *
+       * Prints the LOCAL closure of a line range: what is declared inside it, what it references from
+       * outside, and the mutable bindings among both. This is the measurement the two containers
+       * (`buildTape`, `buildInjectionPlan`) need before any sub-block can be cut out of them.
+       */
+      const { file, start, end } = blockRequest
+      const absolute = file.includes('/') || file.includes('\\') ? resolve(SRC, '..', file) : resolve(SRC, file)
+      const result = instrument.subBlockClosureOf(absolute, start, end)
+      if (result === undefined) {
+        console.log(`block: FILE NOT FOUND (${absolute})`)
+        process.exitCode = 2
+      } else {
+        console.log('')
+        console.log(`block ${result.file}  L${result.startLine}..L${result.endLine}  (${result.rangeLines} lines)`)
+        console.log(`  references inside range : ${result.referenceCount}`)
+        console.log(`  local declarations      : ${result.localDeclarations}`)
+        for (const member of result.local) console.log(`    ${member}`)
+        console.log(`  OUTSIDE declarations    : ${result.outsideDeclarations}  (${result.outsideLines} lines)`)
+        for (const member of result.outside) console.log(`    ${member}`)
+        console.log(`  total lines if moved    : ${result.totalLines}`)
+        console.log(`  mutable                 : ${result.mutable.length === 0 ? 'none' : JSON.stringify(result.mutable)}`)
       }
     } else {
       for (const name of targets) {
