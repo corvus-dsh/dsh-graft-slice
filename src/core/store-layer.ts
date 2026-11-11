@@ -41,7 +41,7 @@ export interface StoreLayerConfig {
   fallbackDir: string
 }
 
-/** The seven store locations plus the directory they share. **Frozen**: a layer is a constant. */
+/** The store locations plus the directory they share. **Frozen**: a layer is a constant. */
 export interface StorePaths {
   readonly dir: string
   readonly scope: string
@@ -53,6 +53,18 @@ export interface StorePaths {
   readonly autoGraftSuppressed: string
   readonly constraintSections: string
   readonly pendingConstraints: string
+  /**
+   * ── THE THREE THAT THE CLOSURE NEVER REPORTED, AND P4 MUST STILL SWITCH ────────────────────────
+   *
+   * `closure.mjs` reports SEVEN module-level `let`s for `recoverGraftTransactions` — those three are
+   * simply not in its closure. But the old `configureRetiredStore` assigns ELEVEN paths in one block
+   * (measured: src/index.ts L5327..L5339), and switching only the seven the gate names would leave
+   * `drafts` / `prepared` / `pendingIgnition` pointing at the plugin directory while the rest moved.
+   * A half-switched store is worse than an unswitched one: it looks done.
+   */
+  readonly pendingIgnition: string
+  readonly drafts: string
+  readonly prepared: string
 }
 
 export interface StoreLayer {
@@ -70,6 +82,9 @@ const FILE_NAMES = {
   autoGraftSuppressed: '.auto-graft-suppressed.json',
   constraintSections: '.graft-constraint-sections.json',
   pendingConstraints: '.pending-constraints.json',
+  pendingIgnition: '.graft-pending-ignition.json',
+  drafts: '.graft-drafts.json',
+  prepared: '.graft-prepared.json',
 } as const
 
 /**
@@ -149,6 +164,9 @@ export function createStoreLayer(ctx: PluginContextLike | undefined, config: Sto
     autoGraftSuppressed: join(dir, FILE_NAMES.autoGraftSuppressed),
     constraintSections: join(dir, FILE_NAMES.constraintSections),
     pendingConstraints: join(dir, FILE_NAMES.pendingConstraints),
+    pendingIgnition: join(dir, FILE_NAMES.pendingIgnition),
+    drafts: join(dir, FILE_NAMES.drafts),
+    prepared: join(dir, FILE_NAMES.prepared),
   })
   return Object.freeze({ paths, ctx })
 }

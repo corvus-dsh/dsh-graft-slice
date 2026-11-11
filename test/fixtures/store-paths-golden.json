@@ -1,0 +1,91 @@
+{
+  "$comment": [
+    "GOLDEN FILE — produced by the OLD implementation (src/index.ts configureRetiredStore) BEFORE any",
+    "switch. Observed black-box: apply() creates the store directory and writes .layout.json inside it;",
+    "the ten file names are the literal constants the old code joins onto that directory.",
+    "Paths are recorded under the symbolic roots <HOST_DATA> / <CONFIG_DATA> so this file is portable.",
+    "Regenerate with: node ../_scratch/p2-golden.mjs"
+  ],
+  "generatedAt": "2026-11-11T03:50:09.292Z",
+  "sourceCommit": "ee0bbe2a57de40500d299bdcf08d472ad0227bb5",
+  "pathCount": 11,
+  "cases": [
+    {
+      "id": "no-config-dataDir",
+      "description": "no config.dataDir → the host path decides",
+      "clearedEnv": [
+        "DSH_PROFILE_DIR",
+        "DSH_HOME",
+        "DSH_PROFILE"
+      ],
+      "resolvedFrom": "ctx.paths.data",
+      "dir": "<HOST_DATA>",
+      "layoutFilesInDir": [
+        ".layout.json"
+      ],
+      "pathSuffixes": {
+        "retiredStorePath": ".retired.json",
+        "transferredStorePath": ".transferred.json",
+        "graftTargetsPath": ".graft-targets.json",
+        "txnDirPath": ".txn",
+        "constraintSectionsPath": ".graft-constraint-sections.json",
+        "pendingConstraintsPath": ".pending-constraints.json",
+        "pendingIgnitionPath": ".graft-pending-ignition.json",
+        "draftsPath": ".graft-drafts.json",
+        "preparedStorePath": ".graft-prepared.json",
+        "leftoversStorePath": ".graft-leftovers.json",
+        "autoGraftSuppressedPath": ".auto-graft-suppressed.json"
+      }
+    },
+    {
+      "id": "explicit-config-dataDir",
+      "description": "config.dataDir wins over the host path",
+      "clearedEnv": [
+        "DSH_PROFILE_DIR",
+        "DSH_HOME",
+        "DSH_PROFILE"
+      ],
+      "resolvedFrom": "config.dataDir",
+      "dir": "<CONFIG_DATA>",
+      "layoutFilesInDir": [
+        ".layout.json"
+      ],
+      "pathSuffixes": {
+        "retiredStorePath": ".retired.json",
+        "transferredStorePath": ".transferred.json",
+        "graftTargetsPath": ".graft-targets.json",
+        "txnDirPath": ".txn",
+        "constraintSectionsPath": ".graft-constraint-sections.json",
+        "pendingConstraintsPath": ".pending-constraints.json",
+        "pendingIgnitionPath": ".graft-pending-ignition.json",
+        "draftsPath": ".graft-drafts.json",
+        "preparedStorePath": ".graft-prepared.json",
+        "leftoversStorePath": ".graft-leftovers.json",
+        "autoGraftSuppressedPath": ".auto-graft-suppressed.json"
+      }
+    },
+    {
+      "id": "explicit-config-dataDir-with-profile-env",
+      "description": "config.dataDir still wins when DSH_PROFILE_DIR is set",
+      "clearedEnv": [],
+      "resolvedFrom": "config.dataDir",
+      "dir": "<CONFIG_DATA>",
+      "layoutFilesInDir": [
+        ".layout.json"
+      ],
+      "pathSuffixes": {
+        "retiredStorePath": ".retired.json",
+        "transferredStorePath": ".transferred.json",
+        "graftTargetsPath": ".graft-targets.json",
+        "txnDirPath": ".txn",
+        "constraintSectionsPath": ".graft-constraint-sections.json",
+        "pendingConstraintsPath": ".pending-constraints.json",
+        "pendingIgnitionPath": ".graft-pending-ignition.json",
+        "draftsPath": ".graft-drafts.json",
+        "preparedStorePath": ".graft-prepared.json",
+        "leftoversStorePath": ".graft-leftovers.json",
+        "autoGraftSuppressedPath": ".auto-graft-suppressed.json"
+      }
+    }
+  ]
+}
