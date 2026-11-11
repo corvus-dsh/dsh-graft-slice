@@ -70,12 +70,46 @@ test('v136: the edge checker can fail — a new dependency it must report is rep
   assert.match(output, /the injected ledger import is visible here/u)
 })
 
-test('v136: the working tree has no unsanctioned edge drift against HEAD', () => {
+/**
+ * ── THE DRIFT CHECK MUST NOT FORBID A MOVE THAT IS IN PROGRESS ────────────────────────────────────
+ *
+ * This assertion used to read "against HEAD there must be zero added edges". That is right for a
+ * COMMITTED tree and wrong for a tree where a move is being staged: a pure move of a declaration
+ * NECESSARILY adds exactly one re-export edge in the file it left, and removes nothing. The check as
+ * written would have failed every legitimate move — which is how this was found (the GraftConfig move
+ * added `index.ts -> ./core/graft-config [(re-export)]` and this test went red).
+ *
+ * The invariant that actually matters is narrower and checkable in both states: every added edge must
+ * point at a module that the same diff CREATED. A new dependency on a pre-existing module is what the
+ * user's constraint forbids; the plumbing of a move is not.
+ */
+test('v136: every added edge points at a module this diff created (no new dependency on existing code)', () => {
   const output = run(EDGES)
-  const added = Number(/ADDED\s+\((\d+)\)/u.exec(output)?.[1])
+  const added = [...output.matchAll(/^ {2}\+ (\S+) -> (\S+) \[/gmu)].map((match) => ({ from: match[1], to: match[2] }))
   const removed = Number(/REMOVED\s+\((\d+)\)/u.exec(output)?.[1])
-  assert.equal(added, 0, `no edge may be added without a move that explains it:\n${output}`)
+
   assert.equal(removed, 0, `no edge may vanish silently:\n${output}`)
+
+  // Which modules are new in this working tree (untracked, under src/)?
+  const newModules = (() => {
+    const status = execFileSync('git', ['status', '--porcelain', 'src'], { cwd: ROOT, encoding: 'utf8' })
+    return status.split('\n')
+      .filter((line) => line.startsWith('??'))
+      .map((line) => line.slice(3).trim())
+      .filter((path) => path.endsWith('.ts'))
+  })()
+
+  for (const edge of added) {
+    // The printer normalises `./x.js` to `./x`, so compare on the module PATH STEM, not on an extension
+    // that is no longer there. (First version appended `.ts` to a string that had already lost `.js`,
+    // so every legitimate move failed its own check.)
+    const stem = edge.to.replace(/^\.\//u, '')
+    const isNewModule = newModules.some((path) => path.replace(/^src\//u, '').replace(/\.ts$/u, '') === stem)
+    assert.ok(isNewModule,
+      `${edge.from} newly depends on ${edge.to}, which this diff did NOT create ` +
+      `(new modules: ${newModules.join(', ') || 'none'}).\n` +
+      `A move may only point at what it moved. Added edges:\n${output}`)
+  }
 })
 
 test('v136: verify-pure-move EXCLUDES import lines — the gap is pinned, not just described', () => {

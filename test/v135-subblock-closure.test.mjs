@@ -25,6 +25,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -166,7 +167,8 @@ test('v135 ③: a hand-picked buildTape sub-block reports the expected split', (
   /**
    * ── THE HAND-PICKED SAMPLE, AND WHY THIS ONE ─────────────────────────────────────────────────
    *
-   * `ensureTurn` (L3755..L3764) is a self-contained arrow function inside `buildTape`. It declares
+   * `ensureTurn` (L3467..L3474 after the GraftConfig move shifted every line below L479 by −288) is a
+ * self-contained arrow function inside `buildTape`. It declares
    * nothing at module scope, and its only module-level dependency is the `TurnDraft` interface — which is
    * exactly the shape a viable sub-block cut looks like: a small range whose outside set is one type.
    *
@@ -174,12 +176,26 @@ test('v135 ③: a hand-picked buildTape sub-block reports the expected split', (
    * (`TurnDraft`), no mutable state. If the instrument disagrees, IT is wrong — that is the point of a
    * calibration sample.
    */
-  const { output, code } = run(['--block', 'src/index.ts', '3755', '3764'])
+  const { output, code } = run(['--block', 'src/index.ts', '3467', '3474'])
   assert.equal(code, 0, `sub-block run failed:\n${output}`)
   assert.equal(fieldNumber(output, 'local declarations'), 0,
     'this range declares nothing at module scope')
   assert.equal(fieldNumber(output, 'OUTSIDE declarations'), 1,
     'the only module-level dependency of this range is TurnDraft')
+  /**
+   * ── THE RANGE MUST STILL BE ensureTurn ──────────────────────────────────────────────────────────
+   *
+   * These coordinates are hard-coded, so a future move that shifts them again would leave this test
+   * measuring a DIFFERENT piece of code while still passing (the closure shape would just be whatever
+   * the new range happens to be). Pin the range to its identity, not only to its numbers.
+   */
+  {
+    const lines = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8').split('\n')
+    assert.match(lines[3466] ?? '', /const ensureTurn = \(turn: number\): TurnDraft => \{/u,
+      'L3467 must still be the ensureTurn arrow function — if a move shifted it, update this range')
+    assert.match(lines[3473] ?? '', /^\s*\}\s*$/u, 'L3474 must still close ensureTurn')
+  }
+
   assert.match(output, /index\.ts:TurnDraft \[InterfaceDeclaration\]/u,
     'the outside set must NAME the dependency it found')
   assert.equal(field(output, 'mutable'), 'none',

@@ -89,6 +89,23 @@ export function normaliseContentLine(line) {
    */
   if (/^\s*type\s*\{[^{}]*\}\s*;?\s*$/u.test(withoutKeyword)) return ''
   if (/^\s*type\s*\*\s*(?:as\s+\w+\s*)?from\s+['"]/u.test(withoutKeyword)) return ''
+  /**
+   * ── `export type { X } FROM './m.js'` — THE FORM N1 DID NOT PRODUCE ─────────────────────────────
+   *
+   * The two rules above cover a type re-export WITHOUT a `from` clause. Found by the GraftConfig move:
+   * moving a pure type necessarily produces
+   *
+   *     export type { GraftConfig } from './core/graft-config.js'
+   *
+   * which normalises to `type { GraftConfig } from './core/graft-config.js'` — a bare brace list
+   * FOLLOWED BY `from`, so neither rule matched and the move measured **+1 content line**. The checker
+   * said "not pure" about a move that was provably pure.
+   *
+   * Same reasoning as above: a re-export is the move's plumbing regardless of whether the module is
+   * named inline. Excluding it weakens nothing — a duplicated DECLARATION still shows up line by line.
+   */
+  if (/^\s*type\s*\{[^{}]*\}\s*from\s+['"]/u.test(withoutKeyword)) return ''
+  if (/^\s*\{[^{}]*\}\s*from\s+['"]/u.test(withoutKeyword)) return ''
   return withoutKeyword
 }
 
