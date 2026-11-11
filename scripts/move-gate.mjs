@@ -523,7 +523,19 @@ const report = {
     tier: 'B 闭包（只报告，不设限）',
     verdict: 'REPORTED',
     machine: true,
-    measured: { closureLines: clusterClosureLines, declarations: closureOfCluster?.declarations, mutable: closureOfCluster?.mutable },
+    measured: {
+      closureLines: clusterClosureLines,
+      /**
+       * ── THE DECLARATION COUNT MUST BE THE UNION'S SIZE TOO ────────────────────────────────
+       *
+       * Measured on the text-tools cluster (4 members, 19 lines): this field reported
+       * `declarations: 1`, because it was taken from `closureOfCluster`, which is the FIRST member's
+       * closure. The line count was already the union (19), so the pair read "1 declaration / 19 lines"
+       * — a combination that cannot exist and would make a reader distrust the whole row.
+       */
+      declarations: clusterClosureMembers.size,
+      mutable: [...new Set(memberClosures.flatMap((entry) => entry.closure.mutable))].join(', ') || 'none',
+    },
   },
   C1: {
     tier: 'C1 一句话说清（不含「并且」）',
@@ -585,7 +597,7 @@ if (spans.length === 0) line(`        !! NOT FOUND in src/ — the gate cannot m
 
 line('')
 line(`── B 闭包（只报告，不设限）─────────────────────────────────────`)
-line(`   ${clusterClosureLines ?? '?'} 行 / ${closureOfCluster?.declarations ?? '?'} 声明 / mutable: ${closureOfCluster?.mutable ?? '?'}`)
+line(`   ${clusterClosureLines ?? '?'} 行 / ${clusterClosureMembers.size} 声明 / mutable: ${report.B.measured.mutable}`)
 
 line('')
 line(`── C1 一句话说清（不含「并且」）────────────────────────────────`)

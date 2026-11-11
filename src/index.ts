@@ -920,12 +920,7 @@ function isAbsolutePath(value: string): boolean {
   return /^[A-Za-z]:[\\/]/u.test(value) || value.startsWith('\\\\') || value.startsWith('/')
 }
 
-function normalizeText(text: string): string {
-  // Preserve code-block indentation and blank lines: recent turns are supposed
-  // to be high-fidelity, not flattened prose. Only normalize line endings and
-  // trim the outer edges.
-  return text.replace(/\r\n/gu, '\n').trim()
-}
+import { nearDuplicate, normalizeText, normalizedEqual, tokenSet } from './core/text-normalize.js'
 
 /** Strip Markdown enough to make an older-turn first paragraph readable as prose. */
 function stripMarkdown(text: string): string {
@@ -994,21 +989,8 @@ function isQuestionLike(text: string): boolean {
   return /[?？]\s*$/u.test(text) || /^(what|why|how|who|when|where|which|is|are|can|could|would|should|do|does|did)\b/iu.test(text)
 }
 
-function tokenSet(text: string): Set<string> {  return new Set((text.toLowerCase().match(/[a-z0-9_]+|[\u4e00-\u9fff]/gu) ?? []))
-}
 
-function nearDuplicate(a: string, b: string): boolean {
-  const left = tokenSet(a)
-  const right = tokenSet(b)
-  if (left.size === 0 || right.size === 0) return normalizedEqual(a, b)
-  let overlap = 0
-  for (const token of left) if (right.has(token)) overlap += 1
-  return overlap / Math.max(left.size, right.size) >= 0.9
-}
 
-function normalizedEqual(a: string, b: string): boolean {
-  return a.toLowerCase() === b.toLowerCase()
-}
 
 /**
  * v4.3: extract hard constraints with precision filters.

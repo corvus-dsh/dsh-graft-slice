@@ -176,24 +176,36 @@ test('v135 ③: a hand-picked buildTape sub-block reports the expected split', (
    * (`TurnDraft`), no mutable state. If the instrument disagrees, IT is wrong — that is the point of a
    * calibration sample.
    */
-  const { output, code } = run(['--block', 'src/index.ts', '3467', '3474'])
+  /**
+   * ── THE RANGE IS FOUND, NOT REMEMBERED ─────────────────────────────────────────────────────────
+   *
+   * These coordinates drifted TWICE while the verdict never changed (always 0 local / 1 outside
+   * `TurnDraft`): the GraftConfig move shifted them by −288, the text-tools move by −16. Each time the
+   * only broken thing was the number, and the fix was to edit the number — which teaches nothing and
+   * breaks again on the next move.
+   *
+   * A test whose subject is a line RANGE must locate that range.
+   */
+  const ensureTurnStart = (() => {
+    const lines = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8').split('\n')
+    for (let index = 0; index < lines.length; index++) {
+      if (/^\s*const ensureTurn = \(turn: number\): TurnDraft => \{/u.test(lines[index])) return index + 1
+    }
+    return undefined
+  })()
+  assert.ok(ensureTurnStart !== undefined, 'ensureTurn must exist in src/index.ts')
+  const ensureTurnEnd = ensureTurnStart + 7
+  const { output, code } = run(['--block', 'src/index.ts', String(ensureTurnStart), String(ensureTurnEnd)])
   assert.equal(code, 0, `sub-block run failed:\n${output}`)
   assert.equal(fieldNumber(output, 'local declarations'), 0,
     'this range declares nothing at module scope')
   assert.equal(fieldNumber(output, 'OUTSIDE declarations'), 1,
     'the only module-level dependency of this range is TurnDraft')
-  /**
-   * ── THE RANGE MUST STILL BE ensureTurn ──────────────────────────────────────────────────────────
-   *
-   * These coordinates are hard-coded, so a future move that shifts them again would leave this test
-   * measuring a DIFFERENT piece of code while still passing (the closure shape would just be whatever
-   * the new range happens to be). Pin the range to its identity, not only to its numbers.
-   */
   {
     const lines = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8').split('\n')
-    assert.match(lines[3466] ?? '', /const ensureTurn = \(turn: number\): TurnDraft => \{/u,
-      'L3467 must still be the ensureTurn arrow function — if a move shifted it, update this range')
-    assert.match(lines[3473] ?? '', /^\s*\}\s*$/u, 'L3474 must still close ensureTurn')
+    assert.match(lines[ensureTurnStart - 1] ?? '', /const ensureTurn = \(turn: number\): TurnDraft => \{/u,
+      'the located start must be the ensureTurn arrow function')
+    assert.match(lines[ensureTurnEnd - 1] ?? '', /^\s*\}\s*$/u, 'the located end must close it')
   }
 
   assert.match(output, /index\.ts:TurnDraft \[InterfaceDeclaration\]/u,

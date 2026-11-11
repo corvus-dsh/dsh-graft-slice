@@ -96,10 +96,20 @@ test('v138: spans come from the COMPILER, not from a second parser', (t) => {
     'the hand-written span parser must NOT come back — a second parser is a second truth')
 
   // The two containers are the values this whole phase is built on.
+  //
+  // The SIZE is the invariant (496); the LINE NUMBERS are not — they moved by −288 when GraftConfig
+  // left and by −16 when the text tools left. Hard-coding them meant this test failed on a pure move
+  // whose verdict never changed. So the assertion is "the reported span really is buildTape", checked
+  // against the file, not "the span starts at a remembered address".
   const report = gateJson('buildTape')
   const container = report.A.measured.declarations.find((entry) => entry.name === 'buildTape')
-  assert.deepEqual({ start: container.start, end: container.end, lines: container.lines },
-    { start: 3426, end: 3921, lines: 496 })
+  assert.equal(container.lines, 496, 'buildTape is 496 lines')
+  {
+    const lines = readFileSync(SRC, 'utf8').split('\n')
+    assert.equal(lines[container.start - 1], 'export function buildTape(',
+      'the reported start must be the declaration')
+    assert.equal(lines[container.end - 1], '}', 'the reported end must close it')
+  }
 
   // And the declaration the old scanner lost entirely, because buildInjectionPlan swallowed it.
   const forced = gateJson('noteForcedCut')
@@ -149,8 +159,19 @@ test('v138: B is the UNION of member closures, not the largest one', (t) => {
    * A second bug made it report 0: the members are `{file,name,kind}` objects and a regex was run over
    * their String(), which is `"[object Object]"`.
    */
+  /**
+   * ── THIS NUMBER IS THE EVIDENCE FOR THE BOTTOM-UP ORDER (step 1 of 4) ─────────────────────────
+   *
+   * Before the text-tools move: 341 lines / 14 declarations.
+   * After:                       322 lines / 10 declarations.
+   *
+   * The four members that left — normalizeText(6) + tokenSet(2) + nearDuplicate(8) +
+   * normalizedEqual(3) = 19 lines — are exactly the drop. That is what "moving a dependency first
+   * shrinks the dependent's closure" means, measured rather than assumed.
+   */
   const single = gateJson('extractGoal')
-  assert.equal(single.B.measured.closureLines, 341, 'extractGoal alone is 341')
+  assert.equal(single.B.measured.closureLines, 322, 'extractGoal after the text tools left its closure')
+  assert.equal(single.B.measured.declarations, 10, '14 members before, 10 after')
 
   const gateSource = readFileSync(GATE, 'utf8')
   assert.match(gateSource, /for \(const member of entry\.closure\.members\) unionNames\.add\(member\.name\)/u,
