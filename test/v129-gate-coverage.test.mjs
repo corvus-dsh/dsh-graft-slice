@@ -46,21 +46,131 @@ const EXEMPT = new Map([
 
 const ciText = readFileSync(CI, 'utf8')
 
-/** Gate scripts: everything named `check-*.mjs`, plus the bundle contract. These MUST be CI steps. */
-const gateScripts = readdirSync(join(ROOT, 'scripts'))
-  .filter((name) => /^check-.*\.mjs$/u.test(name) || name === 'verify-bundle.mjs')
-  .sort()
-
 /**
- * The measuring instruments are gates PLUS the two that measure rather than assert. The distinction
- * matters: a gate can be a CI step, an instrument may need a tool CI does not have. Both belong in the
- * coverage rule, so neither can be quietly forgotten — that is the whole point of listing them.
+ * ── THREE KINDS OF SCRIPT, AND ONLY ONE OF THEM MUST BE A CI STEP ────────────────────────────────
+ *
+ * First version: `/^check-.*\.mjs$/`. It silently excluded every instrument whose name does not start
+ * with `check-` — `type-check`, `who-references`, `audit-line-numbers`, `verify-import-edges`.
+ *
+ * Widening it to "every .mjs" then produced the OPPOSITE problem: 12 scripts flagged as unreachable
+ * gates, most of which are not gates at all (`prune-ghosts`, `cleanup-graft-targets`,
+ * `duel-model-driven`, `e2e-multiproject` …). Forcing those into CI would be wrong — they mutate the
+ * session store or need a live host.
+ *
+ * So the set is enumerated by KIND, and every entry carries a verdict:
+ *
+ *   GATE        makes an ASSERTION and can fail a push   → must be a CI step
+ *   INSTRUMENT  MEASURES (prints numbers, exits 0)        → CI step if it can run; else EXEMPT + reason
+ *   OPS         operates on a live store / host, or is a drill → never a CI step, reason required
+ *
+ * An unlisted .mjs fails this test on purpose: adding a script is a decision, not an accident.
  */
-const INSTRUMENTS = [...gateScripts, ...EXEMPT.keys()].sort()
+const KINDS = new Map([
+  // ── GATE: asserts, fails the push ──
+  ['check-artifact-fresh.mjs', 'GATE'],
+  ['check-docs.mjs', 'GATE'],
+  ['check-readme-counts.mjs', 'GATE'],
+  ['check-readme-tally.mjs', 'GATE'],
+  ['verify-bundle.mjs', 'GATE'],
+  ['v140-audit', 'GATE'],
+
+  // ── INSTRUMENT: measures ──
+  ['audit-line-numbers.mjs', 'INSTRUMENT'],
+  ['closure.mjs', 'INSTRUMENT'],
+  ['move-gate.mjs', 'INSTRUMENT'],
+  ['type-check.mjs', 'INSTRUMENT'],
+  ['verify-import-edges.mjs', 'INSTRUMENT'],
+  ['verify-pure-move.mjs', 'INSTRUMENT'],
+  ['who-references.mjs', 'INSTRUMENT'],
+  ['inventory-source-guards.mjs', 'INSTRUMENT'],
+
+  // ── OPS: needs a live store/host, or is a drill ──
+  // ── TOOLING: the build/publish path, not a check of it ──
+  ['build.mjs', 'TOOLING'],
+  ['bundle.mjs', 'TOOLING'],
+  ['publish.mjs', 'TOOLING'],
+  ['demo.mjs', 'TOOLING'],
+  ['_del.mjs', 'TOOLING'],
+
+  ['cleanup-graft-targets.mjs', 'OPS'],
+  ['debug-status.mjs', 'OPS'],
+  ['duel-model-driven.mjs', 'OPS'],
+  ['e2e-multiproject.mjs', 'OPS'],
+  ['prune-ghosts.mjs', 'OPS'],
+  ['read-session-log.mjs', 'OPS'],
+  ['scan-real-logs.mjs', 'OPS'],
+  ['validate-real-format.mjs', 'OPS'],
+])
+
+/** Why each OPS script is not a gate, and why each tool-dependent INSTRUMENT is exempt. */
+const NOT_A_CI_STEP = new Map([
+  ['build.mjs', 'THE build step: it runs as `npm run build` inside the job, not as a separate check'],
+  ['bundle.mjs', 'library module imported by build.mjs and check-docs.mjs, not a standalone script'],
+  ['publish.mjs', 'release path; it publishes to npm and must never run on a push'],
+  ['demo.mjs', 'demonstration script for humans; asserts nothing'],
+  ['_del.mjs', 'scratch helper kept for a one-off cleanup; prefixed with _ so it is not mistaken for a gate'],
+  ['cleanup-graft-targets.mjs', 'mutates the live DSH session store; running it on CI has no store to clean and would mask a real failure'],
+  ['debug-status.mjs', 'calls the graft_debug_status tool through a live host; there is no host in CI'],
+  ['duel-model-driven.mjs', 'a drill that drives two live sessions to hand over simultaneously'],
+  ['e2e-multiproject.mjs', 'end-to-end drill over three real projects concurrently'],
+  ['prune-ghosts.mjs', 'quarantines GHOST sessions in a live store and resets derived ledgers — destructive by design'],
+  ['read-session-log.mjs', 'reads a persisted host session log; useful by hand, nothing to assert in CI'],
+  ['scan-real-logs.mjs', 'development smoke test over every persisted log on this machine — a RESOURCE condition'],
+  ['validate-real-format.mjs', 'optional deep check against the real v4 validator; the committed corpus sample is the CI-safe subset'],
+  ['closure.mjs', 'needs the TypeScript compiler, which this package deliberately does not depend on; it exits 2 by design in CI'],
+  ['verify-pure-move.mjs', 'compares the working tree to a git ref, which is IDENTICAL by construction in CI; its --self-test is run locally'],
+  ['move-gate.mjs', 'needs closure.mjs, and is a MEASURING instrument: it prints four tiers and does not assert on them in CI'],
+  ['type-check.mjs', 'needs the TypeScript compiler; the incremental budget gate that consumes it is a separate proposal (PROPOSAL-incremental-type-check.md)'],
+  ['audit-line-numbers.mjs', 'produces the audit table that test/v140 consumes; v140 is the CI step, this is its instrument'],
+  ['inventory-source-guards.mjs', 'inventory/report; test/v126 asserts the coverage it describes'],
+  ['verify-import-edges.mjs', 'produces the edge diff that test/v136 consumes; v136 is the CI step, this is its instrument'],
+])
+
+const scriptNames = readdirSync(join(ROOT, 'scripts')).filter((name) => name.endsWith('.mjs')).sort()
+
+/** The gate set is whatever this file says it is — an unlisted script is an ERROR, not a silent pass. */
+const gateScripts = scriptNames.filter((name) => KINDS.get(name) === 'GATE')
+
+const referencedInCi = (name) => new RegExp(`scripts/${name.replace(/\./gu, '\\.')}`, 'u').test(ciText)
+
+const INSTRUMENTS = scriptNames.sort()
 
 test('meta: the gate set has a denominator (an empty scan must not pass)', () => {
   assert.ok(gateScripts.length >= 4,
     `found only ${gateScripts.length} gate script(s) under scripts/. A gate that scans nothing reports no problems.`)
+})
+
+test('meta: every script under scripts/ is CLASSIFIED (an unlisted script is a decision nobody made)', () => {
+  /**
+   * ── THE ENUMERATION IS THE POINT ────────────────────────────────────────────────────────────────
+   *
+   * The earlier versions of this file both failed the same way: a FILTER decided what counted
+   * (`/^check-*`), so anything outside the pattern was invisible rather than unclassified. That is how
+   * `type-check.mjs`, `who-references.mjs` and `audit-line-numbers.mjs` shipped without anyone asking
+   * whether they belonged in CI.
+   *
+   * Now the list is explicit, and a script that is not in it fails HERE — with its name — instead of
+   * being silently outside the rule.
+   */
+  const unclassified = scriptNames.filter((name) => KINDS.get(name) === undefined)
+  assert.deepEqual(unclassified, [],
+    `these script(s) are not classified as GATE / INSTRUMENT / OPS:\n  ${unclassified.join('\n  ')}\n` +
+    'Add each to KINDS with its kind — and if it is not a CI step, add a reason to NOT_A_CI_STEP.')
+
+  /**
+   * A reason is required only for a script that is NOT a CI step. Two instruments
+   * (`verify-import-edges`, `who-references`) ARE wired into ci.yml, so demanding a reason for them
+   * was a false failure — measured, and fixed here rather than by adding dummy reasons.
+   */
+  const needsReason = scriptNames
+    .filter((name) => KINDS.get(name) !== 'TOOLING')
+    .filter((name) => !referencedInCi(name))
+    .filter((name) => {
+      const reason = NOT_A_CI_STEP.get(name)
+      return reason === undefined || reason.length < 40
+    })
+  assert.deepEqual(needsReason, [],
+    `${needsReason.length} script(s) are not CI steps and have no written reason:\n  ${needsReason.join('\n  ')}`)
 })
 
 test('meta: every gate script is referenced by ci.yml (a gate that cannot run is a comment)', () => {
@@ -78,13 +188,13 @@ test('meta: every gate script is referenced by ci.yml (a gate that cannot run is
 
 test('meta: every instrument is either a CI step or exempt with a written reason', () => {
   /**
-   * The instruments are gates PLUS `closure.mjs` and `verify-pure-move.mjs`. The two are not gates —
-   * one needs a compiler CI does not install, the other compares against a ref that equals the tree in
-   * CI — but they still have to be ACCOUNTED FOR, which is why they are in the same list and must carry
-   * a reason. An exemption without a reason is a hole with a label.
+   * Every GATE, INSTRUMENT and OPS script must be either a CI step or carry a written reason.
+   * An exemption without a reason is a hole with a label; an unlisted script is worse (see the
+   * CLASSIFIED test above).
    */
   const referenced = new Set([...ciText.matchAll(/scripts\/([\w.-]+\.mjs)/gu)].map((match) => match[1]))
-  const unaccounted = INSTRUMENTS.filter((name) => !referenced.has(name) && !EXEMPT.has(name))
+  // NOT_A_CI_STEP replaced the old EXEMPT map when the set became three-way (GATE / INSTRUMENT / OPS).
+  const unaccounted = INSTRUMENTS.filter((name) => !referenced.has(name) && !NOT_A_CI_STEP.has(name))
   assert.deepEqual(unaccounted, [], 'instruments that are neither CI steps nor explained: ' + unaccounted.join(', '))
   assert.ok(INSTRUMENTS.length >= 6, `expected at least 6 instruments, found ${INSTRUMENTS.length}`)
 })
