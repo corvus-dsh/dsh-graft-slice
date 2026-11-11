@@ -32,12 +32,41 @@ import { fileURLToPath } from 'node:url'
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
 const TOOL = join(REPO, 'scripts', 'closure.mjs')
 
+/**
+ * ── THE COMPILER IS A RESOURCE, SO ITS ABSENCE IS A SKIP, NOT A FAILURE ─────────────────────────
+ *
+ * Measured on CI (run 95): all five v135 tests failed there, because `closure.mjs` needs the TypeScript
+ * compiler — which this package deliberately does not depend on — and exits **2 by design** in that
+ * environment. The tests then asserted against the exit-2 output and reported "the instrument is wrong"
+ * when the truth was "the instrument is not available here".
+ *
+ * v127 hit exactly this earlier and solved it with a probe + skip. The same mechanism is applied here:
+ *
+ *     RESOURCE: typescript is not installed; closure.mjs exits 2 rather than guessing
+ *
+ * That is a RESOURCE skip (a property of the machine), not a PENDING one, so the README tally keeps
+ * counting only the two declared-pending tests.
+ */
 const run = (args) => {
   try {
     return { output: execFileSync(process.execPath, [TOOL, ...args], { cwd: REPO, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }), code: 0 }
   } catch (error) {
     return { output: `${error.stdout ?? ''}${error.stderr ?? ''}`, code: error.status ?? 1 }
   }
+}
+
+const compilerMissing = (result) =>
+  result.code === 2 && /typescript NOT installed/u.test(result.output)
+
+/** Skip the calling test when the compiler is absent; otherwise fail loudly if the tool is broken. */
+function requireCompiler(t) {
+  const probe = run(['calculateAdaptiveDepth'])
+  if (compilerMissing(probe)) {
+    t.skip('RESOURCE: typescript is not installed; closure.mjs exits 2 rather than guessing')
+    return undefined
+  }
+  assert.equal(probe.code, 0, `closure.mjs failed on the calibration target:\n${probe.output}`)
+  return probe
 }
 
 /**
@@ -69,7 +98,9 @@ const fieldNumber = (output, label) => {
   return value
 }
 
-test('v135: the instrument still answers the WHOLE-function question unchanged (regression)', () => {
+test('v135: the instrument still answers the WHOLE-function question unchanged (regression)', (t) => {
+  if (requireCompiler(t) === undefined) return
+
   /**
    * Two samples with answers recorded earlier in this phase. If refactoring for sub-blocks changed the
    * whole-declaration numbers, those numbers are the ones every node's report quoted — so THIS is the
@@ -93,7 +124,9 @@ test('v135: the instrument still answers the WHOLE-function question unchanged (
     'this count is quoted in ARCHITECTURE and in the N7 commit; a silent change here invalidates them')
 })
 
-test('v135 ①: a whole-declaration RANGE reproduces the whole-declaration CLOSURE', () => {
+test('v135 ①: a whole-declaration RANGE reproduces the whole-declaration CLOSURE', (t) => {
+  if (requireCompiler(t) === undefined) return
+
   /**
    * The strongest available cross-check: give sub-block mode the exact line span of a known declaration
    * pair and confirm it reports the SAME declaration count the whole-function mode does.
@@ -127,7 +160,9 @@ test('v135 ①: a whole-declaration RANGE reproduces the whole-declaration CLOSU
   assert.equal(field(block.output, 'mutable'), 'none', 'the pure leaf has no mutable state')
 })
 
-test('v135 ③: a hand-picked buildTape sub-block reports the expected split', () => {
+test('v135 ③: a hand-picked buildTape sub-block reports the expected split', (t) => {
+  if (requireCompiler(t) === undefined) return
+
   /**
    * ── THE HAND-PICKED SAMPLE, AND WHY THIS ONE ─────────────────────────────────────────────────
    *
@@ -151,7 +186,9 @@ test('v135 ③: a hand-picked buildTape sub-block reports the expected split', (
     'an arrow function reading an interface has no mutable state')
 })
 
-test('v135: a range with NO outside dependencies reports an empty set (the viable-cut shape)', () => {
+test('v135: a range with NO outside dependencies reports an empty set (the viable-cut shape)', (t) => {
+  if (requireCompiler(t) === undefined) return
+
   /**
    * The useful answer for a candidate cut is `OUTSIDE declarations: 0` — nothing has to be threaded in.
    * A range of pure comments/whitespace is the simplest such range and must not invent dependencies.
@@ -162,7 +199,9 @@ test('v135: a range with NO outside dependencies reports an empty set (the viabl
   assert.equal(field(output, 'mutable'), 'none')
 })
 
-test('v135: an unknown file is a NAMED failure, not a crash', () => {
+test('v135: an unknown file is a NAMED failure, not a crash', (t) => {
+  if (requireCompiler(t) === undefined) return
+
   const { output, code } = run(['--block', 'src/index.ts', '999999', '1000000'])
   assert.equal(code, 0, 'a range beyond the file should still be answered (empty), not crash')
   assert.match(output, /block index\.ts/u)
