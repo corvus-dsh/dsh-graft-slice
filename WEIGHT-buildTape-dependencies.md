@@ -245,6 +245,45 @@ restored buildTape: 48 / 1750
 
 > **本条只登记，不改判据 —— 等用户裁定。在裁定之前，一切仍按现行口径（闭包 > 800 = 容器）执行。**
 
+## 五点五、两条工具事实（都与「按簇搬」的验收方式直接相关）
+
+### ① `verify-pure-move` 看不见新增依赖 —— 已补 `verify-import-edges`
+
+防滥用约束要求「搬出的目标必须在同一提交证明没有引入新依赖」。**这句话原本无法被证明。**
+
+`verify-pure-move` 的 CONTENT LINE 定义**排除**任何以 `import ` / `export ` 开头的行
+（因为纯搬运必然产生这些行）。而「引入新依赖」这件事**恰好只出现在这些行上**。
+
+实测（2026-11-11）：往 `src/core/adaptive-depth.ts` 顶部注入
+`import { ledgerRecord } from './ledger.js'`：
+
+```
+verify-pure-move   : IDENTICAL（看不见）
+verify-import-edges: ADDED (1)   + core/adaptive-depth.ts -> ./ledger [ledgerRecord]
+还原后两者 : 都回到干净（逐字节）
+```
+
+**已补**：`scripts/verify-import-edges.mjs`（import 边集合对比）+ `test/v136`（5 条，can-red 5/5）。
+
+### ② 「17 = pending 2 + resource 15」曾无法逐条验证 —— 已让 gate 打印证据
+
+这条直接对应用户此前的判断：**「总数对 ≠ 每类都对」**。
+
+查清的事实：
+- `check-readme-tally.mjs` **确实**在子进程里用 `--test-reporter=tap` 跑套件，**逐条分类**；
+- 但它只把结果汇总成一行 `measured: ... (pending=2 resource=15)`，
+  **逐条分类从不离开那个进程**。所以读 CI 日志的人只能验证加法，不能验证分类。
+- run #97 的日志里能看到 TAP 行，是因为当次 **v135 失败**，失败详情顺带打印了 `not ok` 行 ——
+  **那是运气，不是机制**。
+
+**已补**：gate 现在逐条打印 `[verdict] test name` + 原因，并且自检
+「由这些行推出的总数 == 打印的总数」，不等则退出码 1。`test/v137`（5 条，can-red 5/5）钉住它。
+
+> 顺带记一个真实 bug：v137 第一版直接 spawn 了 gate 的 main，而 main 会在子进程里跑整套测试 ——
+> 而整套测试包含 v137 自己，于是**递归**（实测把套件从 756 推到 760、fail 从 0 推到 4）。
+> 修法是把分类抽成纯函数 `classifySkipLines`，测试只调纯函数。**「测试触发的测量污染了测量对象」
+> 与本轮前面几例同族。**
+
 ## 六、数据来源（可复跑）
 
 ```bash
@@ -257,6 +296,7 @@ node ../_scratch/experiment-move.mjs        # 搬出实验，自动逐字节还�
 node ../_scratch/shed-arithmetic.mjs        # 950 行算术 + 穷举 4,095 种组合（第四节五点五）
 node ../_scratch/prove-edge-gap.mjs         # 证明 verify-pure-move 看不见新增依赖
 node scripts/verify-import-edges.mjs        # import 边集合对比（补 pure-move 的盲区）
+node scripts/check-readme-tally.mjs         # skip 逐条分类 + 证据打印（第五节五②）
 node scripts/closure.mjs buildTape          # 48 声明 / 1,750 行
 node scripts/closure.mjs <symbol>           # 任一依赖的自身闭包
 ```

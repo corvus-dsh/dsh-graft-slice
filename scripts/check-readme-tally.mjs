@@ -87,6 +87,32 @@ export function classifySkipLine(line) {
   return RESOURCE_MARKER.test(line) ? 'resource' : 'pending'
 }
 
+
+/**
+ * ── CLASSIFY SKIP LINES WITHOUT RUNNING ANYTHING ────────────────────────────────────────────────
+ *
+ * Extracted so the classification can be CHECKED without re-running the suite. The previous shape
+ * had the loop inline in `measureSuite`, which runs `node --test` as a child process — a test that
+ * wanted to inspect the classification therefore had to spawn the whole suite, and since that suite
+ * contains the test itself, it recursed (measured: tests 756 -> 760, fail 0 -> 3).
+ *
+ * Pure input, pure output: a multi-line string in, an array of {verdict, name, reason} out.
+ */
+export function classifySkipLines(tapOutput) {
+  const classified = []
+  for (const line of tapOutput.split(/\r?\n/)) {
+    const verdict = classifySkipLine(line)
+    if (verdict !== 'resource' && verdict !== 'pending') continue
+    const reasonAt = line.lastIndexOf('# SKIP')
+    classified.push({
+      verdict,
+      name: /^(?:not )?ok \d+ - (.*?)(?: # SKIP|$)/u.exec(line)?.[1]?.trim() ?? '(unnamed)',
+      reason: reasonAt < 0 ? '(no reason given)' : line.slice(reasonAt + 6).trim(),
+    })
+  }
+  return classified
+}
+
 /** Run the suite once and read the tally from its summary. */
 export function measureSuite() {
   let output = ''
@@ -136,15 +162,26 @@ export function measureSuite() {
    * 1 pending when the truth was 2 — the gate's INPUT was wrong, which is the same failure class as the
    * empty-set green (rule 27): a number with no correct denominator.
    */
-  let pending = 0
-  let resource = 0
-  for (const line of output.split(/\r?\n/)) {
-    const verdict = classifySkipLine(line)
-    if (verdict === 'resource') resource += 1
-    else if (verdict === 'pending') pending += 1
-  }
+  /**
+   * ── THE CLASSIFICATION MUST BE VISIBLE, NOT JUST COUNTED ────────────────────────────────────────
+   *
+   * Measured 2026-11-11: this gate classified every CI skip correctly (pending=2, resource=15) but the
+   * classification was only ever printed as TWO TOTALS. A reader of the CI log could not check that the
+   * 15 were really resource skips — only that the arithmetic added up. That is precisely the failure
+   * mode the user warned about: "总数对 ≠ 每类都对", and the reason it kept happening is that the
+   * per-line evidence never left this process.
+   *
+   * The lines are therefore collected and printed. They are printed even when everything is green,
+   * because a conclusion with no visible evidence is a conclusion the next reader has to re-derive.
+   */
+  const classified = classifySkipLines(output)
 
-  return { tests: read('tests'), pass: read('pass'), fail: read('fail'), skipped: read('skipped'), pending, resource }
+  return {
+    tests: read('tests'), pass: read('pass'), fail: read('fail'), skipped: read('skipped'),
+    pending: classified.filter((entry) => entry.verdict === 'pending').length,
+    resource: classified.filter((entry) => entry.verdict === 'resource').length,
+    classified,
+  }
 }
 
 /** Parse every pass/total（skipped）claim out of a README, with the REPO it belongs to. */
@@ -193,6 +230,26 @@ if (isMain) {
   }
 
   console.log(`measured: tests=${measured.tests} pass=${measured.pass} fail=${measured.fail} skipped=${measured.skipped} (pending=${measured.pending} resource=${measured.resource})`)
+
+  /**
+   * ── PRINT THE EVIDENCE BEHIND THE TWO TOTALS ───────────────────────────────────────────────────
+   *
+   * Every classified skip is printed with its reason, so the totals above can be CHECKED instead of
+   * believed. If this list ever disagrees with the totals, that is a bug in this gate — the totals are
+   * derived from exactly these lines.
+   */
+  const classified = measured.classified ?? []
+  console.log(`skip evidence: ${classified.length} classified line(s)`)
+  for (const [index, entry] of classified.entries()) {
+    console.log(`  ${String(index + 1).padStart(2)}. [${entry.verdict}] ${entry.name.slice(0, 72)}`)
+    console.log(`      ${entry.reason.slice(0, 140)}`)
+  }
+  const classifiedSum = classified.filter((entry) => entry.verdict === 'resource').length +
+    classified.filter((entry) => entry.verdict === 'pending').length
+  const totalsAgree = classifiedSum === (measured.pending ?? 0) + (measured.resource ?? 0)
+  console.log(`  totals derived from these lines: ${totalsAgree ? 'AGREE' : 'DISAGREE — gate bug'}`)
+  if (!totalsAgree) process.exitCode = 1
+
   console.log(`claims found: ${claims.length}`)
 
   /**
