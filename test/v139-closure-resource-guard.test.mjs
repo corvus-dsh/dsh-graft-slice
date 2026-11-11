@@ -43,6 +43,33 @@ function hasSkipGuard(source) {
   return defines && calls
 }
 
+/**
+ * ── PER-TEST, NOT PER-FILE: THE FOURTH TIME IS WHAT TAUGHT THIS ────────────────────────────────
+ *
+ * A file-level guard is not enough. Measured on run #105: v138 had `requireCompiler(t)` present in the
+ * file, and TWO of its eleven tests used it — the other nine called `gateJson` (which spawns
+ * move-gate → closure.mjs) with no guard at all. Locally all eleven passed; on CI eight went red.
+ *
+ * So the check is per test: every `test('…', (t) => {` whose body reaches the tool must also invoke the
+ * guard inside that body. A single guarded test does not cover its siblings.
+ */
+function unguardedTests(source) {
+  const offenders = []
+  // split on top-level test declarations; the body runs to the next `test(` or EOF
+  const pattern = /test\(\s*'([^']+)'\s*,\s*(?:\((\w*)\)\s*=>|\w+\s*=>)\s*\{/gu
+  const matches = [...source.matchAll(pattern)]
+  for (const [index, match] of matches.entries()) {
+    const bodyStart = match.index + match[0].length
+    const bodyEnd = index + 1 < matches.length ? matches[index + 1].index : source.length
+    const body = source.slice(bodyStart, bodyEnd)
+    const reaches = reachesTool(body) !== undefined || /\bgateJson\(/u.test(body)
+    if (!reaches) continue
+    const guarded = hasSkipGuard(body) || /if\s*\(\s*!\s*requireCompiler\(\s*t\s*\)\s*\)\s*return/u.test(body)
+    if (!guarded) offenders.push({ name: match[1], hasT: match[2] === 't' })
+  }
+  return offenders
+}
+
 function stripComments(source) {
   return source
     .replace(/\/\*[\s\S]*?\*\//gu, ' ')
@@ -101,6 +128,7 @@ const testFiles = readdirSync(TEST_DIR)
 test('v139: every test that reaches the compiler-dependent tool carries a SKIP guard', () => {
   const offenders = []
   const reaches = []
+  const perTestOffenders = []
 
   for (const name of testFiles) {
     const raw = readFileSync(join(TEST_DIR, name), 'utf8')
@@ -110,6 +138,8 @@ test('v139: every test that reaches the compiler-dependent tool carries a SKIP g
     reaches.push({ name, via })
     const guarded = hasSkipGuard(source)
     if (!guarded) offenders.push({ name, via })
+    // and the stricter question: is EVERY test in this file guarded, not just the file?
+    for (const entry of unguardedTests(source)) perTestOffenders.push({ file: name, ...entry })
   }
 
   // A denominator: if nothing reaches the tool, this test would pass vacuously.
@@ -117,11 +147,19 @@ test('v139: every test that reaches the compiler-dependent tool carries a SKIP g
     'no test file reaches closure.mjs / move-gate.mjs — the detector is broken, not the suite')
 
   assert.deepEqual(offenders, [],
-    `${offenders.length} test file(s) run the compiler-dependent tool without a SKIP guard. ` +
+    `${offenders.length} test file(s) run the compiler-dependent tool without any SKIP guard. ` +
     `On CI (no TypeScript) they go RED instead of skipped — that is exactly run #103.\n` +
     offenders.map((entry) => `  ${entry.name}  (via ${entry.via})`).join('\n'))
 
-  // Enough detail that a reader can see the rule actually covered something.
+  /**
+   * Per-test check. Run #105 is the reason: v138 HAS the guard, and nine of its eleven tests still went
+   * red on CI because they spawn the tool without entering the guarded path.
+   */
+  assert.deepEqual(perTestOffenders, [],
+    `${perTestOffenders.length} individual test(s) reach the tool without a guard in their own body. ` +
+    `A file-level guard does not cover its siblings — that is run #105.\n` +
+    perTestOffenders.map((entry) => `  ${entry.file}: ${entry.name}${entry.hasT ? '' : '  (no `t` parameter)'}`).join('\n'))
+
   console.log(`  covered ${reaches.length} file(s):`)
   for (const entry of reaches) console.log(`    ${entry.name}  (via ${entry.via})`)
 })

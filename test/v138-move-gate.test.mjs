@@ -72,7 +72,8 @@ const requireCompiler = (t) => {
 }
 
 
-test('v138: spans come from the COMPILER, not from a second parser', () => {
+test('v138: spans come from the COMPILER, not from a second parser', (t) => {
+  if (!requireCompiler(t)) return
   /**
    * ── SIX WRONG ANSWERS, THEN THE PARSER WAS DELETED ──────────────────────────────────────────────
    *
@@ -156,7 +157,8 @@ test('v138: B is the UNION of member closures, not the largest one', (t) => {
     'the union must read member.name, not match a regex over the object')
 })
 
-test('v138: the declaration parser reproduces independently-known spans', () => {
+test('v138: the declaration parser reproduces independently-known spans', (t) => {
+  if (!requireCompiler(t)) return
   /**
    * ── THE CALIBRATION MUST FOLLOW THE SOURCE, NOT PIN ONE LAYOUT ──────────────────────────────────
    *
@@ -187,7 +189,8 @@ test('v138: the declaration parser reproduces independently-known spans', () => 
   assert.equal(lines[container.end - 1], '}', 'the reported end closes it')
 })
 
-test('v138: C4 actually counts the container body, not zero', () => {
+test('v138: C4 actually counts the container body, not zero', (t) => {
+  if (!requireCompiler(t)) return
   const report = gateJson('GraftConfig')
   const { containerAssignments, containerBodyLines } = report.C4.measured
   // Measured truth: 496 body lines, EXACTLY 67 local bindings.
@@ -200,7 +203,8 @@ test('v138: C4 actually counts the container body, not zero', () => {
   assert.deepEqual(report.C4.measured.implicitOrdering, [], 'GraftConfig reads nothing produced inside buildTape')
 })
 
-test('v138: a mention inside a comment is NOT a production caller', () => {
+test('v138: a mention inside a comment is NOT a production caller', (t) => {
+  if (!requireCompiler(t)) return
   const report = gateJson('GraftConfig')
   assert.equal(report.C2.verdict, 'YES', 'GraftConfig is mentioned only in comments outside index.ts')
   assert.deepEqual(report.C2.measured.productionCallers, [], 'no module under src/ actually references it in code')
@@ -223,7 +227,8 @@ test('v138: a mention inside a comment is NOT a production caller', () => {
     'and must no longer declare it')
 })
 
-test('v138: tier A really measures against 800 — and refuses what it cannot find', () => {
+test('v138: tier A really measures against 800 — and refuses what it cannot find', (t) => {
+  if (!requireCompiler(t)) return
   const small = gateJson('GraftConfig')
   assert.equal(small.A.verdict, 'YES')
   assert.equal(small.A.measured.cap, 800, 'the cap must be reported, not assumed')
@@ -244,7 +249,8 @@ test('v138: tier A really measures against 800 — and refuses what it cannot fi
   assert.notEqual(missing.A.verdict, 'YES', 'an unknown cluster must never pass tier A')
 })
 
-test('v138: tiers A, C2, C3, C4 have machine verdicts; C1 and D do not pretend to', () => {
+test('v138: tiers A, C2, C3, C4 have machine verdicts; C1 and D do not pretend to', (t) => {
+  if (!requireCompiler(t)) return
   const report = gateJson('GraftConfig')
   assert.equal(report.A.verdict, 'YES')
   assert.equal(report.C3.verdict, 'YES')
@@ -255,7 +261,8 @@ test('v138: tiers A, C2, C3, C4 have machine verdicts; C1 and D do not pretend t
   assert.equal(report.D.verdict, 'MEASURED-SEPARATELY')
 })
 
-test('v138: a cluster that already moved is still found — in its own module, by name', () => {
+test('v138: a cluster that already moved is still found — in its own module, by name', (t) => {
+  if (!requireCompiler(t)) return
   /**
    * Tier A used to read only src/index.ts. After GraftConfig moved, A reported "0 行 — YES": a pass on
    * something it had not found. The gate must resolve across the whole tree and SAY which file it used,
@@ -269,7 +276,8 @@ test('v138: a cluster that already moved is still found — in its own module, b
   assert.equal(report.A.verdict, 'YES')
 })
 
-test('v138: the gate refuses a cluster it cannot find instead of passing vacuously', () => {
+test('v138: the gate refuses a cluster it cannot find instead of passing vacuously', (t) => {
+  if (!requireCompiler(t)) return
   const output = (() => {
     try {
       return execFileSync(process.execPath, [GATE, '--cluster', 'ThisSymbolDoesNotExist'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
@@ -279,7 +287,8 @@ test('v138: the gate refuses a cluster it cannot find instead of passing vacuous
   assert.match(output, /0 行|NO/u, `an unknown symbol must not report a plausible size:\n${output}`)
 })
 
-test('v138: the gate is calibrated against the real source, so its numbers move with refactors', () => {
+test('v138: the gate is calibrated against the real source, so its numbers move with refactors', (t) => {
+  if (!requireCompiler(t)) return
   const lines = readFileSync(SRC, 'utf8').split('\n')
   const container = gateJson('buildTape').A.measured.declarations.find((entry) => entry.name === 'buildTape')
   assert.equal(lines[container.start - 1], 'export function buildTape(', 'the reported start is real')
