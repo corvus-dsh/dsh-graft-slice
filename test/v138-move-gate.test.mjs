@@ -160,18 +160,27 @@ test('v138: B is the UNION of member closures, not the largest one', (t) => {
    * their String(), which is `"[object Object]"`.
    */
   /**
-   * ── THIS NUMBER IS THE EVIDENCE FOR THE BOTTOM-UP ORDER (step 1 of 4) ─────────────────────────
+   * ── THIS NUMBER IS THE EVIDENCE FOR THE BOTTOM-UP ORDER (steps 1 and 2 of 4) ──────────────────
    *
-   * Before the text-tools move: 341 lines / 14 declarations.
-   * After:                       322 lines / 10 declarations.
+   * extractGoal's closure, measured after each step rather than assumed:
    *
-   * The four members that left — normalizeText(6) + tokenSet(2) + nearDuplicate(8) +
-   * normalizedEqual(3) = 19 lines — are exactly the drop. That is what "moving a dependency first
-   * shrinks the dependent's closure" means, measured rather than assumed.
+   *   original                        14 declarations / 341 lines
+   *   step 1 (text tools, 19 lines)   10 declarations / 322 lines   −4 / −19
+   *   step 2 (tape shape, 39 lines)    6 declarations / 283 lines   −4 / −39
+   *
+   * The members that left in step 1 were normalizeText(6) + tokenSet(2) + nearDuplicate(8) +
+   * normalizedEqual(3) = 19. In step 2 they were GraftSource(5) + GraftTapeTurn(14) +
+   * GraftBoundary(6) + GraftTape(14) = 39. Exactly the drop both times.
+   *
+   * What remains is the goal-extraction family plus isGraftAuthored — i.e. steps 3 and 4 are all that
+   * is left between this function and a clean one-sentence cluster.
    */
   const single = gateJson('extractGoal')
-  assert.equal(single.B.measured.closureLines, 322, 'extractGoal after the text tools left its closure')
-  assert.equal(single.B.measured.declarations, 10, '14 members before, 10 after')
+  assert.equal(single.B.measured.closureLines, 283, 'extractGoal after steps 1 and 2')
+  assert.equal(single.B.measured.declarations, 6, '14 members originally, 6 after two steps')
+  assert.deepEqual(single.B.measured.declarations === 6 ? ['GoalLayer', 'GoalResult', 'currentDagNode', 'extractGoal', 'isGraftAuthored', 'objectiveOf'] : [],
+    ['GoalLayer', 'GoalResult', 'currentDagNode', 'extractGoal', 'isGraftAuthored', 'objectiveOf'],
+    'the remaining members are the goal family plus the message-source predicate')
 
   const gateSource = readFileSync(GATE, 'utf8')
   assert.match(gateSource, /for \(const member of entry\.closure\.members\) unionNames\.add\(member\.name\)/u,
