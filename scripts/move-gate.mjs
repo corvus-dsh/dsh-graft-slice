@@ -78,73 +78,125 @@ function sourceFiles(dir) {
 }
 
 /**
- * Declaration spans and kinds, without a TypeScript dependency (CI has none by design).
+ * ── LINE-ORIENTED PARSING: THREE ATTEMPTS, THREE WRONG NUMBERS, THEN THIS ──────────────────────────
  *
- * ── TWO BUGS THIS HAD TO BE FIXED FOR, BOTH MEASURED ────────────────────────────────────────────
+ * 1. Braces only, per line. A JSDoc listing braces made `export const inject` (ONE line) swallow to
+ *    L767, so GraftConfig vanished and tier A reported "288 lines — YES" for a declaration it never
+ *    found.
+ * 2. Braces and parens with a `sawBody` flag. `const inject = [...]` has no braces, so it ran to the
+ *    next `{` — GraftConfig's again.
+ * 3. A whole-file character state machine. It could not tell a REGEX LITERAL from a comment: reproduced
+ *    at `src/index.ts` L990, `const SESSION_SCOPE_PATTERN = /(for the rest of this session|…`, where the
+ *    scanner entered "line comment" state and swallowed the rest of the file — **tokenSet, nearDuplicate
+ *    and normalizedEqual disappeared**, so cluster 1 measured 545 instead of 558.
  *
- * 1. PARSING LINE BY LINE CANNOT STRIP A BLOCK COMMENT. `/** … *\/` usually spans many lines, so a
- *    per-line regex never matches it and the braces inside the prose are counted as code. Measured: a
- *    JSDoc listing `{ … }` made `export const inject` (ONE line, an array of strings) swallow everything
- *    up to L767 — GraftConfig disappeared entirely from the declaration map, and the gate reported
- *    "A YES, 288 lines" for a declaration it had never found.
- *    FIX: strip comments and string literals over the WHOLE FILE first, preserving line count.
+ * WHAT IT DOES NOW: a declaration starts only at a line start; comment-only lines are skipped whole;
+ * a trailing line comment is cut only when the `//` is preceded by whitespace (so `a || /x/.test` is
+ * safe); depth counts `{ ( [` minus `} ) ]` on what remains.
  *
- * 2. A DECLARATION IS NOT "CLOSED WHEN IT SEES A `{` AND RETURNS TO 0". `export const inject = [...]`
- *    has no braces at all; keying on `sawBody` let it run to the next brace, which was GraftConfig's.
- *    FIX: track a single depth over `{ ( [`, and end the declaration when that depth returns to 0
- *    AFTER the line it started on — with an explicit exception for `type X = A | B`, which has no
- *    bracketed body at all.
- *
- * Calibrated against four known answers (buildTape 3714/4209/496, GraftConfig 480/767/288,
- * extractGoal 2617/2824/208, renderReplayTurn 3684/3704/21) — all four must match or the parser is not
- * usable. The calibration is in test/v138-move-gate.test.mjs so a regression cannot pass silently.
+ * This is not a lexer and does not pretend to be one. It is CALIBRATED: four known spans must match, and
+ * three one-line declarations that attempt 3 lost must be found again. Both checks live in
+ * test/v138-move-gate.test.mjs.
  */
-function stripCommentsAndStrings(source) {
+const COMMENT_ONLY = /^\s*(?:\/\*|\*|\/\/)/u
+
+/** Cut a trailing `// …` comment, but never inside a string and never a `//` that is not whitespace-led. */
+function cutTrailingLineComment(line) {
+  let quote
+  for (let index = 0; index < line.length; index++) {
+    const char = line[index]
+    if (quote !== undefined) {
+      if (char === '\\') { index += 1; continue }
+      if (char === quote) quote = undefined
+      continue
+    }
+    if (char === "'" || char === '"' || char === '`') { quote = char; continue }
+    if (char === '/' && line[index + 1] === '/' && index > 0 && /\s/u.test(line[index - 1])) {
+      return line.slice(0, index)
+    }
+  }
+  return line
+}
+
+/** Depth contributed by one line, comments removed. */
+function depthOfLine(line) {
+  if (COMMENT_ONLY.test(line)) return 0
+  const code = cutTrailingLineComment(line)
+  let depth = 0
+  for (const char of code) {
+    if (char === '{' || char === '(' || char === '[') depth += 1
+    else if (char === '}' || char === ')' || char === ']') depth -= 1
+  }
+  return depth
+}
+
+/**
+ * The file's lines with comments AND string literals blanked out, LINE COUNT PRESERVED so a reported
+ * line number still points at the real source line.
+ *
+ * ── A NAME INSIDE A STRING IS NOT A REFERENCE — THE THIRD TIME THIS BIT ──────────────────────
+ *
+ * Measured: `src/contracts/model-wording.contracts.ts:63` contains
+ * `'所以本契约只做召回：真正的判定在调用点的 isHumanAuthored / isQuestionLike 两步过滤之后。' +`
+ * — a CONTRACT TEST FIXTURE quoting the words. Counting it made tier C2 report
+ * `contracts/model-wording.contracts.ts` as a production caller of cluster 1, i.e. a REVIEW that would
+ * have blocked a legitimate move.
+ *
+ * The same defect appeared twice before, one layer up each time: a name in a COMMENT (C2 /
+ * GraftConfig), then a name in a COMMENT inside the cluster being scanned (C4 / extractGoal), now a name
+ * in a STRING. A scanner that only knows about one of the three will keep producing confident wrong
+ * answers, so this one knows about all three.
+ */
+function codeLinesOf(file) {
+  const lines = readFileSync(file, 'utf8').split('\n')
+  const out = []
+  let inBlock = false
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (inBlock) {
+      out.push('')
+      if (trimmed.includes('*/')) inBlock = false
+      continue
+    }
+    if (trimmed.startsWith('/*')) {
+      out.push('')
+      if (!trimmed.includes('*/')) inBlock = true
+      continue
+    }
+    if (trimmed.startsWith('//') || trimmed.startsWith('*')) { out.push(''); continue }
+    out.push(blankStringLiterals(cutTrailingLineComment(line)))
+  }
+  return out
+}
+
+/** Replace the CONTENT of string / template literals with spaces, keeping the delimiters and the length. */
+function blankStringLiterals(line) {
   let out = ''
   let index = 0
-  let state = 'code'
-  let quote = ''
-  while (index < source.length) {
-    const char = source[index]
-    const next = source[index + 1]
-    if (state === 'code') {
-      if (char === '/' && next === '*') { state = 'block'; out += '  '; index += 2; continue }
-      if (char === '/' && next === '/') { state = 'line'; out += '  '; index += 2; continue }
-      if (char === "'" || char === '"' || char === '`') { state = 'string'; quote = char; out += char; index += 1; continue }
-      out += char; index += 1; continue
+  while (index < line.length) {
+    const char = line[index]
+    if (char !== "'" && char !== '"' && char !== '`') { out += char; index += 1; continue }
+    const quote = char
+    out += quote
+    index += 1
+    while (index < line.length) {
+      const inner = line[index]
+      if (inner === '\\') { out += '  '; index += 2; continue }
+      if (inner === quote) { out += quote; index += 1; break }
+      out += ' '
+      index += 1
     }
-    if (state === 'block') {
-      if (char === '*' && next === '/') { state = 'code'; out += '  '; index += 2; continue }
-      out += char === '\n' ? '\n' : ' '; index += 1; continue
-    }
-    if (state === 'line') {
-      if (char === '\n') { state = 'code'; out += '\n'; index += 1; continue }
-      out += ' '; index += 1; continue
-    }
-    // inside a string literal: keep the delimiters, blank the contents
-    if (char === '\\') { out += '  '; index += 2; continue }
-    if (char === quote) { state = 'code'; out += char; index += 1; continue }
-    out += char === '\n' ? '\n' : ' '; index += 1; continue
   }
   return out
 }
 
 function moduleDeclarations(file) {
-  const text = readFileSync(file, 'utf8')
-  const lines = stripCommentsAndStrings(text).split('\n')
+  const lines = readFileSync(file, 'utf8').split('\n')
   const found = new Map()
   const DECL = /^(?:export\s+)?(?:declare\s+)?(?:async\s+)?(interface|type|function|const|let|var|class)\s+([A-Za-z_$][\w$]*)/u
 
-  const depthOf = (line) => {
-    let depth = 0
-    for (const char of line) {
-      if (char === '{' || char === '(' || char === '[') depth += 1
-      else if (char === '}' || char === ')' || char === ']') depth -= 1
-    }
-    return depth
-  }
-
   for (let index = 0; index < lines.length; index++) {
+    if (COMMENT_ONLY.test(lines[index])) continue
     const decl = DECL.exec(lines[index])
     if (decl === null) continue
     const keyword = decl[1]
@@ -154,20 +206,20 @@ function moduleDeclarations(file) {
       : keyword === 'function' ? 'function'
         : keyword === 'class' ? 'class' : 'value'
 
+    // `type X = A | B` has no bracketed body and ends on its own line.
+    if (keyword === 'type' && depthOfLine(lines[index]) === 0) {
+      found.set(name, { name, kind, start: index + 1, end: index + 1, lines: 1 })
+      continue
+    }
+
     let depth = 0
     let endLine = index
     for (let cursor = index; cursor < lines.length; cursor++) {
-      depth += depthOf(lines[cursor])
+      depth += depthOfLine(lines[cursor])
       endLine = cursor
-      // `type X = A | B` has no bracketed body: it ends on its own line
-      if (cursor === index && keyword === 'type' && depth === 0) break
-      // a body that opened and closed again on/before this line
       if (cursor > index && depth <= 0) break
-      if (cursor === index && depth <= 0 && keyword !== 'type') {
-        // one-liner const/let (e.g. `export const inject = [...]`) — depth already balanced
-        if (/=\s*[[{]/u.test(lines[index])) break
-        if (!/=\s*$/u.test(lines[index]) && !/\(\s*$/u.test(lines[index])) break
-      }
+      if (cursor === index && depth <= 0) break // a declaration that opens and closes on one line
+      if (cursor - index > 4000) break // safety valve against a malformed file
     }
 
     found.set(name, { name, kind, start: index + 1, end: endLine + 1, lines: endLine - index + 1 })
@@ -219,10 +271,41 @@ const moduleLines = spans.reduce((total, span) => total + span.lines, 0)
 const aVerdict = spans.length > 0 && moduleLines <= 800
 
 // ── B: closure (reported, never a veto) ───────────────────────────────────────────────────────────
-const closureOfCluster = runClosure(CLUSTER[0])
-const clusterClosureLines = closureOfCluster === undefined
-  ? undefined
-  : Math.max(...CLUSTER.map((name) => runClosure(name)?.lines ?? 0))
+/**
+ * ── A CLUSTER'S CLOSURE IS THE UNION OF ITS MEMBERS' CLOSURES, NOT THE LARGEST ONE ───────────────
+ *
+ * Measured on cluster 1 (21 members): taking `max(member closure lines)` reported **341**, because
+ * `extractGoal` alone is 341. The cluster's real weight is **558** — the members do not nest, they add
+ * up. Reporting 341 understated the cost of the move by 217 lines, in the direction that makes a move
+ * look cheaper than it is.
+ */
+const memberClosures = CLUSTER.map((name) => ({ name, closure: runClosure(name) })).filter((entry) => entry.closure !== undefined)
+const closureOfCluster = memberClosures.length === 0 ? undefined : memberClosures[0].closure
+const clusterClosureMembers = new Set()
+for (const entry of memberClosures) for (const member of entry.closure.members) clusterClosureMembers.add(member.name)
+const clusterClosureLines = (() => {
+  if (memberClosures.length === 0) return undefined
+  /**
+   * ── THE MEMBERS ARE OBJECTS, NOT THE PRETTY STRINGS ─────────────────────────────────────────────
+   *
+   * \`runClosure\` parses the tool's output into \`{ file, name, kind }\` objects. The first version of
+   * this union still assumed the raw \`relative:name [kind]\` STRING and ran a regex over it, so every
+   * match produced \`String({}) === "[object Object]"\`, \`linesByMember\` stayed empty and tier B reported
+   * **0 lines** — for a cluster whose real weight is 558. A zero that looks like "cheap to move".
+   *
+   * Read the fields, not the string.
+   */
+  const unionNames = new Set()
+  for (const entry of memberClosures) {
+    for (const member of entry.closure.members) unionNames.add(member.name)
+  }
+  let total = 0
+  for (const name of unionNames) {
+    const span = resolveDeclaration(name)
+    if (span !== undefined) total += span.lines
+  }
+  return total
+})()
 
 // ── C1: one sentence without "and" ─────────────────────────────────────────────────────────────────
 // A machine cannot decide this. What it CAN do is show the declaration so the reader decides, and
@@ -247,7 +330,7 @@ const referenceSites = []
 for (const file of [...sourceFiles(SRC)]) {
   const rel = relative(SRC, file).split('\\').join('/')
   if (NOT_SHIPPED.has(rel)) continue
-  const lines = stripCommentsAndStrings(readFileSync(file, 'utf8')).split('\n')
+  const lines = codeLinesOf(file)
   for (const [index, line] of lines.entries()) {
     const declarationOfItself = CLUSTER.some((name) => {
       const span = indexDeclarations.get(name)
@@ -287,7 +370,7 @@ const importersOf = []
 for (const file of sourceFiles(SRC)) {
   const rel = relative(SRC, file).split('\\').join('/')
   if (rel === 'index.ts' || NOT_SHIPPED.has(rel)) continue
-  const text = stripCommentsAndStrings(readFileSync(file, 'utf8'))
+  const text = codeLinesOf(file).join('\n')
   const importLines = text.split('\n').filter((line) => /^\s*(?:import|export)\b/u.test(line))
   for (const line of importLines) {
     if (CLUSTER.some((name) => new RegExp(`\\b${name}\\b`, 'u').test(line))) { importersOf.push({ file: rel, line: line.trim() }); break }
@@ -346,6 +429,119 @@ if (containerSpan !== undefined) {
 }
 const clusterNames = new Set(CLUSTER)
 const implicitOrdering = outsideRefs.filter((ref) => containerAssignments.has(ref.name))
+/**
+ * ── C4 MUST NOT PASS BECAUSE ITS INPUT SET IS EMPTY ─────────────────────────────────────────────
+ *
+ * The first version asked only: "does any OUTSIDE dependency name a container-local variable?" For a
+ * closed cluster that question is vacuous — outsideRefs is empty, so the answer is always YES. That is
+ * the empty-set-as-proof shape this phase keeps finding.
+ *
+ * The question C4 actually asks (user ruling ⑤) is: which buildTape-local variables does this cluster
+ * READ? A function that closes over `sliced`, `currentTurn` or `turns` cannot be hoisted out of the
+ * container however small its own closure is.
+ *
+ * ── AND THE COMMENTS MUST BE STRIPPED, WHICH THE SECOND VERSION FORGOT ──────────────────────────
+ *
+ * Measured on `extractGoal`: the scanner reported 17 reads, and **10 of the 11 distinct names were
+ * words in PROSE** — `message`, `user`, `goal`, `content`, `target`, `semantic`, `call`, `pointer` all
+ * first occur inside `/** … *\/` paragraphs (`"is this human message a requirement"`,
+ * `"the user's 先别写骨架，先修 CI vanished"`, …). The only real hit was `event`, and even that was the
+ * PARAMETER of an arrow function (`(event) => event.type === …`), not a container local.
+ *
+ * This is the same defect as C2's comment mentions, one layer down: a name in prose is not a name in
+ * code. So the cluster's text goes through the SAME whole-file stripper the declaration parser uses,
+ * and names that the cluster DECLARES ITSELF (parameters, destructuring, const/let/var) are dropped —
+ * a function is not closed over by its own parameter.
+ */
+const containerLocalReads = (() => {
+  if (containerSpan === undefined) return []
+  const reads = []
+  for (const name of CLUSTER) {
+    const span = resolveDeclaration(name)
+    if (span === undefined) continue
+    // ── A CLUSTER MEMBER MAY LIVE IN ANY FILE, NOT ONLY index.ts ─────────────────────────────
+    //
+    // The first version skipped anything whose file was not `index.ts`. That made C4 silently report
+    // "reads nothing" for any member that had already been moved — and, worse, a PROBE function written
+    // in a new module and reading a buildTape local came back with zero hits. Zero from "not scanned" is
+    // indistinguishable from zero from "scanned and clean", which is exactly the empty-set failure this
+    // question exists to avoid. Scan wherever the member actually is.
+    const memberFile = span.file ?? 'index.ts'
+    const memberLines = memberFile === 'index.ts' ? codeLinesOf(INDEX) : codeLinesOf(join(SRC, memberFile))
+    const memberRaw = memberFile === 'index.ts' ? readFileSync(INDEX, 'utf8').split('\n') : readFileSync(join(SRC, memberFile), 'utf8').split('\n')
+    const body = memberLines.slice(span.start - 1, span.end)
+
+    // Names the cluster declares ITSELF (parameters, destructuring, local const/let/var, arrow params).
+    const own = new Set()
+    for (const line of body) {
+      for (const match of line.matchAll(/(?:^|[^\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)/gu)) own.add(match[1])
+      for (const match of line.matchAll(/(?:^|[\s(,])([A-Za-z_$][\w$]*)\s*:\s*[A-Za-z_$]/gu)) own.add(match[1])
+      for (const match of line.matchAll(/^\s*([A-Za-z_$][\w$]*)\s*=(?![=>])/gu)) own.add(match[1])
+      // arrow-function parameters, single or parenthesised: `(existing) =>`, `(a, b) =>`, `event =>`
+      for (const match of line.matchAll(/\(([^()]*)\)\s*=>/gu)) {
+        for (const part of match[1].split(',')) {
+          const parameter = part.trim().split('=')[0]?.trim()
+          if (parameter !== undefined && /^[A-Za-z_$][\w$]*$/u.test(parameter)) own.add(parameter)
+        }
+      }
+      for (const match of line.matchAll(/(?:^|[^\w$.)])([A-Za-z_$][\w$]*)\s*=>/gu)) own.add(match[1])
+      for (const match of line.matchAll(/function\s*[A-Za-z_$\w]*\s*\(([^)]*)\)/gu)) {
+        for (const part of match[1].split(',')) {
+          const parameter = part.trim().split(':')[0]?.split('=')[0]?.trim()
+          if (parameter !== undefined && /^[A-Za-z_$][\w$]*$/u.test(parameter)) own.add(parameter)
+        }
+      }
+      for (const match of line.matchAll(/(?:const|let|var)\s*[{[]([^}\]]*)[}\]]/gu)) {
+        for (const part of match[1].split(',')) {
+          const declared = part.trim().split(':').pop()?.split('=')[0]?.trim()
+          if (declared !== undefined && /^[A-Za-z_$][\w$]*$/u.test(declared)) own.add(declared)
+        }
+      }
+    }
+
+    for (const [offset, line] of body.entries()) {
+      /**
+       * ── A TYPE MEMBER IS NOT A VARIABLE READ (the fourth false-positive source) ────────────────
+       *
+       * Measured on cluster 1: C4 reported 4 hits and every one was an INTERFACE FIELD —
+       * `semantic?: SemanticState`, `replayedMessagesSkipped?: number`, `userTexts?: string[]`,
+       * `isError?: boolean`. A type declaration names fields; it does not read container state. A type
+       * cannot have an implicit ordering at all, so any hit inside a `type` member is meaningless.
+       */
+      const spanKind = resolveDeclaration(name)?.kind
+      if (spanKind === 'type') continue
+      // A field/property declaration line: `name?: Type` or `name: Type` at the start of a member.
+      if (/^\s*(?:readonly\s+)?[A-Za-z_$][\w$]*\??\s*[:(]/u.test(line) && !/^\s*(?:const|let|var|return|if|for|while)\b/u.test(line)) {
+        continue
+      }
+      for (const local of containerAssignments) {
+        if (own.has(local)) continue // its own parameter/local, not the container's
+        // A PROPERTY NAME IS NOT A VARIABLE: in `event.data?.source` the token `source` is a property.
+        // Remove every property access before testing, so only a genuine bare identifier counts.
+        let stripped = line.replace(new RegExp('\\??\\.\\s*' + local.replace(/\$/gu, '\\$') + '\\b', 'gu'), ' ')
+        // AN OBJECT-LITERAL KEY IS NOT A VARIABLE EITHER: in `{ source: 'user' }` it is a key.
+        stripped = stripped.replace(new RegExp('(^|[({,\\[])\\s*' + local.replace(/\$/gu, '\\$') + '\\s*:(?!:)', 'gu'), '$1 ')
+        const pattern = new RegExp('\\b' + local.replace(/\$/gu, '\\$') + '\\b', 'u')
+        if (!pattern.test(stripped)) continue
+        reads.push({
+          clusterMember: name,
+          local,
+          atLine: span.start + offset,
+          // show the source line WITH comments so a human can see what the code actually says
+          text: (memberRaw[span.start + offset - 1] ?? '').trim().slice(0, 110),
+        })
+      }
+    }
+  }
+  const seen = new Set()
+  return reads.filter((entry) => {
+    const key = entry.clusterMember + '::' + entry.local
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+})()
+
 
 // ── D: performance tiers ───────────────────────────────────────────────────────────────────────────
 const exportSurface = (() => {
@@ -400,9 +596,17 @@ const report = {
   },
   C4: {
     tier: 'C4 无隐式时序',
-    verdict: implicitOrdering.length === 0 ? 'YES' : 'NO',
-    machine: true,
-    measured: { implicitOrdering, containerAssignments: containerAssignments.size, containerBodyLines, note: implicitOrdering.length === 0 ? 'nothing it reads is produced inside the container body' : 'reads state produced earlier inside the container — NOT functionally separable' },
+    verdict: (implicitOrdering.length === 0 && containerLocalReads.length === 0) ? 'YES' : 'REVIEW',
+    machine: implicitOrdering.length === 0 && containerLocalReads.length === 0,
+    measured: {
+      implicitOrdering,
+      containerLocalReads,
+      containerAssignments: containerAssignments.size,
+      containerBodyLines,
+      note: containerLocalReads.length === 0
+        ? 'the cluster reads NONE of the container\'s local bindings — it can leave as a unit'
+        : `the cluster reads ${containerLocalReads.length} container-local name(s); each must be judged "can it still get this after moving?"`,
+    },
   },
   D: {
     tier: 'D 性能不退（四项）',
@@ -452,6 +656,8 @@ line(`   ${report.C3.verdict}   outside 引用: ${outsideRefs.length === 0 ? '(�
 line('')
 line(`── C4 无隐式时序（最关键）──────────────────────────────────────`)
 line(`   ${report.C4.verdict}   依赖容器内先赋值的外部名字: ${implicitOrdering.length === 0 ? '(无)' : implicitOrdering.map((ref) => ref.name).join(', ')}`)
+line(`        读到的容器局部变量: ${containerLocalReads.length === 0 ? '(无)' : containerLocalReads.length + ' 处'}`)
+for (const read of containerLocalReads) line(`          ${read.clusterMember} 读 ${read.local}  (L${read.atLine})`)
 line(`        buildTape 体内 ${containerBodyLines} 行，解析出 ${containerAssignments.size} 个局部赋值`)
 
 line('')

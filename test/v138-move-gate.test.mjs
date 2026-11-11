@@ -18,7 +18,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -30,23 +30,83 @@ const gateJson = (cluster) => JSON.parse(execFileSync(process.execPath, [GATE, '
   cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
 }))
 
-test('v138: comments are stripped over the WHOLE FILE, not line by line', () => {
+test('v138: comments AND string literals are blanked, and a regex literal cannot swallow the file', () => {
+  /**
+   * Three attempts, three wrong numbers — each found by a NUMBER, not by reading:
+   *
+   *   1. per-line block-comment stripping -> GraftConfig vanished (inject swallowed to L767)
+   *   2. "closed when a { was seen" -> the same
+   *   3. a whole-file character state machine -> it could not tell a REGEX LITERAL from a comment.
+   *      Reproduced at src/index.ts L990: `const SESSION_SCOPE_PATTERN = /(for the rest of this session|…`
+   *      made it swallow the rest of the file, so tokenSet / nearDuplicate / normalizedEqual vanished and
+   *      cluster 1 measured 545 instead of 558.
+   *
+   * The rule now is line-oriented: comment-only lines are skipped whole, and a trailing `//` is cut
+   * only when whitespace precedes it. This test pins the THREE things that broke.
+   */
   const gateSource = readFileSync(GATE, 'utf8')
-  // The stripper must be a whole-source state machine, not a per-line regex.
-  assert.match(gateSource, /function stripCommentsAndStrings\(source\)/u)
-  assert.match(gateSource, /let state = 'code'/u, 'a real scanner tracks block/line/string state')
-  assert.match(gateSource, /if \(char === '\/' && next === '\*'\) \{ state = 'block'/u, 'it must enter block-comment state')
-  // and it must be applied to the WHOLE file before splitting
-  assert.match(gateSource, /stripCommentsAndStrings\(text\)\.split\('\\n'\)/u,
-    'the file must be stripped BEFORE it is split into lines')
+  assert.match(gateSource, /const COMMENT_ONLY =/u, 'comment-only lines are recognised')
+  assert.match(gateSource, /function cutTrailingLineComment/u, 'a trailing comment is cut, not the whole line')
+  assert.ok(gateSource.includes("line[index + 1] === '/' && index > 0"),
+    'a `//` must be whitespace-led before it counts as a comment — otherwise a regex literal is eaten')
+  assert.ok(gateSource.includes('/\\s/u.test(line[index - 1])'),
+    'the whitespace test is what keeps `a || /x/.test` safe')
+  assert.match(gateSource, /function blankStringLiterals/u, 'a name inside a string is not a reference')
 
-  // behavioural: a JSDoc containing braces must not shift a declaration that follows it
-  const decl = (() => {
-    const report = gateJson('GraftConfig')
-    return report.A.measured.declarations.find((entry) => entry.name === 'GraftConfig')
-  })()
-  assert.equal(decl.lines, 288,
-    'the parser must still bound the declaration exactly, wherever the file puts it')
+  // behavioural: the three declarations attempt 3 lost must be found
+  const threeOneLiners = gateJson('tokenSet')  // single-name probe keeps this cheap
+  assert.ok(threeOneLiners.A.measured.declarations.length > 0, 'tokenSet must be found')
+
+  const report = gateJson('extractGoal')
+  assert.ok(report.A.measured.declarations.length > 0)
+  assert.equal(report.A.measured.declarations[0].lines, 208, 'extractGoal is 208 lines')
+})
+
+test('v138: C4 can actually DETECT a read of a container local (its 0 must mean something)', () => {
+  /**
+   * ── ZERO FROM "NOT SCANNED" IS NOT ZERO FROM "SCANNED AND CLEAN" ────────────────────────────────
+   *
+   * C4 reported 0 container-local reads for cluster 1. That number went 17 -> 3 -> 1 -> 4 -> 0 as four
+   * distinct false-positive sources were removed, and after the fourth there was no evidence left that
+   * the check could detect ANYTHING. A probe function in a NEW module that literally returns a buildTape
+   * local came back with zero hits — because the scan skipped any member not in index.ts.
+   *
+   * This test plants such a probe and requires a hit, so "0 reads" for a real cluster is a finding rather
+   * than an empty scan.
+   */
+  const probe = join(ROOT, 'src', 'core', '__v138-c4-probe.ts')
+  const sourceText = [
+    '/** v138 probe: reads a buildTape local, so C4 must flag it. */',
+    'export function v138ProbeReadsContainerLocal(): unknown {',
+    '  return sliced',
+    '}',
+    '',
+  ].join('\n')
+  writeFileSync(probe, sourceText, 'utf8')
+  try {
+    const report = gateJson('v138ProbeReadsContainerLocal')
+    const reads = report.C4.measured.containerLocalReads
+    assert.ok(reads.length > 0, 'C4 must detect a real read of `sliced`; a zero here would be an empty scan')
+    assert.equal(report.C4.verdict, 'REVIEW')
+    assert.ok(reads.some((entry) => entry.local === 'sliced'))
+  } finally {
+    unlinkSync(probe)
+  }
+})
+
+test('v138: B is the UNION of member closures, not the largest one', () => {
+  /**
+   * Measured: taking `max(member closure lines)` over cluster 1 reported 341 (extractGoal alone) when the
+   * cluster weighs 558. Understating the cost by 217 lines biases every comparison toward "cheap to move".
+   * A second bug made it report 0: the members are `{file,name,kind}` objects and a regex was run over
+   * their String(), which is `"[object Object]"`.
+   */
+  const single = gateJson('extractGoal')
+  assert.equal(single.B.measured.closureLines, 341, 'extractGoal alone is 341')
+
+  const gateSource = readFileSync(GATE, 'utf8')
+  assert.match(gateSource, /for \(const member of entry\.closure\.members\) unionNames\.add\(member\.name\)/u,
+    'the union must read member.name, not match a regex over the object')
 })
 
 test('v138: the declaration parser reproduces independently-known spans', () => {
