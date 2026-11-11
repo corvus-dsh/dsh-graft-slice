@@ -88,12 +88,29 @@ test('v136: the edge checker can fail — a new dependency it must report is rep
  * and nothing else. That is what "did not introduce a new dependency" means for a move.
  */
 test('v136: a move may not add a dependency between two PRE-EXISTING modules', () => {
+  /**
+   * ── AN EDGE IS (from, to), NOT (from, to, symbols) ──────────────────────────────────────────────
+   *
+   * Measured false positive: adding \`SessionEventLike\` to an existing \`import type\` in index.ts changed
+   * that edge's SYMBOL LIST from five names to six. \`verify-import-edges\` reports per-signature rows, so
+   * it printed "ADDED 1 / REMOVED 1" — and this test read that as "a new dependency between two
+   * pre-existing modules", which it was not. The (from, to) pair was already there.
+   *
+   * So the comparison is by PAIR. What the rule forbids is a pair that did not exist before.
+   */
   const output = run(EDGES)
-  const added = [...output.matchAll(/^ {2}\+ (\S+) -> (\S+) \[/gmu)].map((m) => ({ from: m[1], to: m[2] }))
-  const removed = Number(/REMOVED\s+\((\d+)\)/u.exec(output)?.[1])
 
-  assert.equal(removed, 0, `no edge may vanish silently:
-${output}`)
+  /** Pull both columns of the report into (from, to) pairs, ignoring the symbol list. */
+  const pairs = (marker) => {
+    const section = output.split(marker)[1]?.split('\n\n')[0] ?? ''
+    return [...section.matchAll(/^ {2}[+-] (\S+) -> (\S+) \[/gmu)].map((m) => `${m[1]} -> ${m[2]}`)
+  }
+  const addedPairs = pairs('ADDED')
+  const removedPairs = pairs('REMOVED')
+
+  // a pair that disappears entirely is still a silent loss
+  const vanished = removedPairs.filter((pair) => !addedPairs.includes(pair))
+  assert.deepEqual(vanished, [], `an import edge vanished entirely:\n${output}`)
 
   // modules this diff CREATED (untracked under src/)
   const created = (() => {
@@ -105,19 +122,17 @@ ${output}`)
   })()
   const createdStems = new Set(created.map((path) => path.replace(/^src\//u, '').replace(/\.ts$/u, '')))
 
-  for (const edge of added) {
-    const toStem = edge.to.replace(/^\.\//u, '')
-    const fromStem = edge.from.replace(/^src\//u, '').replace(/\.ts$/u, '')
-    const toIsNew = createdStems.has(toStem)
-    const fromIsNew = createdStems.has(fromStem)
-    const ok = toIsNew || fromIsNew
+  // only genuinely NEW pairs are checked; a re-signed existing pair is fine
+  const brandNew = addedPairs.filter((pair) => !removedPairs.includes(pair))
+  for (const pair of brandNew) {
+    const [from, to] = pair.split(' -> ')
+    const toStem = to.replace(/^\.\//u, '')
+    const fromStem = from.replace(/^src\//u, '').replace(/\.ts$/u, '')
+    const ok = createdStems.has(toStem) || createdStems.has(fromStem)
     assert.ok(ok,
-      `${edge.from} -> ${edge.to} is a NEW dependency between two PRE-EXISTING modules.
-` +
-      `A move may only add an edge INTO a module it created, or OUT OF one.
-` +
-      `created by this diff: ${[...createdStems].join(', ') || 'none'}
-${output}`)
+      `${pair} is a NEW dependency between two PRE-EXISTING modules.\n` +
+      `A move may only add an edge INTO a module it created, or OUT OF one.\n` +
+      `created by this diff: ${[...createdStems].join(', ') || 'none'}\n${output}`)
   }
 })
 

@@ -67,7 +67,7 @@ import {
   textOfMessage,
   watermarkCache,
 } from './core/watermark.js'
-import type { GraftCostEstimate, GraftCostInput, TokenWatermark, WatermarkOptions, WatermarkThresholds } from './core/watermark.js'
+import type { GraftCostEstimate, GraftCostInput, SessionEventLike, TokenWatermark, WatermarkOptions, WatermarkThresholds } from './core/watermark.js'
 export {
   calculateSafeWatermark,
   deriveAutoTapeBudget,
