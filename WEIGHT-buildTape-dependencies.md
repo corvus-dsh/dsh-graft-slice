@@ -279,6 +279,41 @@ verify-import-edges: ADDED (1)   + core/adaptive-depth.ts -> ./ledger [ledgerRec
 **已补**：gate 现在逐条打印 `[verdict] test name` + 原因，并且自检
 「由这些行推出的总数 == 打印的总数」，不等则退出码 1。`test/v137`（5 条，can-red 5/5）钉住它。
 
+**补上之后的第一次 CI 运行（`02febd5`，job 130395896865）就在日志里给出了逐条证据**：
+
+```
+skip evidence: 17 classified line(s)
+   1. [resource] every sample can be found in the real corpus …
+      corpus absent at …/_scratch/real-texts.json — provenance unverified in this checkout (not a pass)
+   2. [resource] every real-misfire can be found in the real corpus too
+      corpus absent at … — misfire provenance unverified in this checkout (not a pass)
+   3. [resource] graft TODO_TOOL_NAME and observer TODO_TOOL are character-for-character
+      observer source absent at …/dsh-observer/src/core/monitor.ts — parity unverified in this checkout
+   4. [resource] the observer copy still carries the same intent note (a warning, not a gate)
+      observer source absent — intent note unverified
+   5. [resource] the 35 constraints from the seven clean generations are ALL accepted
+      ledger absent at …/.graft-constraint-sections.json — reverse validation not run in this checkout
+   6. [pending]  D2 control: a recursive delete is still destructive wherever it points
+      TD-17 ruled to KEEP this behaviour: recursive delete inside the workspace stays ALLOWED
+   7. [pending]  C1: a pasted REPORT is not presented as the requirement
+      pending a ruling on goal semantics (用户要什么 vs 用户最后说了什么)
+   8. [resource] FULL CORPUS (local only): runs when present, and says so when it is not
+      CORPUS-CHECK SKIPPED (RESOURCE_MISSING): full corpus not present; the committed sample above still ran
+   9..17. [resource] × 9  closure / v135 五条 + 四条 closure 基础
+      RESOURCE: typescript is not installed; closure.mjs exits 2 rather than guessing
+totals derived from these lines: AGREE
+```
+
+**逐类核对**（`measured: tests=761 pass=744 fail=0 skipped=17 (pending=2 resource=15)`）：
+
+| 类 | 条数 | 逐条原因 | 与 gate 一致 |
+|---|---|---|---|
+| **resource** | **15** | typescript 未安装 **9** / corpus 缺失 **3** / observer 源码缺失 **2** / ledger 缺失 **1** | ✅ |
+| **pending** | **2** | TD-17 裁定保留 / 目标语义待裁定 | ✅ |
+| 合计 | 17 | 编号 1..17 连续 | ✅ |
+
+**现在这 15 条是可以逐条审阅的，不再是「总数恰好对上」。**
+
 > 顺带记一个真实 bug：v137 第一版直接 spawn 了 gate 的 main，而 main 会在子进程里跑整套测试 ——
 > 而整套测试包含 v137 自己，于是**递归**（实测把套件从 756 推到 760、fail 从 0 推到 4）。
 > 修法是把分类抽成纯函数 `classifySkipLines`，测试只调纯函数。**「测试触发的测量污染了测量对象」
