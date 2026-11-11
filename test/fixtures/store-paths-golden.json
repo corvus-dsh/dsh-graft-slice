@@ -17,8 +17,8 @@
     "",
     "Regenerate with: node ../_scratch/p2-golden.mjs (or p2b for the environment cases)."
   ],
-  "generatedAt": "2026-11-11T04:14:02.675Z",
-  "sourceCommit": "349f8c047d662368bb1a54f0cea2b7d2eff88f73",
+  "generatedAt": "2026-11-11T04:28:16.272Z",
+  "sourceCommit": "792d84e1b4d096bd8fd3a9a719aa2292510c1587",
   "pathCount": 11,
   "branchCount": 7,
   "pluginDir": "D:/持久层能力架构/dsh-graft-slice",

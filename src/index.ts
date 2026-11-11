@@ -213,6 +213,18 @@ import {
 } from './core/state.js'
 import type { GraftTargetMark, LeftoverTarget, PlanNudgeState, PreparedSlice } from './core/state.js'
 
+/**
+ * ── THE STORE LAYER (S3-P4) ─────────────────────────────────────────────────────────────────────
+ *
+ * `createStoreLayer` resolves the profile's store directory and returns ONE frozen path set; it imports
+ * nothing from this file (the structural types it needs live in `core/gateway-types.ts`, moved there in
+ * P0 precisely so this import cannot close a cycle). `fallbackDir` is supplied here rather than computed
+ * inside the layer: in TS source the layer's `import.meta.url` is `src/core/`, while the bundle inlines
+ * it beside this file — the fallback must agree with the bundle, which is what ships.
+ */
+import { createStoreLayer } from './core/store-layer.js'
+import type { StoreLayer, StorePaths } from './core/store-layer.js'
+
 /** Re-exported: part of the plugin's public surface (tests import it). */
 export { graftError }
 /**
@@ -313,8 +325,6 @@ export type { IgnitionResult, IgnitionRollback, PendingIgnition }
  * the top of the module) and `core/ignition.ts` still reaches them through the injected resolver.
  */
 /** Where the pending-ignition queue is persisted; set by `configureRetiredStore`. */
-let pendingIgnitionPath = ''
-
 /**
  * v7.6 — THE HOST-SHAPE LAYER MOVED TO `src/core/host-shape.ts` (~900 lines out of this file).
  *
@@ -5230,10 +5240,7 @@ export function buildInjectionPlan(
  * LOCATION of each store: these are `let` because `configureRetiredStore` reassigns them
  * once a profile or `dataDir` is resolved, and an imported binding could not be reassigned.
  */
-let retiredStorePath = join(PLUGIN_DIR, '.retired.json')
-let transferredStorePath = join(PLUGIN_DIR, '.transferred.json')
 /** v7.0: persisted graft-target marks (chain guard + protection across restarts). */
-let graftTargetsPath = join(PLUGIN_DIR, '.graft-targets.json')
 /**
  * v7.4 P0-2: the durable transaction journal, one file per in-flight migration.
  *
@@ -5246,62 +5253,62 @@ let graftTargetsPath = join(PLUGIN_DIR, '.graft-targets.json')
  * One file per SOURCE session fixes both: the name identifies the migration, and
  * the record carries the stage reached.
  */
-let txnDirPath = join(PLUGIN_DIR, '.txn')
-/** The context captured by `configureRetiredStore`, reused by later store writes. */
-let storeCtx: PluginContextLike | undefined
-function ctxForStores(): PluginContextLike | undefined {
-  return storeCtx
-}
-let storeScope = 'plugin-dir'
-
 /**
- * Resolve the profile-private directory that owns the retirement stores.
+ * ── THE STORE LAYER HANDLE (S3-P4) ──────────────────────────────────────────────────────────────
  *
- * Isolation matters: `.retired.json` decides which sessions a pre-step gate
- * refuses. Sharing one file across profiles (or across work-spaces in one
- * profile) lets a test retirement silently block a real session.
+ * One frozen handle replaces thirteen module-level `let`s. It is `undefined` until `apply()` assembles
+ * it, and `storePaths()` THROWS in that state rather than returning an empty string: the old `let`s
+ * defaulted to `PLUGIN_DIR`, so a call before assembly wrote into the package directory silently.
  *
- * Resolution order:
- *   1. `ctx.paths.data`   — the profile's declared data dir, when the service
- *                           is mounted (it is not in every profile).
- *   2. `DSH_PROFILE_DIR`  — the launcher's own profile directory.
- *   3. `DSH_HOME/profiles/<DSH_PROFILE>` — same value, derived by hand.
- *   4. the plugin directory — last resort, logged as a warning because it is
- *      shared by every profile that loads this plugin.
+ * ── WHY THE THROW CARRIES `PERSISTENCE_REQUIRED` ────────────────────────────────────────────────
+ *
+ * Measured regression: the first version threw a plain `Error`, which pre-empted the documented refusal
+ * of a bare deployment. `dsh-paradise/test/host-independence-seams.test.mjs` asserts that calling
+ * `graftSliceAndInject` with an EMPTY ctx fails with `code === 'PERSISTENCE_REQUIRED'` — the assertion
+ * exists so that "this deployment has no gateway" is never confused with "the plugin is broken".
+ *
+ * Reaching a store before `apply()` means exactly the same thing from the caller's side: there is no
+ * persistence binding in this deployment. Same refusal, same code, still loud.
  */
-function resolveStoreDir(ctx: PluginContextLike, explicit?: string): { dir: string; scope: string } {
-  if (typeof explicit === 'string' && explicit.length > 0) {
-    return { dir: explicit, scope: 'config.dataDir' }
+let storeLayer: StoreLayer | undefined
+
+function storePaths(): StorePaths {
+  if (storeLayer === undefined) {
+    const error = graftError(
+      'PERSISTENCE_REQUIRED',
+      'the graft store layer is not assembled: apply() has not run in this deployment, so there is no ' +
+        'store directory to read or write',
+    )
+    throw error
   }
-  let paths: unknown
-  try {
-    paths = typeof ctx.get === 'function' ? ctx.get('paths') : undefined
-  } catch {
-    // Cordis service proxies may reject undeclared property reads.
-    paths = undefined
-  }
-  if (isRecord(paths) && typeof paths.data === 'string' && paths.data.length > 0) {
-    return { dir: paths.data, scope: 'paths.data' }
-  }
-  const profileDir = process.env.DSH_PROFILE_DIR
-  if (typeof profileDir === 'string' && profileDir.length > 0) {
-    return { dir: join(profileDir, 'data', 'dsh-graft-slice'), scope: 'DSH_PROFILE_DIR' }
-  }
-  const home = process.env.DSH_HOME
-  const profile = process.env.DSH_PROFILE
-  if (typeof home === 'string' && home.length > 0) {
-    const suffix = typeof profile === 'string' && profile.length > 0 ? ['profiles', profile] : ['plugin-data']
-    return { dir: join(home, ...suffix, 'data', 'dsh-graft-slice'), scope: 'DSH_HOME' }
-  }
-  return { dir: PLUGIN_DIR, scope: 'plugin-dir' }
+  return storeLayer.paths
 }
 
+/** The context captured at assembly time, or `undefined` when the layer was built without one. */
+function storeCtxOf(): PluginContextLike | undefined {
+  return storeLayer?.ctx
+}
 /** Load durable retirement IDs. Missing/corrupt files never block activation. */
 function configureRetiredStore(ctx: PluginContextLike, settings: Required<GraftConfig>): void {
-  const resolved = resolveStoreDir(ctx, settings.dataDir)
-  const dataDir = resolved.dir
-  storeScope = resolved.scope
-  storeCtx = ctx
+  /**
+   * ── THE SINGLE ASSEMBLY POINT (S3-P4) ──────────────────────────────────────────────────────────
+   *
+   * Thirteen module-level `let`s used to be assigned here, one per path. They are now ONE frozen
+   * handle produced by `core/store-layer.ts`, which is the module `test/v133` diffs against a golden
+   * file recorded from the OLD implementation. Two things follow, and both are deliberate:
+   *
+   *   * `fallbackDir` is passed in from HERE, not computed inside the layer. In TS source the layer's
+   *     `import.meta.url` is `src/core/`, while the bundle inlines it beside `index.ts` — two different
+   *     answers for the one branch that every profile shares.
+   *   * the layer is REBUILT on each assembly, never cached: the second profile must not inherit the
+   *     first profile's directory.
+   */
+  storeLayer = createStoreLayer(ctx, {
+    ...(settings.dataDir === '' ? {} : { dataDir: settings.dataDir }),
+    fallbackDir: PLUGIN_DIR,
+  })
+
+  const dataDir = storePaths().dir
   /**
    * P1-2: PUBLISH THIS DIRECTORY'S LAYOUT, so `dsh-memory` can REFUSE rather than guess.
    *
@@ -5324,19 +5331,6 @@ function configureRetiredStore(ctx: PluginContextLike, settings: Required<GraftC
     // manifest and proceeds — the pre-P1-2 behaviour — which is the safe direction for a failed
     // marker: refusing to write a ledger because a marker could not be written would be worse.
   }
-  retiredStorePath = join(dataDir, '.retired.json')
-  transferredStorePath = join(dataDir, '.transferred.json')
-  graftTargetsPath = join(dataDir, '.graft-targets.json')
-  txnDirPath = join(dataDir, '.txn')
-  constraintSectionsPath = join(dataDir, '.graft-constraint-sections.json')
-  pendingConstraintsPath = join(dataDir, '.pending-constraints.json')
-  // v0.19: the ignition queue lives with the rest of the per-profile state, so a
-  // crash between "target durable" and "target running" is recoverable per profile.
-  pendingIgnitionPath = join(dataDir, '.graft-pending-ignition.json')
-  draftsPath = join(dataDir, '.graft-drafts.json')
-  preparedStorePath = join(dataDir, '.graft-prepared.json')
-  leftoversStorePath = join(dataDir, '.graft-leftovers.json')
-  autoGraftSuppressedPath = join(dataDir, '.auto-graft-suppressed.json')
   // Create the profile-private directory up front: it proves the location is
   // writable at activation time instead of failing mid-migration, and it makes
   // the isolation target observable.
@@ -5349,7 +5343,7 @@ function configureRetiredStore(ctx: PluginContextLike, settings: Required<GraftC
       // Logging must not block activation.
     }
   }
-  if (storeScope === 'plugin-dir') {
+  if (storePaths().scope === 'plugin-dir') {
     try {
       ctx.logger?.warn?.(
         `[dsh-graft-slice] state is shared across profiles at ${dataDir}. Set config.dataDir per profile to isolate retirement and drafts.`,
@@ -5361,8 +5355,8 @@ function configureRetiredStore(ctx: PluginContextLike, settings: Required<GraftC
   // v0.18: both ledgers are read through the epoch-aware reader. A ledger from a
   // newer writer, or a torn one, is REFUSED rather than half-understood.
   for (const [path, label] of [
-    [transferredStorePath, 'transferred'],
-    [retiredStorePath, 'retired'],
+    [storePaths().transferred, 'transferred'],
+    [storePaths().retired, 'retired'],
   ] as const) {
     const defect = ledgerDefectOf(path)
     if (defect !== undefined) {
@@ -5377,7 +5371,7 @@ function configureRetiredStore(ctx: PluginContextLike, settings: Required<GraftC
     }
   }
   try {
-    const parsed = ledgerRecord(transferredStorePath)
+    const parsed = ledgerRecord(storePaths().transferred)
     if (isRecord(parsed)) {
       for (const [id, value] of Object.entries(parsed)) {
         if (!isRecord(value) || typeof value.newSessionId !== 'string') continue
@@ -5391,21 +5385,21 @@ function configureRetiredStore(ctx: PluginContextLike, settings: Required<GraftC
   } catch (error) {
     if ((error as any)?.code !== 'ENOENT') {
       try {
-        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${transferredStorePath}: ${String((error as any)?.message ?? error)}`)
+        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${storePaths().transferred}: ${String((error as any)?.message ?? error)}`)
       } catch {
         // Logging must not block activation.
       }
     }
   }
   try {
-    const parsed = ledgerArray(retiredStorePath)
+    const parsed = ledgerArray(storePaths().retired)
     for (const id of parsed) {
       if (typeof id === 'string' && id.length > 0) retiredSessions.add(id)
     }
   } catch (error) {
     if ((error as any)?.code !== 'ENOENT') {
       try {
-        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${retiredStorePath}: ${String((error as any)?.message ?? error)}`)
+        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${storePaths().retired}: ${String((error as any)?.message ?? error)}`)
       } catch {
         // Logging must not block activation.
       }
@@ -5495,8 +5489,6 @@ export function verifyHardConstraints(
  * Written on every new target and read once at activation, next to the other
  * store files so profile isolation is unchanged.
  */
-let constraintSectionsPath = join(PLUGIN_DIR, '.graft-constraint-sections.json')
-
 /**
  * v7.2: atomic write — temp file in the same directory, then rename.
  *
@@ -5600,7 +5592,7 @@ function rotateGraftAudit(path: string): void {
 }
 
 export function appendGraftAudit(entry: GraftAuditEntry): void {
-  const base = dirname(retiredStorePath)
+  const base = dirname(storePaths().retired)
   try {
     mkdirSync(base, { recursive: true })
     const path = join(base, '.graft-audit.jsonl')
@@ -5637,7 +5629,7 @@ setAuditSink(appendGraftAudit)
  * is how one source ends up with two divergent continuations.
  */
 export function acquireSourceLock(sessionId: string): () => void {
-  const path = join(dirname(retiredStorePath), `.lock-source-${encodeURIComponent(sessionId)}`)
+  const path = join(dirname(storePaths().retired), `.lock-source-${encodeURIComponent(sessionId)}`)
   return acquireFileLock(path, { timeoutMs: 60_000, staleMs: 120_000, leaseMs: 30_000, label: `source:${sessionId}` })
 }
 
@@ -5717,9 +5709,9 @@ function readJsonArray(path: string): unknown[] {
 function persistConstraintSections(ctx: PluginContextLike | undefined): void {
   if (ctx === undefined) return
   try {
-    mkdirSync(dirname(constraintSectionsPath), { recursive: true })
-    withFileLock(constraintSectionsPath, () => {
-      const payload = readJsonRecord(constraintSectionsPath) as Record<string, { constraints: string[]; at: number }>
+    mkdirSync(dirname(storePaths().constraintSections), { recursive: true })
+    withFileLock(storePaths().constraintSections, () => {
+      const payload = readJsonRecord(storePaths().constraintSections) as Record<string, { constraints: string[]; at: number }>
       /**
        * ── A4: DO NOT WRITE FRAGMENTS INTO THE LEDGER ─────────────────────────────────────────────
        *
@@ -5755,12 +5747,12 @@ function persistConstraintSections(ctx: PluginContextLike | undefined): void {
           targetConstraintSections.set(id, entry as never)
         }
       }
-      writeJsonAtomic(constraintSectionsPath, payload)
+      writeJsonAtomic(storePaths().constraintSections, payload)
     })
   } catch (error) {
     try {
       ctx.logger?.warn?.(
-        `[dsh-graft-slice] cannot write ${constraintSectionsPath}: ${String((error as any)?.message ?? error)}`,
+        `[dsh-graft-slice] cannot write ${storePaths().constraintSections}: ${String((error as any)?.message ?? error)}`,
       )
     } catch {
       // Logging must not change the migration result.
@@ -5770,7 +5762,7 @@ function persistConstraintSections(ctx: PluginContextLike | undefined): void {
 
 function loadConstraintSections(ctx: PluginContextLike): void {
   try {
-    const parsed = JSON.parse(readFileSync(constraintSectionsPath, 'utf8'))
+    const parsed = JSON.parse(readFileSync(storePaths().constraintSections, 'utf8'))
     if (!isRecord(parsed)) return
     for (const [id, value] of Object.entries(parsed)) {
       if (!isRecord(value) || !Array.isArray(value.constraints)) continue
@@ -5785,7 +5777,7 @@ function loadConstraintSections(ctx: PluginContextLike): void {
     if ((error as any)?.code !== 'ENOENT') {
       try {
         ctx.logger?.warn?.(
-          `[dsh-graft-slice] cannot read ${constraintSectionsPath}: ${String((error as any)?.message ?? error)}`,
+          `[dsh-graft-slice] cannot read ${storePaths().constraintSections}: ${String((error as any)?.message ?? error)}`,
         )
       } catch {
         // Logging must not block activation.
@@ -5806,21 +5798,16 @@ function loadConstraintSections(ctx: PluginContextLike): void {
  * `configureRetiredStore` reassigns every one of them once a profile or `dataDir` is
  * resolved, and an imported binding is read-only in the importer.
  */
-let pendingConstraintsPath = join(PLUGIN_DIR, '.pending-constraints.json')
-let draftsPath = join(PLUGIN_DIR, '.graft-drafts.json')
 /** v7.4 P1-2: reviewed-but-not-committed slices live here. */
-let preparedStorePath = join(PLUGIN_DIR, '.graft-prepared.json')
 const AUTO_GRAFT_RESUME_GRACE_MS = 30 * 60_000
-let autoGraftSuppressedPath = join(PLUGIN_DIR, '.auto-graft-suppressed.json')
-
 function persistPendingConstraints(ctx: PluginContextLike): void {
   try {
-    mkdirSync(dirname(pendingConstraintsPath), { recursive: true })
+    mkdirSync(dirname(storePaths().pendingConstraints), { recursive: true })
     const payload = [...pendingConstraints.entries()].map(([targetId, value]) => ({ targetId, ...value }))
-    writeJsonAtomic(pendingConstraintsPath, payload)
+    writeJsonAtomic(storePaths().pendingConstraints, payload)
   } catch (error) {
     try {
-      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${pendingConstraintsPath}: ${String((error as any)?.message ?? error)}`)
+      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${storePaths().pendingConstraints}: ${String((error as any)?.message ?? error)}`)
     } catch {
       // Logging must not change the migration result.
     }
@@ -5844,16 +5831,14 @@ function persistPendingConstraints(ctx: PluginContextLike): void {
  * `src/core/state.ts`; the persistence below needs the path, so it stays here.
  */
 
-let leftoversStorePath = join(PLUGIN_DIR, '.graft-leftovers.json')
-
 function persistLeftovers(ctx: PluginContextLike): void {
   try {
-    mkdirSync(dirname(leftoversStorePath), { recursive: true })
-    writeJsonAtomic(leftoversStorePath, [...leftoverTargets.values()])
+    mkdirSync(dirname(storePaths().leftovers), { recursive: true })
+    writeJsonAtomic(storePaths().leftovers, [...leftoverTargets.values()])
   } catch (error) {
     try {
       ctx.logger?.warn?.(
-        `[dsh-graft-slice] cannot write ${leftoversStorePath}: ${String((error as any)?.message ?? error)}`,
+        `[dsh-graft-slice] cannot write ${storePaths().leftovers}: ${String((error as any)?.message ?? error)}`,
       )
     } catch {
       // Logging must not change the migration result.
@@ -5863,7 +5848,7 @@ function persistLeftovers(ctx: PluginContextLike): void {
 
 export function loadLeftovers(ctx: PluginContextLike): void {
   try {
-    const parsed = JSON.parse(readFileSync(leftoversStorePath, 'utf8'))
+    const parsed = JSON.parse(readFileSync(storePaths().leftovers, 'utf8'))
     if (!Array.isArray(parsed)) return
     for (const item of parsed) {
       if (!isRecord(item)) continue
@@ -5880,7 +5865,7 @@ export function loadLeftovers(ctx: PluginContextLike): void {
     if ((error as any)?.code !== 'ENOENT') {
       try {
         ctx.logger?.warn?.(
-          `[dsh-graft-slice] cannot read ${leftoversStorePath}: ${String((error as any)?.message ?? error)}`,
+          `[dsh-graft-slice] cannot read ${storePaths().leftovers}: ${String((error as any)?.message ?? error)}`,
         )
       } catch {
         // Logging must not block activation.
@@ -5914,11 +5899,11 @@ export function leftoverWarningLine(): string | undefined {
 
 function persistDrafts(ctx: PluginContextLike): void {
   try {
-    mkdirSync(dirname(draftsPath), { recursive: true })
-    writeJsonAtomic(draftsPath, [...draftPayloads.values()])
+    mkdirSync(dirname(storePaths().drafts), { recursive: true })
+    writeJsonAtomic(storePaths().drafts, [...draftPayloads.values()])
   } catch (error) {
     try {
-      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${draftsPath}: ${String((error as any)?.message ?? error)}`)
+      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${storePaths().drafts}: ${String((error as any)?.message ?? error)}`)
     } catch {
       // Logging must not change the migration result.
     }
@@ -5929,7 +5914,7 @@ function loadDrafts(ctx: PluginContextLike): void {
   if (draftsLoaded) return
   draftsLoaded = true
   try {
-    const parsed = JSON.parse(readFileSync(draftsPath, 'utf8'))
+    const parsed = JSON.parse(readFileSync(storePaths().drafts, 'utf8'))
     if (!Array.isArray(parsed)) return
     for (const item of parsed) {
       if (!isRecord(item)) continue
@@ -5945,7 +5930,7 @@ function loadDrafts(ctx: PluginContextLike): void {
   } catch (error) {
     if ((error as any)?.code !== 'ENOENT') {
       try {
-        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${draftsPath}: ${String((error as any)?.message ?? error)}`)
+        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${storePaths().drafts}: ${String((error as any)?.message ?? error)}`)
       } catch {
         // Logging must not block activation.
       }
@@ -6237,7 +6222,7 @@ function takeModelDrivenNudge(
 
 function loadPendingConstraints(ctx: PluginContextLike): void {
   try {
-    const parsed = JSON.parse(readFileSync(pendingConstraintsPath, 'utf8'))
+    const parsed = JSON.parse(readFileSync(storePaths().pendingConstraints, 'utf8'))
     if (!Array.isArray(parsed)) return
     for (const item of parsed) {
       if (!isRecord(item)) continue
@@ -6273,7 +6258,7 @@ function loadPendingConstraints(ctx: PluginContextLike): void {
   } catch (error) {
     if ((error as any)?.code !== 'ENOENT') {
       try {
-        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${pendingConstraintsPath}: ${String((error as any)?.message ?? error)}`)
+        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${storePaths().pendingConstraints}: ${String((error as any)?.message ?? error)}`)
       } catch {
         // Logging must not block activation.
       }
@@ -6284,12 +6269,12 @@ function loadPendingConstraints(ctx: PluginContextLike): void {
 /** Persist the retirement set; a failed write is reported but never blocks a migration. */
 function persistRetiredStore(ctx: PluginContextLike, remove: readonly string[] = [], strict = false): void {
   try {
-    mkdirSync(dirname(retiredStorePath), { recursive: true })
-    withFileLock(retiredStorePath, () => {
+    mkdirSync(dirname(storePaths().retired), { recursive: true })
+    withFileLock(storePaths().retired, () => {
       // v7.7: read-modify-write under the lock. Serialising the in-memory set and
       // renaming it over the file is what let two sessions erase each other.
       const merged = new Set<string>(
-        ledgerArray(retiredStorePath).filter((value): value is string => typeof value === 'string'),
+        ledgerArray(storePaths().retired).filter((value): value is string => typeof value === 'string'),
       )
       for (const id of remove) merged.delete(id)
       for (const id of retiredSessions) {
@@ -6298,7 +6283,7 @@ function persistRetiredStore(ctx: PluginContextLike, remove: readonly string[] =
       // Adopt the other writer's retirements; otherwise this process keeps
       // accepting a session the other one already closed.
       for (const id of merged) retiredSessions.add(id)
-      writeLedgerAtomic(retiredStorePath, [...merged].sort())
+      writeLedgerAtomic(storePaths().retired, [...merged].sort())
     })
   } catch (error) {
     // v7.8: commit-critical writes must FAIL, not warn. A retirement that is only
@@ -6306,7 +6291,7 @@ function persistRetiredStore(ctx: PluginContextLike, remove: readonly string[] =
     // in-memory state says it is gone.
     if (strict) throw error
     try {
-      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${retiredStorePath}: ${String((error as any)?.message ?? error)}`)
+      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${storePaths().retired}: ${String((error as any)?.message ?? error)}`)
     } catch {
       // Logging must not change the migration result.
     }
@@ -6326,9 +6311,9 @@ function persistRetiredStore(ctx: PluginContextLike, remove: readonly string[] =
 
 function persistTransferredStore(ctx: PluginContextLike, remove: readonly string[] = [], strict = false): void {
   try {
-    mkdirSync(dirname(transferredStorePath), { recursive: true })
-    withFileLock(transferredStorePath, () => {
-      const merged = ledgerRecord(transferredStorePath) as Record<string, { newSessionId: string; at: number; reason: string }>
+    mkdirSync(dirname(storePaths().transferred), { recursive: true })
+    withFileLock(storePaths().transferred, () => {
+      const merged = ledgerRecord(storePaths().transferred) as Record<string, { newSessionId: string; at: number; reason: string }>
       for (const id of remove) delete merged[id]
       for (const [id, value] of transferredSessions) {
         if (remove.includes(id)) continue
@@ -6341,12 +6326,12 @@ function persistTransferredStore(ctx: PluginContextLike, remove: readonly string
         const current = transferredSessions.get(id)
         if (current === undefined || Number(value.at ?? 0) > Number(current.at ?? 0)) transferredSessions.set(id, value)
       }
-      writeLedgerAtomic(transferredStorePath, merged)
+      writeLedgerAtomic(storePaths().transferred, merged)
     })
   } catch (error) {
     if (strict) throw error
     try {
-      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${transferredStorePath}: ${String((error as any)?.message ?? error)}`)
+      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${storePaths().transferred}: ${String((error as any)?.message ?? error)}`)
     } catch {
       // Logging must not change the migration result.
     }
@@ -6365,7 +6350,7 @@ function persistTransferredStore(ctx: PluginContextLike, remove: readonly string
  * recovery, which is exactly what it is for.
  */
 function commitRetirementAtomic(ctx: PluginContextLike, sourceId: string, newId: string): void {
-  const lockPath = join(dirname(retiredStorePath), '.retirement')
+  const lockPath = join(dirname(storePaths().retired), '.retirement')
   const release = acquireFileLock(lockPath, { timeoutMs: 30_000, staleMs: 60_000, label: 'retirement' })
   const snapshot = (path: string): string | undefined => {
     try {
@@ -6382,14 +6367,14 @@ function commitRetirementAtomic(ctx: PluginContextLike, sourceId: string, newId:
       // A restore that fails is reported by the thrown error below.
     }
   }
-  const beforeRetired = snapshot(retiredStorePath)
-  const beforeTransferred = snapshot(transferredStorePath)
+  const beforeRetired = snapshot(storePaths().retired)
+  const beforeTransferred = snapshot(storePaths().transferred)
   try {
     persistRetiredStore(ctx, [], true)
     persistTransferredStore(ctx, [], true)
   } catch (error) {
-    restore(retiredStorePath, beforeRetired)
-    restore(transferredStorePath, beforeTransferred)
+    restore(storePaths().retired, beforeRetired)
+    restore(storePaths().transferred, beforeTransferred)
     retiredSessions.delete(sourceId)
     transferredSessions.delete(sourceId)
     throw graftError(
@@ -6568,7 +6553,7 @@ export function resumeSession(
   // Forget that it was a target, so the chain guard does not keep protecting it.
   graftTargets.delete(sessionId)
 
-  const target = ctx ?? ctxForStores()
+  const target = ctx ?? storeCtxOf()
   if (target !== undefined) {
     // v7.7: removals must be EXPLICIT. The merge-on-write path unions the disk
     // file with memory, so a plain write here would resurrect the session the
@@ -7029,9 +7014,9 @@ export async function commitPreparedSlice(
 }
 
 function loadPrepared(): void {
-  if (preparedStorePath.length === 0) return
+  if (storePaths().prepared.length === 0) return
   try {
-    const parsed = JSON.parse(readFileSync(preparedStorePath, 'utf8'))
+    const parsed = JSON.parse(readFileSync(storePaths().prepared, 'utf8'))
     if (!isRecord(parsed)) return
     for (const [id, value] of Object.entries(parsed)) {
       if (!isRecord(value)) continue
@@ -7068,15 +7053,15 @@ function loadPrepared(): void {
 }
 
 function persistPrepared(remove: readonly string[] = []): void {
-  if (preparedStorePath.length === 0) return
+  if (storePaths().prepared.length === 0) return
   try {
     const payload: Record<string, PreparedSlice> = {}
-    mkdirSync(dirname(preparedStorePath), { recursive: true })
-    withFileLock(preparedStorePath, () => {
+    mkdirSync(dirname(storePaths().prepared), { recursive: true })
+    withFileLock(storePaths().prepared, () => {
       // v7.7: union with what the other process prepared. Overwriting here made a
       // concurrent prepare vanish, and the matching commit then reported
       // PREPARED_UNKNOWN / a digest mismatch that looked like source drift.
-      const onDisk = readJsonRecord(preparedStorePath) as Record<string, PreparedSlice>
+      const onDisk = readJsonRecord(storePaths().prepared) as Record<string, PreparedSlice>
       for (const [id, entry] of Object.entries(onDisk)) {
         if (remove.includes(id)) continue
         if (entry === null || typeof entry !== 'object' || typeof entry.digest !== 'string') continue
@@ -7090,7 +7075,7 @@ function persistPrepared(remove: readonly string[] = []): void {
         }
       }
       for (const id of remove) preparedSlices.delete(id)
-      writeJsonAtomic(preparedStorePath, payload)
+      writeJsonAtomic(storePaths().prepared, payload)
     })
   } catch {
     // Best effort: a lost prepared slice is recoverable by preparing again.
@@ -7100,9 +7085,9 @@ function persistPrepared(remove: readonly string[] = []): void {
 /** v7.4: keep the resume grace across restarts, or a restart re-enables the trap. */
 function persistAutoGraftSuppression(ctx: PluginContextLike, remove: readonly string[] = []): void {
   try {
-    mkdirSync(dirname(autoGraftSuppressedPath), { recursive: true })
-    withFileLock(autoGraftSuppressedPath, () => {
-      const merged = readJsonRecord(autoGraftSuppressedPath) as Record<string, number>
+    mkdirSync(dirname(storePaths().autoGraftSuppressed), { recursive: true })
+    withFileLock(storePaths().autoGraftSuppressed, () => {
+      const merged = readJsonRecord(storePaths().autoGraftSuppressed) as Record<string, number>
       for (const id of remove) {
         delete merged[id]
         autoGraftSuppressedUntil.delete(id)
@@ -7115,12 +7100,12 @@ function persistAutoGraftSuppression(ctx: PluginContextLike, remove: readonly st
       for (const [id, until] of Object.entries(merged)) {
         if (Number.isFinite(Number(until))) autoGraftSuppressedUntil.set(id, Number(until))
       }
-      writeJsonAtomic(autoGraftSuppressedPath, merged)
+      writeJsonAtomic(storePaths().autoGraftSuppressed, merged)
     })
   } catch (error) {
     try {
       ctx.logger?.warn?.(
-        `[dsh-graft-slice] cannot write ${autoGraftSuppressedPath}: ${String((error as any)?.message ?? error)}`,
+        `[dsh-graft-slice] cannot write ${storePaths().autoGraftSuppressed}: ${String((error as any)?.message ?? error)}`,
       )
     } catch {
       // A failed write only shortens the grace window; it must not fail a resume.
@@ -7130,7 +7115,7 @@ function persistAutoGraftSuppression(ctx: PluginContextLike, remove: readonly st
 
 function loadAutoGraftSuppression(): void {
   try {
-    const parsed = JSON.parse(readFileSync(autoGraftSuppressedPath, 'utf8'))
+    const parsed = JSON.parse(readFileSync(storePaths().autoGraftSuppressed, 'utf8'))
     if (!isRecord(parsed)) return
     const now = Date.now()
     for (const [id, until] of Object.entries(parsed)) {
@@ -7153,10 +7138,10 @@ function loadAutoGraftSuppression(): void {
  * not by a stale local view.
  */
 export function refreshMigrationLedgers(): void {
-  for (const id of ledgerArray(retiredStorePath)) {
+  for (const id of ledgerArray(storePaths().retired)) {
     if (typeof id === 'string' && id.length > 0) retiredSessions.add(id)
   }
-  for (const [id, value] of Object.entries(ledgerRecord(transferredStorePath))) {
+  for (const [id, value] of Object.entries(ledgerRecord(storePaths().transferred))) {
     if (isRecord(value) && typeof value.newSessionId === 'string' && !transferredSessions.has(id)) {
       transferredSessions.set(id, value as never)
     }
@@ -7773,7 +7758,7 @@ async function graftSliceAndInjectUnlocked(
     // copy that compaction cannot reach.
     if (plan.constraints.length > 0) {
       targetConstraintSections.set(newId, { constraints: [...plan.constraints], at: Date.now() })
-      persistConstraintSections(ctxForStores())
+      persistConstraintSections(storeCtxOf())
     }
     if (retired) {
       retiredSessions.add(sourceId)
@@ -8367,13 +8352,13 @@ function txnFileFor(sourceSessionId: string): string {
   // The id is already restricted to safe characters by asNonEmptyString + the
   // host's id policy; encode anyway so a future host that permits other shapes
   // cannot escape the directory.
-  return join(txnDirPath, `${encodeURIComponent(sourceSessionId)}.json`)
+  return join(storePaths().txnDir, `${encodeURIComponent(sourceSessionId)}.json`)
 }
 
 function writeGraftTxn(ctx: PluginContextLike | undefined, record: GraftTxnRecord): void {
   if (ctx === undefined) return
   try {
-    mkdirSync(txnDirPath, { recursive: true })
+    mkdirSync(storePaths().txnDir, { recursive: true })
     writeJsonAtomic(txnFileFor(record.sourceSessionId), record)
   } catch (error) {
     try {
@@ -8454,7 +8439,7 @@ export function recoverGraftTransactions(ctx: PluginContextLike): { scanned: num
   const rolledBack: string[] = []
   let files: string[] = []
   try {
-    files = readdirSync(txnDirPath).filter((name) => name.endsWith('.json'))
+    files = readdirSync(storePaths().txnDir).filter((name) => name.endsWith('.json'))
   } catch (error) {
     // v7.4b: an ABSENT directory means "nothing was interrupted" — the normal
     // first start. Anything else (a missing import, a permission denial) used to
@@ -8466,7 +8451,7 @@ export function recoverGraftTransactions(ctx: PluginContextLike): { scanned: num
       try {
         ctx.logger?.warn?.(
           `[dsh-graft-slice] transaction scan failed (${String((error as any)?.code ?? 'unknown')}): ` +
-            `${String((error as any)?.message ?? error)}; path ${txnDirPath}`,
+            `${String((error as any)?.message ?? error)}; path ${storePaths().txnDir}`,
         )
       } catch {
         // Logging must not block activation.
@@ -8475,7 +8460,7 @@ export function recoverGraftTransactions(ctx: PluginContextLike): { scanned: num
     return { scanned: 0, rolledBack }
   }
   for (const file of files) {
-    const path = join(txnDirPath, file)
+    const path = join(storePaths().txnDir, file)
     let record: GraftTxnRecord
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf8'))
@@ -8740,7 +8725,7 @@ function markGraftTarget(sessionId: string, sourceSessionId: string, seedEvents?
   // before a restart became an ordinary session afterwards — precisely the one
   // session the chain guard exists for. The store file is the same `dataDir`
   // the retired/transferred sets already use, so isolation is unchanged.
-  persistGraftTargetStore(ctxForStores())
+  persistGraftTargetStore(storeCtxOf())
 }
 
 /**
@@ -8752,9 +8737,9 @@ function markGraftTarget(sessionId: string, sourceSessionId: string, seedEvents?
 function persistGraftTargetStore(ctx: PluginContextLike | undefined, remove: readonly string[] = []): void {
   if (ctx === undefined) return
   try {
-    mkdirSync(dirname(graftTargetsPath), { recursive: true })
-    withFileLock(graftTargetsPath, () => {
-      const merged = readJsonRecord(graftTargetsPath) as Record<string, GraftTargetMark>
+    mkdirSync(dirname(storePaths().graftTargets), { recursive: true })
+    withFileLock(storePaths().graftTargets, () => {
+      const merged = readJsonRecord(storePaths().graftTargets) as Record<string, GraftTargetMark>
       for (const id of remove) delete merged[id]
       for (const [id, mark] of graftTargets) merged[id] = mark
       for (const [id, mark] of Object.entries(merged)) {
@@ -8762,11 +8747,11 @@ function persistGraftTargetStore(ctx: PluginContextLike | undefined, remove: rea
           graftTargets.set(id, mark)
         }
       }
-      writeJsonAtomic(graftTargetsPath, merged)
+      writeJsonAtomic(storePaths().graftTargets, merged)
     })
   } catch (error) {
     try {
-      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${graftTargetsPath}: ${String((error as any)?.message ?? error)}`)
+      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write ${storePaths().graftTargets}: ${String((error as any)?.message ?? error)}`)
     } catch {
       // Logging must not change the migration result.
     }
@@ -8784,7 +8769,7 @@ function persistGraftTargetStore(ctx: PluginContextLike | undefined, remove: rea
 
 function loadGraftTargetStore(ctx: PluginContextLike): void {
   try {
-    const parsed = JSON.parse(readFileSync(graftTargetsPath, 'utf8'))
+    const parsed = JSON.parse(readFileSync(storePaths().graftTargets, 'utf8'))
     if (!isRecord(parsed)) return
     for (const [id, value] of Object.entries(parsed)) {
       if (!isRecord(value) || typeof value.sourceSessionId !== 'string') continue
@@ -8802,7 +8787,7 @@ function loadGraftTargetStore(ctx: PluginContextLike): void {
   } catch (error) {
     if ((error as any)?.code !== 'ENOENT') {
       try {
-        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${graftTargetsPath}: ${String((error as any)?.message ?? error)}`)
+        ctx.logger?.warn?.(`[dsh-graft-slice] cannot read ${storePaths().graftTargets}: ${String((error as any)?.message ?? error)}`)
       } catch {
         // Logging must not block activation.
       }
@@ -9367,7 +9352,7 @@ function workspaceOfAgent(ctx: PluginContextLike, agentId: string): string {
 
 /** Where the debug panel reads the memory store from (never written by us). */
 function resolveMemoryPaths(settings: Required<GraftConfig>): { memoryDir: string; skillsDir: string } {
-  const memoryDir = settings.memoryDir.length > 0 ? settings.memoryDir : join(dirname(retiredStorePath), '.dsh-memory')
+  const memoryDir = settings.memoryDir.length > 0 ? settings.memoryDir : join(dirname(storePaths().retired), '.dsh-memory')
   const skillsDir = settings.skillsDir.length > 0 ? settings.skillsDir : join(homedir(), '.agents', 'skills')
   return { memoryDir, skillsDir }
 }
@@ -9864,7 +9849,7 @@ export function apply(ctx: PluginContextLike, config: GraftConfig = {}): void {
   // A crashed writer's `.lock` directory is invisible until someone contends for
   // that file, and a clean start contends for nothing.
   try {
-    lastLockCleanup = scanAndReclaimLocks([dirname(retiredStorePath), PLUGIN_DIR])
+    lastLockCleanup = scanAndReclaimLocks([dirname(storePaths().retired), PLUGIN_DIR])
     const reclaimed = lastLockCleanup.filter((entry) => entry.action === 'reclaimed')
     if (reclaimed.length > 0) {
       ctx.logger?.warn?.(
@@ -10046,8 +10031,8 @@ function captureDraft(ctx: PluginContextLike, sourceId: string, targetId: string
     capturedAt: Date.now(),
   })
   try {
-    mkdirSync(dirname(draftsPath), { recursive: true })
-    writeJsonAtomic(draftsPath, [...draftPayloads.values()])
+    mkdirSync(dirname(storePaths().drafts), { recursive: true })
+    writeJsonAtomic(storePaths().drafts, [...draftPayloads.values()])
   } catch {
     // A failed capture must never block the rejection itself.
   }
@@ -12071,7 +12056,7 @@ async function appendTransitionCard(
         { at: Date.now(), from, to: goal, reason: reason.length === 0 ? '(未说明原因)' : reason.slice(0, 300) },
       ]
       graftTargets.set(sessionId, { ...mark, currentGoal: goal, goalEvolution: evolution })
-      persistGraftTargetStore(ctxForStores())
+      persistGraftTargetStore(storeCtxOf())
       return {
         ok: true,
         sessionId,
@@ -12144,14 +12129,14 @@ async function appendTransitionCard(
 
       // dryRun: a diagnostic must not mutate state. What activation DID reclaim is
       // reported separately from lastLockCleanup.
-      const locks = scanAndReclaimLocks([dirname(retiredStorePath), PLUGIN_DIR], true)
+      const locks = scanAndReclaimLocks([dirname(storePaths().retired), PLUGIN_DIR], true)
       const txns = (() => {
         try {
-          return readdirSync(txnDirPath)
+          return readdirSync(storePaths().txnDir)
             .filter((name) => name.endsWith('.json'))
             .map((name) => {
               try {
-                const record = JSON.parse(readFileSync(join(txnDirPath, name), 'utf8')) as Record<string, unknown>
+                const record = JSON.parse(readFileSync(join(storePaths().txnDir, name), 'utf8')) as Record<string, unknown>
                 return {
                   name,
                   ...(typeof record.state === 'string' ? { state: record.state } : {}),
@@ -12271,7 +12256,7 @@ setIgnitionDepsResolver(
   (): IgnitionDeps => ({
     admissions: ignitionAdmissions,
     pending: pendingIgnitions,
-    pendingPath: () => pendingIgnitionPath,
+    pendingPath: () => storePaths().pendingIgnition,
     targets: graftTargets as unknown as Map<string, { seedEvents?: number }>,
     retired: retiredSessions,
     transferred: transferredSessions as unknown as Map<string, unknown>,
@@ -12279,14 +12264,14 @@ setIgnitionDepsResolver(
     autoGraftInFlight: autoGraftInFlight as unknown as Map<string, unknown>,
     pendingGraftSources: pendingGraftSources as unknown as Map<string, unknown>,
     pendingConfirms: pendingConfirms as unknown as Map<string, unknown>,
-    retiredStorePath: () => retiredStorePath,
-    transferredStorePath: () => transferredStorePath,
+    retiredStorePath: () => storePaths().retired,
+    transferredStorePath: () => storePaths().transferred,
     rollbackNoticed,
     rollbackNotices,
     audit: (entry) => appendGraftAudit(entry as unknown as GraftAuditEntry),
     logWarn: (message) => {
       try {
-        storeCtx?.logger?.warn?.(message)
+        storeCtxOf()?.logger?.warn?.(message)
       } catch {
         // Logging must never change a migration outcome.
       }

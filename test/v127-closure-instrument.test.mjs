@@ -85,21 +85,40 @@ test('closure: module-level mutable state in a closure IS reported (the STOP CON
   /**
    * ── THE STOP CONDITION HAD NEVER BEEN OBSERVED FIRING ────────────────────────────────────────
    *
-   * `recoverGraftTransactions` reads `retiredStorePath`, `transferredStorePath`, `graftTargetsPath`,
-   * `txnDirPath`, `leftoversStorePath`, `autoGraftSuppressedPath`, `storeCtx` — seven module-level
-   * `let` bindings. Before the fix the tool reported `mutable: none` for it, i.e. the plan's
-   * "closure contains module-level mutable state ⇒ stop" gate could never fire on the one target
-   * that most obviously contains it (ARCHITECTURE TD-1: "那不是闭包，是共享状态").
+   * Historical: `recoverGraftTransactions` read SEVEN module-level `let` path bindings
+   * (`retiredStorePath`, `transferredStorePath`, `graftTargetsPath`, `txnDirPath`, `leftoversStorePath`,
+   * `autoGraftSuppressedPath`, `storeCtx`). Before the instrument was fixed it reported `mutable: none`
+   * for that commit, i.e. the plan's "closure contains module-level mutable state ⇒ stop" gate could
+   * never fire on the one target that most obviously contains it.
+   *
+   * ── WHY THIS TEST NOW ASSERTS SOMETHING DIFFERENT (S3-P4) ─────────────────────────────────────
+   *
+   * P4 replaced those seven `let`s with ONE frozen handle (`storeLayer`). So the OLD assertions —
+   * "retiredStorePath must be reported as mutable" — are no longer true, and they are not supposed to
+   * be: they were written about the pre-P4 tree.
+   *
+   * What must stay true is the INSTRUMENT's behaviour, and the STOP CONDITION must still be able to
+   * fire. Both are asserted below, plus the P4 outcome itself (the seven names are GONE from the
+   * closure), so this file now doubles as a regression guard on the inversion.
    */
   if (requireCompiler(t) === undefined) return
   const { output } = measure('recoverGraftTransactions')
 
   const mutableLine = /mutable\s+: (.*)/u.exec(output)?.[1]?.trim()
-  assert.notEqual(mutableLine, 'none', 'recoverGraftTransactions shares module-level `let` bindings; ' +
-    'reporting none means the mutable-state STOP CONDITION cannot fire:\n' + output)
-  for (const name of ['retiredStorePath', 'graftTargetsPath', 'storeCtx']) {
-    assert.match(output, new RegExp(`${name} \\(let/var\\)`, 'u'), `${name} must be reported as mutable state`)
-  }
+  assert.notEqual(mutableLine, 'none',
+    'the STOP CONDITION must still be able to fire: the closure now shares ONE handle, and reporting ' +
+      'none would mean the same blindness came back:\n' + output)
+
+  // The instrument reports the ONE handle that replaced the seven lets.
+  assert.match(output, /storeLayer \(let\/var\)/u,
+    'the single frozen handle must be reported as the mutable binding:\n' + output)
+
+  // And the seven old names must be GONE — this is the P4 outcome, asserted rather than assumed.
+  const survivors = ['retiredStorePath', 'transferredStorePath', 'graftTargetsPath', 'txnDirPath',
+    'leftoversStorePath', 'autoGraftSuppressedPath', 'storeCtx'].filter((name) =>
+    new RegExp(`\\b${name}\\b`, 'u').test(output))
+  assert.deepEqual(survivors, [],
+    'P4 removed these module-level `let`s; if any is back in the closure, the inversion regressed')
 })
 
 test('closure: a closure with NO mutable state reports none (no false alarm)', (t) => {
