@@ -83,6 +83,18 @@ const makeCtx = (rawPaths) => ({
   on: () => () => {},
 })
 
+/**
+ * ── THE FALLBACK CASE CANNOT BE REPRODUCED WITH A TEMP DIRECTORY ────────────────────────────────
+ *
+ * Six of the seven golden cases name a directory the golden run CREATED and can be recreated here. The
+ * seventh (`fallback-plugin-dir`) is the PLUGIN DIRECTORY itself — the package root — which the test
+ * cannot move. For that case the assertion is therefore the DIRECTION, not the literal string: the new
+ * layer must land on `fallbackDir`, and the value it is given must equal the directory of the built
+ * artifact (the value the old code computed from `import.meta.url` before inlining).
+ */
+const PLUGIN_DIR_OF_BUNDLE = REPO
+
+
 test('v133: the golden file records ELEVEN paths per case (the gate reported seven)', () => {
   assert.equal(golden.pathCount, 11, 'the golden file must pin all eleven store locations')
   for (const matrixCase of golden.cases) {
@@ -94,32 +106,74 @@ test('v133: the golden file records ELEVEN paths per case (the gate reported sev
 
 for (const matrixCase of golden.cases) {
   test(`v133: the new layer reproduces the golden case "${matrixCase.id}"`, () => {
-    // Rebuild the same input the golden run used: which directory the host offers, and whether a
-    // config.dataDir is supplied.
-    const hostDir = freshDir()
-    const configDir = freshDir()
-    const config = matrixCase.resolvedFrom === 'config.dataDir'
-      ? { dataDir: configDir, fallbackDir: freshDir() }
-      : { fallbackDir: freshDir() }
+    /**
+     * Rebuild the same INPUT the golden run used:
+     *   `env`             — which DSH_* variables were present (restored in `test.after`);
+     *   `hostPaths`       — whether `ctx.get('paths')` yields a data dir;
+     *   `configDataDir`   — whether an explicit config.dataDir was supplied.
+     * The 4 environment cases added after review are exactly what makes branches 3/4/5 comparable.
+     */
+    const savedEnv = Object.fromEntries(Object.keys(matrixCase.env).map((key) => [key, process.env[key]]))
+    const allKeys = ['DSH_PROFILE_DIR', 'DSH_HOME', 'DSH_PROFILE']
+    for (const key of allKeys) delete process.env[key]
+    for (const [key, value] of Object.entries(matrixCase.env)) process.env[key] = value
 
-    const built = layer.createStoreLayer(makeCtx({ data: hostDir }), config)
+    try {
+      const hostDir = freshDir()
+      const configDir = freshDir()
+      const config = {
+        ...(matrixCase.configDataDir ? { dataDir: configDir } : {}),
+        fallbackDir: PLUGIN_DIR_OF_BUNDLE,
+      }
+      const built = layer.createStoreLayer(
+        makeCtx(matrixCase.hostPaths ? { data: hostDir } : undefined),
+        config,
+      )
 
-    // ① the DIRECTORY
-    const expectedDir = matrixCase.dir === '<HOST_DATA>' ? hostDir : configDir
-    assert.equal(built.paths.dir, expectedDir,
-      `${matrixCase.id}: expected dir ${matrixCase.dir}, got ${built.paths.dir}`)
+      // Expected directory, by the branch the golden recorded.
+      const EXPECTED_DIR = {
+        host: hostDir,
+        config: configDir,
+        'profile-env': join(process.env.DSH_PROFILE_DIR ?? '', 'data', 'dsh-graft-slice'),
+        'home-profile': join(process.env.DSH_HOME ?? '', 'profiles', process.env.DSH_PROFILE ?? '', 'data', 'dsh-graft-slice'),
+        'home-plugin-data': join(process.env.DSH_HOME ?? '', 'plugin-data', 'data', 'dsh-graft-slice'),
+        'plugin-dir': PLUGIN_DIR_OF_BUNDLE,
+      }
+      const expectedDir = EXPECTED_DIR[matrixCase.resolvedDir]
+      assert.equal(built.paths.dir, expectedDir,
+        `${matrixCase.id}: expected dir from "${matrixCase.resolvedDir}", got ${built.paths.dir}`)
 
-    // ② every one of the ELEVEN paths, by suffix
-    const mismatches = []
-    for (const [goldenField, newField] of Object.entries(FIELD_MAP)) {
-      const expectedSuffix = matrixCase.pathSuffixes[goldenField]
-      const actual = built.paths[newField]
-      const expected = join(expectedDir, expectedSuffix)
-      if (actual !== expected) mismatches.push(`${goldenField} → ${newField}: expected ${expected}, got ${actual}`)
+      // Every one of the ELEVEN paths, by suffix.
+      const mismatches = []
+      for (const [goldenField, newField] of Object.entries(FIELD_MAP)) {
+        const expectedSuffix = matrixCase.pathSuffixes[goldenField]
+        const expected = join(expectedDir, expectedSuffix)
+        if (built.paths[newField] !== expected) {
+          mismatches.push(`${goldenField} → ${newField}: expected ${expected}, got ${built.paths[newField]}`)
+        }
+      }
+      assert.deepEqual(mismatches, [], `${matrixCase.id}: path mismatches against the golden file`)
+    } finally {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
     }
-    assert.deepEqual(mismatches, [], `${matrixCase.id}: path mismatches against the golden file`)
   })
 }
+
+test('v133: all SEVEN branches of the resolver are covered by the golden file', () => {
+  /**
+   * The first golden file had three cases and covered branches 1-2 only. Branches 3, 4a, 4b and 5 were
+   * untested — and branch 5 is the one whose SOURCE changed in the new layer (the plugin directory is
+   * now passed in by the caller). Without these cases, a mistake there after P4 changes nothing red.
+   */
+  const covered = new Set(golden.cases.map((matrixCase) => matrixCase.resolvedDir))
+  for (const branch of ['host', 'config', 'profile-env', 'home-profile', 'home-plugin-data', 'plugin-dir']) {
+    assert.ok(covered.has(branch), `no golden case covers branch "${branch}"`)
+  }
+  assert.ok(golden.cases.length >= 7, `expected at least 7 cases, found ${golden.cases.length}`)
+})
 
 test('v133 meta: the mapping table covers every field the golden file records', () => {
   const recorded = new Set()
