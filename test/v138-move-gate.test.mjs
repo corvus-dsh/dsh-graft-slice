@@ -30,6 +30,48 @@ const gateJson = (cluster) => JSON.parse(execFileSync(process.execPath, [GATE, '
   cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
 }))
 
+/**
+ * ── THE GATE NEEDS closure.mjs, AND closure.mjs NEEDS TYPESCRIPT ───────────────────────────────
+ *
+ * `move-gate.mjs` shells out to `scripts/closure.mjs`, which exits 2 when the compiler is absent (it
+ * refuses to guess). CI installs no TypeScript into this package BY DESIGN, so on CI every tier that
+ * needs a closure comes back as a NAMED failure rather than a number.
+ *
+ * Measured: run #103 went red on "B is the UNION…" — a test that passed locally, i.e. "works on my
+ * machine" in its purest form. v135 solved this exact problem with a skip guard; this file now uses the
+ * same one. A missing tool is a RESOURCE skip, not a red test.
+ */
+function compilerAvailable() {
+  const probe = (() => {
+    try {
+      const out = execFileSync(process.execPath, [GATE, '--cluster', 'extractGoal', '--json'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+      return JSON.parse(out)
+    } catch (error) { return { error: String(error.stdout ?? error) } }
+  })()
+  if (probe.error !== undefined) return false
+  /**
+   * ── MEASURED SHAPE WITHOUT THE COMPILER ──────────────────────────────────────────────────────
+   *
+   * With TypeScript absent, `move-gate` still exits 0 and still parses declarations (A works), but tier B
+   * comes back as an EMPTY OBJECT `{}` — not `{closureLines: 0, declarations: 0}`. Testing for the zero
+   * fields therefore returned `true` ("compiler present") on CI, the skip guard never fired, and run #103
+   * went red on a test that passes locally.
+   *
+   * The honest predicate is the one thing that only exists when a closure was actually measured:
+   * a finite `closureLines` on the calibration target, which is a known 341.
+   */
+  const lines = probe.B?.measured?.closureLines
+  return typeof lines === 'number' && Number.isFinite(lines) && lines > 0
+}
+
+/** Every tier that needs closure.mjs must be skippable, exactly like v135's five. */
+const requireCompiler = (t) => {
+  if (compilerAvailable()) return true
+  t.skip('RESOURCE: typescript is not installed; closure.mjs exits 2 rather than guessing')
+  return false
+}
+
+
 test('v138: comments AND string literals are blanked, and a regex literal cannot swallow the file', () => {
   /**
    * Three attempts, three wrong numbers — each found by a NUMBER, not by reading:
@@ -62,7 +104,8 @@ test('v138: comments AND string literals are blanked, and a regex literal cannot
   assert.equal(report.A.measured.declarations[0].lines, 208, 'extractGoal is 208 lines')
 })
 
-test('v138: C4 can actually DETECT a read of a container local (its 0 must mean something)', () => {
+test('v138: C4 can actually DETECT a read of a container local (its 0 must mean something)', (t) => {
+  if (!requireCompiler(t)) return
   /**
    * ── ZERO FROM "NOT SCANNED" IS NOT ZERO FROM "SCANNED AND CLEAN" ────────────────────────────────
    *
@@ -94,7 +137,8 @@ test('v138: C4 can actually DETECT a read of a container local (its 0 must mean 
   }
 })
 
-test('v138: B is the UNION of member closures, not the largest one', () => {
+test('v138: B is the UNION of member closures, not the largest one', (t) => {
+  if (!requireCompiler(t)) return
   /**
    * Measured: taking `max(member closure lines)` over cluster 1 reported 341 (extractGoal alone) when the
    * cluster weighs 558. Understating the cost by 217 lines biases every comparison toward "cheap to move".
