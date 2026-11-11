@@ -9848,6 +9848,18 @@ export function apply(ctx: PluginContextLike, config: GraftConfig = {}): void {
   // v0.14 D5: reclaim locks left by dead processes BEFORE anything reads state.
   // A crashed writer's `.lock` directory is invisible until someone contends for
   // that file, and a clean start contends for nothing.
+  //
+  // ── `PLUGIN_DIR` HERE IS DELIBERATE — DO NOT REMOVE IT AS "LEFTOVER FROM P4" ─────────────────────
+  //
+  // Before P4 every store path defaulted to `join(PLUGIN_DIR, …)`, so a plugin that crashed BEFORE its
+  // first assembly left `.lock` directories in the PACKAGE directory. Those locks are still on disk for
+  // existing users, and the sweep below is the only thing that will ever clear them. The second element
+  // is therefore kept on purpose and is NOT in the golden file's coverage (the golden pins where stores
+  // are WRITTEN, not where stale locks are SWEPT).
+  //
+  // Removing it would strand those old locks forever — a deadlock that no test in this repo can see,
+  // because a machine without a pre-P4 crash has no such file. Anything changing this line must be
+  // reviewed by hand.
   try {
     lastLockCleanup = scanAndReclaimLocks([dirname(storePaths().retired), PLUGIN_DIR])
     const reclaimed = lastLockCleanup.filter((entry) => entry.action === 'reclaimed')
@@ -12129,6 +12141,10 @@ async function appendTransitionCard(
 
       // dryRun: a diagnostic must not mutate state. What activation DID reclaim is
       // reported separately from lastLockCleanup.
+      //
+      // `PLUGIN_DIR` is the same deliberate second directory as the activation sweep above: pre-P4 locks
+      // live in the package root and this dry run must REPORT them, not silently forget them. Not covered
+      // by the golden file (which pins written stores); a change here needs hand review.
       const locks = scanAndReclaimLocks([dirname(storePaths().retired), PLUGIN_DIR], true)
       const txns = (() => {
         try {
