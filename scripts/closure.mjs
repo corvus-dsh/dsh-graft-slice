@@ -288,7 +288,7 @@ function measureWithTypeScript(ts) {
    * ── SUB-BLOCK CLOSURE (added for the containers) ────────────────────────────────────────────────
    *
    * `closureOf` measures a whole top-level declaration. Both containers left in `index.ts`
-   * (`buildTape` 48/1,750 and `buildInjectionPlan` 110/3,705) exceed the 800-line cap, so splitting them
+   * (`buildTape` 48/1,750 and `buildInjectionPlan` 108/3,693) exceed the 800-line cap, so splitting them
    * means cutting a CLOSED SUB-BLOCK out of the middle — and the decision needs the same question asked
    * about a line range: *what must travel with this block?*
    *

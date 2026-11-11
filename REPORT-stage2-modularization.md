@@ -44,7 +44,7 @@
 | 目标 | 闭包 | 为什么不是节点 |
 |---|---|---|
 | `buildTape` | **48 / 1,750** | **超过 800 行硬上限** —— 是**容器**，必须先剥到 ≤ 800 才进队列 |
-| `buildInjectionPlan` | **110 / 3,705** | 同上（且它是所有候选的超集） |
+| `buildInjectionPlan` | **108 / 3,693** | 同上（且它的 107 个依赖是 `buildTape` 那 47 个的超集） |
 | `recoverGraftTransactions` | 34 / 505 | **闭包含 7 个 `let`** → 触发 STOP 判据（「那不是闭包，是共享状态」） |
 | `graftSliceAndInjectUnlocked` | 190 / 5,851 | 同上，7 个 `let`，且超上限 |
 | `graftSliceAndInject` | 195 / 5,903 | 同上，7 个 `let`，且超上限 |
@@ -64,7 +64,7 @@
 | **当前授权** | **未授权安装到实时 profile** |
 
 **技术依据（这是推迟的理由，不是借口）**：切片会**不可逆地退休真实会话**。而 `buildTape`（48 / 1,750）、
-`buildInjectionPlan`（110 / 3,705）与 inject 路径**尚未重构收口**——在未收口状态操作真实会话，
+`buildInjectionPlan`（108 / 3,693）与 inject 路径**尚未重构收口**——在未收口状态操作真实会话，
 **风险不是「失败」，是永久退休一个有效会话**。失败可以重跑，退休不能撤销。
 **判据（三条）**：
 - **C1** 插件在**实时 profile** 里可挂载（manifest / patch / 依赖可达）；
@@ -255,7 +255,7 @@ P4 让读点表达式从 `retiredStorePath` 变成 `storePaths().retired`，**�
 
 ## 九、下一步（不在本阶段内）
 
-1. **依赖倒置专项**：`buildTape`（48 / 1,750）与 `buildInjectionPlan`（110 / 3,705）剥到 ≤ 800 行，
+1. **依赖倒置专项**：`buildTape`（48 / 1,750）与 `buildInjectionPlan`（108 / 3,693）剥到 ≤ 800 行，
    需先提 handler / 参数化；三个 `let` 目标同理。
 2. **TD-21**：`apply()` 的 handler 清单 → 拆分提案（行为面等价验收，`verify-pure-move` **不适用**）。
 3. **真机切片**：在实时 profile 安装本包后，于 GUI 内执行一次并记录 C2 / C3。

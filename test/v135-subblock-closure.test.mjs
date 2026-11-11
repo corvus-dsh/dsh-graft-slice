@@ -3,7 +3,7 @@
  *
  * `closure.mjs` could only measure a WHOLE top-level declaration. That is enough to move leaves, and not
  * enough to split the two containers that remain (`buildTape` 48/1,750 and `buildInjectionPlan`
- * 110/3,705 — both far over the 800-line cap). Splitting them means cutting a CLOSED SUB-BLOCK out of the
+ * 108/3,693 — both far over the 800-line cap). Splitting them means cutting a CLOSED SUB-BLOCK out of the
  * middle, and that decision needs the same question asked about a line range: *what must travel with
  * this block?*
  *

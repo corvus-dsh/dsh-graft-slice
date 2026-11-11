@@ -124,9 +124,11 @@
 | `renderTaskBoard` | **12 / 348** | none | `core/task-board.ts`（已搬） | — |
 | `buildPendingState` | **19 / 229** | none | `core/pending-state.ts`（已搬） | — |
 | `buildTape` | **48 / 1,750** | none | index.ts | **容器**（> 800 行上限，不是候选） |
-| `buildInjectionPlan` | **110 / 3,705** | none | index.ts | **容器**（> 800 行上限，不是候选） |
+| `buildInjectionPlan` | **108 / 3,693** | none | index.ts | **容器**（> 800 行上限，不是候选） |
 
-**搬完 N7 之后，`buildTape` 从 83 / 2,445 掉到 48 / 1,750，`buildInjectionPlan` 从 145 / 4,400 掉到 110 / 3,705** —— 因为 `buildPendingState` 那 19 个声明从它们两人的闭包里退出去成了导入。两个仍然**远超 800 行上限**，按硬上限仍不是候选。
+**搬完 N7 之后，`buildTape` 从 83 / 2,445 掉到 48 / 1,750，`buildInjectionPlan` 从 145 / 4,400 掉到 110 / 3,705** —— 因为 `buildPendingState` 那 19 个声明从它们两人的闭包里退出去成了导入。**P0 之后 `buildInjectionPlan` 再降到 108 / 3,693**（7 个结构性会话类型搬进 `core/gateway-types.ts`）。两个仍然**远超 800 行上限**，按硬上限仍不是候选。
+
+> **订正（2026-11-11，逐提交实测）**：上表 `buildInjectionPlan` 一度写作 110 / 3,705，那是 **N7 时的快照**。P0 `fd5b6e1` 之后是 **108 / 3,693**，P4 / P5 / HEAD 未再变。实测序列：N6 129/3,934 → N7 110/3,705 → **P0 108/3,693** → P4 = P5 = HEAD 108/3,693。数字陈旧了 12 行 / 2 声明，原因是「被搬走 7 个类型」这件事没有回写到容器表。
 
 **重叠矩阵在 N7 之后失效了，而且这是正确的结果**：`_scratch/n5-overlap.mjs` 现在打不出任何非空交集 —— 因为 `closure.mjs` 只沿**同文件**声明扩展，而三个叶子已经各自成模块。格子里的「谁被谁引用」在它们分居不同文件之后不再由闭包表达，而由 **import 边**表达（`task-board → instruction-card`、`command-guard → command-policy`）。换句话说：**包含格在叶子被剥掉之后自然消失，不是矩阵坏了。**
 
