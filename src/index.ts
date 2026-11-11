@@ -512,12 +512,9 @@ import { shapeOfConstraint } from './core/constraint-shape.js'
 export { GRAFT_REPLAY_SOURCE_KIND }
 
 /** Whether a message source was written by this plugin's replay injector. */
-export function isGraftAuthored(source: unknown): boolean {
-  if (!isRecord(source)) return false
-  const kind = source.kind
-  if (typeof kind !== 'string') return false
-  return kind === GRAFT_REPLAY_SOURCE_KIND || kind.startsWith('plugin:graft')
-}
+import { isGraftAuthored, isHumanAuthored } from './core/message-source.js'
+
+export { isGraftAuthored, isHumanAuthored }
 
 /**
  * v7.4b (硬约束 8): a message the HUMAN actually typed.
@@ -528,9 +525,6 @@ export function isGraftAuthored(source: unknown): boolean {
  * is the source kind, so exactly one value qualifies. Everything else is an
  * injection and must never be read as an instruction.
  */
-export function isHumanAuthored(source: unknown): boolean {
-  return isRecord(source) && source.kind === 'user'
-}
 
 /**
  * One tape turn after extraction.
