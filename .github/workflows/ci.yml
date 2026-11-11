@@ -169,3 +169,27 @@ jobs:
             exit 1
           fi
           echo "ok: .export-surface.json is committed and current"
+
+      # ── the committed artifact must be what this source builds ────────────────────────────────
+      #
+      # CI already had this check inline (git diff --exit-code -- index.js earlier in the job),
+      # but run #110 went red for a cause that was fully visible LOCALLY: a benchmark copied the
+      # previous artifact into place to measure a baseline and restored it in a finally, silently
+      # reverting a build. Same check, one step earlier, where it costs a second instead of a run.
+      - name: The committed artifact is what this source builds
+        run: node scripts/check-artifact-fresh.mjs
+
+      # ── exact identifier references, never substring matches ──────────────────────────────────
+      #
+      # Observed twice: includes('GraftSource') also matched GraftSourceShape and pendingGraftSources,
+      # which produced "referenced by 5 core/ modules" — a confident, wrong statement. This runs the
+      # tool on a symbol whose answer is known, so the classifier is exercised on every push.
+      - name: Symbol reference lookup is exact (never a substring)
+        run: |
+          node scripts/who-references.mjs --json buildTape > /tmp/refs.json
+          node -e "
+            const refs = require('/tmp/refs.json');
+            const decl = refs.filter((r) => r.kind === 'DECL');
+            if (decl.length !== 1) { console.error('expected exactly one DECL for buildTape, got ' + decl.length); process.exit(1); }
+            console.log('ok: exact identifier matching, prose reported separately (' + refs.length + ' findings)');
+          "

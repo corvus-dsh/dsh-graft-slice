@@ -35,7 +35,8 @@
     "test": "node --test test/*.test.mjs",
     "demo": "node scripts/demo.mjs",
     "publish": "node scripts/publish.mjs",
-    "verify": "node scripts/verify-bundle.mjs"
+    "verify": "node scripts/verify-bundle.mjs",
+    "check:artifact": "node scripts/check-artifact-fresh.mjs"
   },
   "engines": {
     "node": ">=20",
