@@ -7263,7 +7263,7 @@ function buildPendingState(
 function inheritedConstraintAnchor(
   events                             ,
   sourceSessionId        ,
-  sourceGeneration = 0,
+  sourceGeneration                      ,
 )                     {
   // v7.4: only the GOAL counts as the origin.
   //
@@ -7315,11 +7315,23 @@ function inheritedConstraintAnchor(
    * them again has to be a deliberate act, not a typo.
    */
   const blockOrdinal = goals.length
-  // The mark is 0 for a session that was never a target (an original session), and N for the
-  // Nth-generation target. Rendering 0 as "第 0 代" would be nonsense, and rounding it to 1
-  // would assert a chain position the mark does not record.
+  /**
+   * ── 三种「代数」状态，不能压成一个数字 ────────────────────────────────────────────────────────
+   *
+   * 用户裁定（2026-11-12）：`sourceGeneration === 0` 不许再说「原始会话」——
+   * 0 只说明**标记里没有记录**，可能是原始会话，也可能是标记被清过、或由别的 profile 创建。
+   * 把「不知道」写成「原始会话」是在断言一件我们没有证据的事。
+   *
+   *   number > 0   → 「第 N 代会话」  标记里有记录
+   *   'original'   → 「原始会话」    调用方确认过「确实不是目标」（本地标记无记录且 id 不是本插件生成的）
+   *   其余（含 0、undefined）→ 「代次未记录（无标记）」
+   */
   const originLabel =
-    sourceGeneration > 0 ? `第 ${sourceGeneration} 代会话` : '原始会话'
+    typeof sourceGeneration === 'number' && sourceGeneration > 0
+      ? `第 ${sourceGeneration} 代会话`
+      : sourceGeneration === 'original'
+        ? '原始会话'
+        : '代次未记录（无标记）'
   if (blockOrdinal === 0 && humanOrigins.length > 0) {
     // v7.4b: point at the EARLIEST human statement, not the newest copy.
     //
@@ -7342,7 +7354,7 @@ function inheritedConstraintAnchor(
   const goal = goals[goals.length - 1]
   return (
     `[高优锚点] 核心约束源自${originLabel}（${sourceSessionId}），seq=${goal.seq}，必要时请优先回读。` +
-    (sourceGeneration > 0
+    (typeof sourceGeneration === 'number' && sourceGeneration > 0
       ? `\n当前是第 ${sourceGeneration + 1} 代。下面这段 HARD CONSTRAINTS 是逐代复制来的文本，不是这一代用户刚刚说的；`
       : `\n下面这段 HARD CONSTRAINTS 是逐代复制来的文本，不是这一代用户刚刚说的；`) +
     `要确认原话，用 graft_read_result(sourceSessionId, ${goal.seq})。`
@@ -7742,6 +7754,15 @@ export {
  * giving a test-only export a production-sounding name is what the convention check refuses.
  */
 export const name = 'dsh-graft-slice'
+
+/**
+ * The prefix this plugin gives the sessions it creates itself (auto-graft targets).
+ *
+ * Two places need it: the config normaliser (the default value) and the anchor-generation
+ * tri-state in `buildTape` (an unmarked id with this prefix is a target whose mark is gone,
+ * NOT an original session). One literal, two consumers.
+ */
+const DEFAULT_AUTO_GRAFT_ID_PREFIX = 'auto-graft'
 
 /**
  * v7.7 — THE PHYSICAL WRITE GOES THROUGH `dsh-paradise`.
@@ -8147,7 +8168,7 @@ export function normalizeConfig(config                         )                
     autoGraftIdPrefix:
       typeof input.autoGraftIdPrefix === 'string' && input.autoGraftIdPrefix.trim().length > 0
         ? input.autoGraftIdPrefix.trim()
-        : 'auto-graft',
+        : DEFAULT_AUTO_GRAFT_ID_PREFIX,
     autoGraftSessionIds: Array.isArray(input.autoGraftSessionIds)
       ? input.autoGraftSessionIds.filter((value)                  => typeof value === 'string' && value.trim().length > 0).map((value) => value.trim())
       : [],
@@ -10550,8 +10571,11 @@ export function buildTape(
   // wrong in a way this function could not detect. `buildTape` stays a pure function of
   // (events, config, sourceSessionId) — the state lookup is the same one `findConstraintProvenance`
   // already does a few lines up.
-  const anchorGeneration =
-    sourceSessionId !== undefined && sourceSessionId.length > 0 ? graftGenerationOf(sourceSessionId) : 0
+  /**
+   * 三态代数：标记有记录 → 数字；无记录且 id 是本插件生成的前缀 → undefined（无标记）；
+   * 无记录且 id 不像本插件生成的 → 'original'。判定细节见 `anchorGenerationFor`。
+   */
+  const anchorGeneration = anchorGenerationFor(sourceSessionId, config)
   const constraintAnchor = inheritedConstraintAnchor(events, sourceSessionId, anchorGeneration)
   // v7.6 (Model-Driven): the target boots itself.
   //
@@ -15154,6 +15178,25 @@ const CONTEXT_WINDOW_EXCEEDED = 'CONTEXT_WINDOW_EXCEEDED'
 /** Sessions already grafted at least once; a target inherits source generation + 1. */
 function graftGenerationOf(sessionId        )         {
   return graftTargets.get(sessionId)?.generation ?? 0
+}
+
+/**
+ * The anchor's generation as a THREE-state value, not a number.
+ *
+ * 0 is not "the original session" — it only means the local mark has no record. So:
+ * marked → that number; unrecorded but id carries this plugin's auto-graft prefix → undefined
+ * (rendered as "代次未记录（无标记）"); unrecorded and not plugin-generated → 'original'
+ * (a judgement under the LOCAL mark: a target made by another profile would look original here).
+ */
+function anchorGenerationFor(sessionId                    , config                                )                                  {
+  if (sessionId === undefined || sessionId.length === 0) return undefined
+  const marked = graftTargets.get(sessionId)?.generation
+  if (typeof marked === 'number' && marked > 0) return marked
+  // `buildTape` may receive a RAW config (callers pass `{}`), so the default must be applied here.
+  const prefix = typeof config.autoGraftIdPrefix === 'string' && config.autoGraftIdPrefix.length > 0
+    ? config.autoGraftIdPrefix
+    : DEFAULT_AUTO_GRAFT_ID_PREFIX
+  return sessionId.startsWith(prefix) ? undefined : 'original'
 }
 
 function markGraftTarget(sessionId        , sourceSessionId        , seedEvents         , goal         )       {

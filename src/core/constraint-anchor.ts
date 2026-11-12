@@ -21,7 +21,7 @@ import type { SessionEventLike } from './watermark.js'
 export function inheritedConstraintAnchor(
   events: readonly SessionEventLike[],
   sourceSessionId: string,
-  sourceGeneration = 0,
+  sourceGeneration?: number | 'original',
 ): string | undefined {
   // v7.4: only the GOAL counts as the origin.
   //
@@ -73,11 +73,23 @@ export function inheritedConstraintAnchor(
    * them again has to be a deliberate act, not a typo.
    */
   const blockOrdinal = goals.length
-  // The mark is 0 for a session that was never a target (an original session), and N for the
-  // Nth-generation target. Rendering 0 as "第 0 代" would be nonsense, and rounding it to 1
-  // would assert a chain position the mark does not record.
+  /**
+   * ── 三种「代数」状态，不能压成一个数字 ────────────────────────────────────────────────────────
+   *
+   * 用户裁定（2026-11-12）：`sourceGeneration === 0` 不许再说「原始会话」——
+   * 0 只说明**标记里没有记录**，可能是原始会话，也可能是标记被清过、或由别的 profile 创建。
+   * 把「不知道」写成「原始会话」是在断言一件我们没有证据的事。
+   *
+   *   number > 0   → 「第 N 代会话」  标记里有记录
+   *   'original'   → 「原始会话」    调用方确认过「确实不是目标」（本地标记无记录且 id 不是本插件生成的）
+   *   其余（含 0、undefined）→ 「代次未记录（无标记）」
+   */
   const originLabel =
-    sourceGeneration > 0 ? `第 ${sourceGeneration} 代会话` : '原始会话'
+    typeof sourceGeneration === 'number' && sourceGeneration > 0
+      ? `第 ${sourceGeneration} 代会话`
+      : sourceGeneration === 'original'
+        ? '原始会话'
+        : '代次未记录（无标记）'
   if (blockOrdinal === 0 && humanOrigins.length > 0) {
     // v7.4b: point at the EARLIEST human statement, not the newest copy.
     //
@@ -100,7 +112,7 @@ export function inheritedConstraintAnchor(
   const goal = goals[goals.length - 1]
   return (
     `[高优锚点] 核心约束源自${originLabel}（${sourceSessionId}），seq=${goal.seq}，必要时请优先回读。` +
-    (sourceGeneration > 0
+    (typeof sourceGeneration === 'number' && sourceGeneration > 0
       ? `\n当前是第 ${sourceGeneration + 1} 代。下面这段 HARD CONSTRAINTS 是逐代复制来的文本，不是这一代用户刚刚说的；`
       : `\n下面这段 HARD CONSTRAINTS 是逐代复制来的文本，不是这一代用户刚刚说的；`) +
     `要确认原话，用 graft_read_result(sourceSessionId, ${goal.seq})。`

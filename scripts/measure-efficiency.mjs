@@ -118,73 +118,121 @@ const fmt = (x) => `${(x * 100).toFixed(2)}%`
 
 const deltaOfBest = (a, b) => (best(b) - best(a)) / best(a)
 
-const elapsed = []
-for (let r = 0; r < rounds; r += 1) {
-  // 交替顺序也要轮换：否则「谁先跑」会系统性偏向某一侧
-  if (r % 2 === 0) {
-    elapsed.push(usPerCall(runBefore))
-    elapsed.push(usPerCall(runAfter))
-  } else {
-    elapsed.push(usPerCall(runAfter))
-    elapsed.push(usPerCall(runBefore))
+/** 一轮采样：交替执行 A/B，顺序逐次轮换（否则「谁先跑」会系统性偏向一侧）。 */
+const samplePair = () => {
+  const elapsed = []
+  for (let r = 0; r < rounds; r += 1) {
+    if (r % 2 === 0) {
+      elapsed.push(usPerCall(runBefore))
+      elapsed.push(usPerCall(runAfter))
+    } else {
+      elapsed.push(usPerCall(runAfter))
+      elapsed.push(usPerCall(runBefore))
+    }
   }
+  return { a: elapsed.filter((_, i) => i % 2 === 0), b: elapsed.filter((_, i) => i % 2 === 1) }
 }
-const aSamples = elapsed.filter((_, i) => i % 2 === 0)
-const bSamples = elapsed.filter((_, i) => i % 2 === 1)
 
 /**
- * 对照组：同一份 bundle 和自己比。它必须接近 0；如果不接近，这套仪器在这台机器上就不成立。
+ * ── 一轮 = 一次完整的 A/B + 一次本轮的对照 ──────────────────────────────────────────────────────
+ *
+ * 为什么对照也要「每轮各自做」：分辨率不是这台机器的常数，它随负载逐轮变化。
+ * 用某一轮的分辨率去判另一轮的差值，等于用上一小时的天气决定现在穿什么。
  */
-const controlA = []
-const controlB = []
-for (let r = 0; r < Math.max(6, rounds); r += 1) {
-  controlA.push(usPerCall(runBefore))
-  controlB.push(usPerCall(runBefore))
+const runOneRound = () => {
+  const { a, b } = samplePair()
+  const controlA = []
+  const controlB = []
+  for (let r = 0; r < Math.max(6, rounds); r += 1) {
+    controlA.push(usPerCall(runBefore))
+    controlB.push(usPerCall(runBefore))
+  }
+  return {
+    delta: deltaOfBest(a, b),
+    control: Math.abs(deltaOfBest(controlA, controlB)),
+    beforeBest: best(a),
+    afterBest: best(b),
+  }
 }
-const controlDelta = Math.abs(deltaOfBest(controlA, controlB))
-const delta = deltaOfBest(aSamples, bSamples)
+
+/**
+ * ── 结论必须是**多次独立运行**的产物，不是一次 ──────────────────────────────────────────────────
+ *
+ * 用户裁定（2026-11-12）：多轮独立运行 + 符号一致性 + 用**跨轮离散度**当分辨率；
+ * 任一轮符号翻转即判 NOT RESOLVABLE。
+ *
+ * 为什么（实测证据）：同一条 A/B 连跑 4 次，得到四个不同结论 ——
+ * `NOT RESOLVABLE(4.76%)` / `REGRESSION(23.83%)` / `NOT RESOLVABLE(2.96%)` / `INSTRUMENT UNFIT`。
+ * 那个 23.83% 的「回归」在后三次里没有复现，它是噪声。
+ *
+ * 单次运行的分辨率可以小到 ±2.68%，于是噪声轻易越过阈值；而**多轮之间**的离散度才是这套测量
+ * 真正的误差量级。所以三件事一起做：
+ *   ① 独立重复 N 轮（各自重新采样、各自重算对照）；
+ *   ② 分辨率 = 跨轮 delta 的极差（不是某一轮的自比噪声）；
+ *   ③ 符号一致性：N 轮里有正有负 ⇒ 差值连方向都不稳定 ⇒ NOT RESOLVABLE。
+ */
+const repeats = Number(argOf('--repeat', '5'))
+const observed = []
+for (let i = 0; i < repeats; i += 1) observed.push(runOneRound())
+
+const deltas = observed.map((o) => o.delta)
+const median = (xs) => {
+  const s = [...xs].sort((p, q) => p - q)
+  const mid = Math.floor(s.length / 2)
+  return s.length % 2 === 0 ? (s[mid - 1] + s[mid]) / 2 : s[mid]
+}
+const spread = Math.max(...deltas) - Math.min(...deltas)
+const signs = deltas.map((d) => (d > 0 ? '+' : d < 0 ? '−' : '0'))
+const signFlip = new Set(signs).size > 1
+const worstControl = Math.max(...observed.map((o) => o.control))
+const med = median(deltas)
 
 console.log(`subject        : ${subject}`)
 console.log(`fixture        : ${log.events.length} events`)
-console.log(`sampling       : ${rounds} rounds x ${calls} calls, alternating, order rotated`)
-console.log(`before (best)  : ${best(aSamples).toFixed(2)} µs/call`)
-console.log(`after  (best)  : ${best(bSamples).toFixed(2)} µs/call`)
-console.log(`delta          : ${fmt(delta)}   (min-of-samples, CPU-bound convention)`)
+console.log(`sampling       : ${rounds} rounds x ${calls} calls per independent run, alternating, order rotated`)
+console.log(`independent    : ${repeats} run(s)`)
 console.log('')
-console.log(`resolution     : ±${fmt(controlDelta)}  ← this machine's measured noise floor, NOT zero`)
-console.log('                 (control = the same bundle measured against itself)')
+console.log('  run   before(us)  after(us)      delta    control')
+for (let i = 0; i < observed.length; i += 1) {
+  const o = observed[i]
+  console.log(`  ${String(i + 1).padStart(3)}   ${o.beforeBest.toFixed(2).padStart(10)}  ${o.afterBest.toFixed(2).padStart(9)}  ${fmt(o.delta).padStart(9)}  ${fmt(o.control).padStart(9)}`)
+}
+console.log('')
+console.log(`median delta   : ${fmt(med)}`)
+console.log(`signs          : ${signs.join(' ')}   ${signFlip ? '(FLIP — the difference has no stable direction)' : '(consistent)'}`)
+console.log(`resolution     : +/-${fmt(spread)}  = cross-run spread (max-min), NOT a single run's self-noise`)
+console.log(`worst control  : ${fmt(worstControl)}`)
 console.log('')
 
 /**
- * ── 结论的措辞只有三档，且必须提到分辨率 ────────────────────────────────────────────────────────
+ * ── 四档结论 ────────────────────────────────────────────────────────────────────────────────────
  *
- * 用户裁定（2026-11-12）：他的机器上对照组是 7.79%，不是 0.64% —— 所以「−2.27%」的正确读法是
- * **「测不出回归」**，不是「快了 2.3%」。任何小于本机分辨率的差值都不能当结论。
+ *   worst control > 10%            → INSTRUMENT UNFIT（exit 2）
+ *   符号翻转                        → NOT RESOLVABLE（方向都不稳定，谈不上大小）
+ *   |median| <= cross-run spread   → NOT RESOLVABLE（差值小于跨轮离散度）
+ *   median > +10%                  → REGRESSION（exit 1）
+ *   其余                            → 可分辨但在 10% 以内
  *
- * 第一版这里会输出 `FASTER by 2.26%` —— 那是把噪声说成结论。三档改成一个方向：
- *
- *   control > 10%      → INSTRUMENT UNFIT（exit 2）：连 10% 都分辨不了，任何结论都是编的
- *   |delta| <= control → NOT RESOLVABLE：差值落在分辨率里，只能说「测不出」
- *   delta > +10% 且超出 control → REGRESSION（exit 1）
- *
- * 「变快」永不作结论 —— 纯位移没有变快的机制，报「变快」等于承认仪器在测噪声。
+ * 「变快」永不作结论：纯位移没有变快的机制，报「变快」等于承认仪器在测噪声。
  */
-if (controlDelta > 0.10) {
-  console.log(`VERDICT: INSTRUMENT UNFIT — the control deviates ${fmt(controlDelta)}, above the 10% threshold.`)
+if (worstControl > 0.10) {
+  console.log(`VERDICT: INSTRUMENT UNFIT — the worst control across runs is ${fmt(worstControl)}, above 10%.`)
   console.log('         This machine cannot resolve a 10% difference right now, so no verdict is possible.')
-  console.log('         Expected value for a pure move: 0% by construction (no code, no call count changed).')
-  console.log('         Recorded as "not measurable, expected 0" — NOT a pass and NOT a regression.')
+  console.log('         Recorded as "not measurable" — NOT a pass and NOT a regression.')
   process.exit(2)
 }
 
-if (Math.abs(delta) <= controlDelta) {
-  console.log(`VERDICT: NOT RESOLVABLE — |${fmt(delta)}| is inside this machine's resolution ±${fmt(controlDelta)}.`)
+if (signFlip) {
+  console.log(`VERDICT: NOT RESOLVABLE — the sign flips across independent runs (${signs.join(' ')}).`)
+  console.log('         A difference whose direction is not stable is not a measurement of size either.')
+  console.log(`         Cross-run spread +/-${fmt(spread)}. No regression claim is possible from this data.`)
+} else if (Math.abs(med) <= spread) {
+  console.log(`VERDICT: NOT RESOLVABLE — |${fmt(med)}| is inside the cross-run spread +/-${fmt(spread)}.`)
   console.log('         The correct reading is "no regression detected", NOT "faster" or "slower".')
-  console.log('         Expected value for a pure move: 0% by construction.')
-} else if (delta > 0.10) {
-  console.log(`VERDICT: REGRESSION — ${fmt(delta)} exceeds +10% AND this machine's resolution ±${fmt(controlDelta)}.`)
+} else if (med > 0.10) {
+  console.log(`VERDICT: REGRESSION — median ${fmt(med)} exceeds +10% and the cross-run spread +/-${fmt(spread)}.`)
   process.exitCode = 1
 } else {
-  console.log(`VERDICT: outside the resolution (±${fmt(controlDelta)}) but inside the 10% band.`)
+  console.log(`VERDICT: outside the cross-run spread (+/-${fmt(spread)}) but inside the 10% band.`)
   console.log('         Not a regression; also not evidence of improvement — a pure move has no mechanism to be faster.')
 }

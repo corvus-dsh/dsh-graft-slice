@@ -414,6 +414,15 @@ export type { GraftIdentity }
 export const name = 'dsh-graft-slice'
 
 /**
+ * The prefix this plugin gives the sessions it creates itself (auto-graft targets).
+ *
+ * Two places need it: the config normaliser (the default value) and the anchor-generation
+ * tri-state in `buildTape` (an unmarked id with this prefix is a target whose mark is gone,
+ * NOT an original session). One literal, two consumers.
+ */
+const DEFAULT_AUTO_GRAFT_ID_PREFIX = 'auto-graft'
+
+/**
  * v7.7 — THE PHYSICAL WRITE GOES THROUGH `dsh-paradise`.
  *
  * `ensureParadiseWrite` resolves the layer LAZILY (a static bare import would survive into this
@@ -833,7 +842,7 @@ export function normalizeConfig(config: GraftConfig | undefined): Required<Graft
     autoGraftIdPrefix:
       typeof input.autoGraftIdPrefix === 'string' && input.autoGraftIdPrefix.trim().length > 0
         ? input.autoGraftIdPrefix.trim()
-        : 'auto-graft',
+        : DEFAULT_AUTO_GRAFT_ID_PREFIX,
     autoGraftSessionIds: Array.isArray(input.autoGraftSessionIds)
       ? input.autoGraftSessionIds.filter((value): value is string => typeof value === 'string' && value.trim().length > 0).map((value) => value.trim())
       : [],
@@ -3241,8 +3250,11 @@ export function buildTape(
   // wrong in a way this function could not detect. `buildTape` stays a pure function of
   // (events, config, sourceSessionId) — the state lookup is the same one `findConstraintProvenance`
   // already does a few lines up.
-  const anchorGeneration =
-    sourceSessionId !== undefined && sourceSessionId.length > 0 ? graftGenerationOf(sourceSessionId) : 0
+  /**
+   * 三态代数：标记有记录 → 数字；无记录且 id 是本插件生成的前缀 → undefined（无标记）；
+   * 无记录且 id 不像本插件生成的 → 'original'。判定细节见 `anchorGenerationFor`。
+   */
+  const anchorGeneration = anchorGenerationFor(sourceSessionId, config)
   const constraintAnchor = inheritedConstraintAnchor(events, sourceSessionId, anchorGeneration)
   // v7.6 (Model-Driven): the target boots itself.
   //
@@ -7845,6 +7857,25 @@ const CONTEXT_WINDOW_EXCEEDED = 'CONTEXT_WINDOW_EXCEEDED'
 /** Sessions already grafted at least once; a target inherits source generation + 1. */
 function graftGenerationOf(sessionId: string): number {
   return graftTargets.get(sessionId)?.generation ?? 0
+}
+
+/**
+ * The anchor's generation as a THREE-state value, not a number.
+ *
+ * 0 is not "the original session" — it only means the local mark has no record. So:
+ * marked → that number; unrecorded but id carries this plugin's auto-graft prefix → undefined
+ * (rendered as "代次未记录（无标记）"); unrecorded and not plugin-generated → 'original'
+ * (a judgement under the LOCAL mark: a target made by another profile would look original here).
+ */
+function anchorGenerationFor(sessionId: string | undefined, config: { autoGraftIdPrefix?: string }): number | 'original' | undefined {
+  if (sessionId === undefined || sessionId.length === 0) return undefined
+  const marked = graftTargets.get(sessionId)?.generation
+  if (typeof marked === 'number' && marked > 0) return marked
+  // `buildTape` may receive a RAW config (callers pass `{}`), so the default must be applied here.
+  const prefix = typeof config.autoGraftIdPrefix === 'string' && config.autoGraftIdPrefix.length > 0
+    ? config.autoGraftIdPrefix
+    : DEFAULT_AUTO_GRAFT_ID_PREFIX
+  return sessionId.startsWith(prefix) ? undefined : 'original'
 }
 
 function markGraftTarget(sessionId: string, sourceSessionId: string, seedEvents?: number, goal?: string): void {
