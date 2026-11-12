@@ -45,31 +45,28 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const TYPE_CHECK = join(ROOT, 'scripts', 'type-check.mjs')
 
 /**
- * ── 冻结基线（实测 2026-11-12，提交 519bbc0 之后）──────────────────────────────────────────────
+ * ── 冻结基线（实测 2026-11-12，按「代码健康度」口径）────────────────────────────────────────────
  *
- * 这是「今天的尺寸」，不是目标。它只允许**下降**：清理真实类型错误时，每清一条就把这里的数字调低；
+ *     28 条代码缺陷 / 3 个文件      ← 这张表只管这个
+ *     33 条环境问题（2307×18 + 2580×15）← 不在这张表里：装 @types/node 就消失，不是缺陷
+ *
+ * 用户裁定：两者必须分开数，否则下一个读表的人会去「修」那 33 条，而修法不是改代码。
+ *
+ * 这是「今天的尺寸」，不是目标。它只允许**下降**：每清掉一组同根因的缺陷就把数字调低；
  * 任何上升都必须显式改这个表并写理由 —— 与 v130 的 EXEMPT 同一种用法。
  *
  * 为什么不写总量而写每文件：总量会被「一个文件变好、另一个变坏」互相抵消，而那正是本门禁要抓的。
  *
  * ── 这份表是 `--baseline` 的实测输出，不是手写的 ──────────────────────────────────────────────
  *
- * 第一版我按「我记得的文件」手写了 17 行，把 `core/watermark.ts 3`、`core/gateway-types.ts 3`、
- * `core/adaptive-depth.ts 2` 等也写了进去 —— 那几个错误**本轮已经被修掉**，所以它们实测是 0。
- * 手写的表如果偏松，就是给未来的增长预留了空间；如果偏紧，就是天天误报。
+ * 手写过的两次都错了：第一次按「印象中的文件」写了 17 行（含已被修掉的文件）；
+ * 第二次排除环境问题后仍打印 report.total，与逐文件列表对不上 —— 两个数用了两套口径。
  * 所以这张表只能来自 `node scripts/type-budget.mjs --baseline`。
  */
 const BASELINE = new Map([
-  ['index.ts', 35],
-  ['core/txn.ts', 7],
-  ['core/ignition.ts', 4],
-  ['core/store-layer.ts', 4],
-  ['core/ledger.ts', 3],
-  ['core/command-guard.ts', 2],
-  ['core/layout.ts', 2],
-  ['core/state.ts', 2],
+  ['index.ts', 12],
+  ['core/ignition.ts', 2],
   ['contracts/model-wording.contracts.ts', 1],
-  ['core/pending-state.ts', 1],
 ])
 
 /** 搬移专属失效模式：声明了没 export，却被别的文件 import。必须是 0，不是「不变」。 */
@@ -119,10 +116,35 @@ function touchedFiles (ref) {
     .map((line) => line.slice('src/'.length))
 }
 
-/** 统计每个文件的诊断数（键用仓库相对路径，正斜杠）。 */
+/**
+ * 统计每个文件的**代码健康度**诊断数（键用相对 src/ 的路径，正斜杠）。
+ *
+ * ── 环境问题不进预算表 ─────────────────────────────────────────────────────────────────────────
+ *
+ * 用户裁定：2307（缺 node 内置类型的 18 条）与 2580（缺 process 的 15 条）是环境问题，
+ * 修法是装 @types/node，不是改代码。把它们算进预算，会让「某文件触及后数字变了」
+ * 反映一个与本提交无关的原因；更糟的是有人会为了让数字变小去「修」它们。
+ *
+ * 所以预算只数**代码缺陷**，环境问题由 type-check.mjs 单列成表。
+ * 两边的分组必须用同一套判据，否则两个工具会各说各话。
+ */
+const ENVIRONMENT_CODES = new Set([2307, 2580])
+
+/**
+ * ── 与 type-check.mjs 完全相同的两类「不是代码缺陷」的排除 ──────────────────────────────────────
+ *
+ * 环境问题（2307/2580）与编译器产物（strict:false 造成的 1 条 2339）都必须排除，
+ * 否则「某文件被触及后数字变了」会反映一个与本提交无关的原因。
+ *
+ * 两个工具的口径必须一致 —— 否则它们会各说各话，而 v143 的断言正是拿两边对照的。
+ */
+const COMPILER_ARTIFACT = new Set(['index.ts:9792:2339'])
+
 function countsByFile (report) {
   const counts = new Map()
   for (const d of report.diagnostics) {
+    if (ENVIRONMENT_CODES.has(d.code)) continue
+    if (COMPILER_ARTIFACT.has(`${d.file}:${d.line}:${d.code}`)) continue
     counts.set(d.file, (counts.get(d.file) ?? 0) + 1)
   }
   return counts
@@ -140,7 +162,14 @@ if (showBaseline) {
   const counts = countsByFile(report)
   console.log('current baseline (paste into BASELINE):')
   for (const [file, n] of [...counts].sort((a, b) => b[1] - a[1])) console.log(`  ['${file}', ${n}],`)
-  console.log(`  total: ${report.total}`)
+  /**
+   * 这里必须打印**代码健康度**的合计，不是所有诊断的合计。
+   * 实测：第一版打印 report.total（61），而上面的每文件列表已经排除了 33 条环境问题，
+   * 两者对不上 —— 与「手写基线表」同一类错误的镜像：两个数用了两套口径。
+   */
+  const codeTotal = [...counts.values()].reduce((s, n) => s + n, 0)
+  const envTotal = report.diagnostics.filter((d) => ENVIRONMENT_CODES.has(d.code)).length
+  console.log(`  code total: ${codeTotal}   (environment, not in this table: ${envTotal})`)
   process.exit(0)
 }
 

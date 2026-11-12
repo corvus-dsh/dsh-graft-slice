@@ -30,9 +30,23 @@ function walk (dir, out = []) {
 const files = walk(SRC)
 const IMP = /(?:^|\n)\s*(?:import|export)\s+(?:type\s+)?(?:[^'"\n]*?\sfrom\s+)?['"](\.[^'"]+)['"]/gu
 
-/** 解析相对 spec 到真实文件（补 .ts） */
+/**
+ * 解析相对 spec 到真实文件。
+ *
+ * ── `.ts` 扩展名是真实语法，解析器必须认识它 ─────────────────────────────────────────────────────
+ *
+ * 第一版只剥离 `.js`，于是 `./model-wording.ts` 被拼成 `model-wording.ts.ts`，解析失败，
+ * 那条边落进 `unresolved`。而 ACYCLIC 是在**忽略了一条边**的基础上算出来的 ——
+ * 如果那条边恰好是环的一部分，结论就是错的。
+ *
+ * 用户点出了这一点：「ACYCLIC 不能建立在不认识的边上」。
+ *
+ * `src/contracts/model-wording.contracts.ts` 确实用 `.ts` 结尾，而且是**刻意的**：
+ * 它只被测试直接加载，Node 不走 `.js`→`.ts` 重写，所以那条 import 必须写真实扩展名。
+ * 结论：这不是异常，是这个仓库的一种合法 import 形状，解析器本来就该支持。
+ */
 function target (fromFile, spec) {
-  const base = resolve(dirname(fromFile), spec.replace(/\.js$/u, ''))
+  const base = resolve(dirname(fromFile), spec.replace(/\.(?:js|ts)$/u, ''))
   for (const cand of [base + '.ts', join(base, 'index.ts')]) {
     try { if (statSync(cand).isFile()) return cand } catch { /* not this one */ }
   }
@@ -75,9 +89,30 @@ for (const f of files) if (!idx.has(f)) strongconnect(f)
 
 const edges = [...graph.values()].reduce((s, o) => s + o.size, 0)
 console.log(`nodes: ${files.length}  edges: ${edges}  unresolved: ${missing.length}`)
-if (missing.length > 0) console.log('unresolved:\n  ' + missing.join('\n  '))
+
+/**
+ * ── AN ACYCLICITY CLAIM CANNOT REST ON AN EDGE NOBODY UNDERSTANDS ───────────────────────────────
+ *
+ * Measured: the first run printed `unresolved: 1` — `contracts/model-wording.contracts.ts ->
+ * ./model-wording.ts` — and then printed `ACYCLIC` anyway. That is the wrong shape for a verdict:
+ * if the unparsed edge happened to close a cycle, "ACYCLIC" would be false while looking green.
+ *
+ * The cause was the resolver stripping only `.js`, so `./model-wording.ts` became
+ * `model-wording.ts.ts` and missed (that import is deliberately `.ts` — the file is loaded by Node
+ * directly, and Node does not rewrite `.js` → `.ts`).
+ *
+ * Fixed in the resolver — but the DISPLAY problem was the real one, so an unresolved edge is now a
+ * FAILURE, not a footnote. A green verdict must cover every edge it saw.
+ */
+if (missing.length > 0) {
+  console.error('FAIL: these relative imports could not be resolved to a file, so the graph is incomplete:')
+  for (const line of missing) console.error(`  ${line}`)
+  console.error('A cycle check over a partial graph proves nothing. Fix the specifier or teach the resolver the shape.')
+  process.exit(1)
+}
+
 if (sccs.length === 0) {
-  console.log('ACYCLIC — no dependency cycle')
+  console.log('ACYCLIC — no dependency cycle, and every relative import resolved to a file')
 } else {
   console.log(`CYCLES: ${sccs.length}`)
   for (const c of sccs) console.log('  ' + c.map(rel).join(' ⇄ '))

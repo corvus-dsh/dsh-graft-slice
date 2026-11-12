@@ -9030,6 +9030,32 @@ export function extractSourceTemplate(events                             )      
               
                    
                     
+     
+                                                                                                    
+    
+                                                                                   
+                                                                                                 
+    
+                                                                                                     
+    
+                                                                                                      
+                                                                                                      
+                                                                                                  
+                                                                                                  
+                                                                               
+    
+                                                                                                      
+                                                                                                   
+                                                                                    
+    
+                                                                                           
+     
+                       
+                
+               
+                     
+                         
+    
  
 
 /**
@@ -13879,10 +13905,25 @@ async function graftSliceAndInjectUnlocked(
             },
           }
         }
+        /**
+         * ── `plan.title` NEVER EXISTED, BUT THE INTENT DOES ───────────────────────────────────────
+         *
+         * `tsc` reported 2339 here (and at the two `title:` sites below): `Property 'title' does not
+         * exist on type 'GraftPlan'`. Measured both directions:
+         *   · `GraftPlan` (index.ts:575–640) has no `title` field;
+         *   · `buildInjectionPlan` (index.ts:3836, 745 lines) never sets one — zero `title` properties
+         *     in its return literal.
+         *
+         * So the old expression was `plan.title === undefined ? {} : { title: plan.title }` — always
+         * `{}`, i.e. the target was NEVER given a title from this path. It read as a feature and was
+         * dead code.
+         *
+         * The behaviour that shipped is "no title here", so that is what this now says. The derived
+         * title on the other path (`[切片] ${sourceId}`) is untouched.
+         */
         const written = await gateway.writeTarget({
           id: newId,
           cwd: plan.cwd,
-          ...(plan.title === undefined ? {} : { title: plan.title }),
           events: tape,
         })
         return {
@@ -13906,9 +13947,13 @@ async function graftSliceAndInjectUnlocked(
           },
         }
       }
+      /**
+       * `plan.title` never existed (see the note above): the `??` fallback was therefore the ONLY
+       * value this ever produced. Written directly so the code says what it does.
+       */
       const viaLayer = await paradise.session.create({
         cwd: plan.cwd,
-        title: plan.title ?? `[切片] ${sourceId}`,
+        title: `[切片] ${sourceId}`,
         id: newId,
         tape,
         ...(sourceAgentPreset === undefined ? {} : { inheritFrom: sourceId }),
@@ -14085,7 +14130,40 @@ async function graftSliceAndInjectUnlocked(
       const emit = (ctx       ).emit
       if (typeof emit === 'function') {
         const createdAt = Date.now()
-        const summary = {
+        /**
+         * ── WHY THIS ANNOTATION EXISTS: narrowing turned the failure branch into `never` ─────────
+         *
+         * `tsc` reported 2339 twice (`summary.sessionId`, `summary.updatedAt`) — not because the
+         * fields are missing, but because the NEGATIVE branch had no type left:
+         *
+         *   `assertSessionSummary(payload): payload is { sessionId: string; updatedAt: number }`
+         *
+         * `updatedAt` here is `createdAt`, a `number`, and `sessionId` is a `string`, so this object
+         * literal's static type ALREADY satisfies the predicate. TypeScript therefore narrows the
+         * `true` branch of `if (!guard(summary))` to `never` — the branch that must REPORT the problem.
+         *
+         * Reproduced in isolation (three variants, `typescript` 5.9.3): an object literal that
+         * satisfies the guard → `never`; the same value declared as `unknown`, or as a shape with
+         * OPTIONAL fields → no diagnostic, and the report keeps working.
+         *
+         * ── THE TRAP THIS AVOIDS ─────────────────────────────────────────────────────────────────
+         *
+         * The tempting fix is `(summary as any).sessionId`, which deletes the evidence. The other is
+         * dropping the guard, which deletes the check. The annotation keeps both: the runtime value is
+         * byte-identical, the guard still runs, and the branch can still say what went wrong.
+         *
+         * The fields are optional ON PURPOSE: that is what tells the compiler "this might not satisfy
+         * the predicate", which is exactly the real situation at runtime — `createdAt` can be NaN.
+         */
+        const summary   
+                            
+                            
+                                 
+                              
+                          
+                        
+                      
+          = {
           sessionId: newId,
           // summarizeCold: updatedAt = max(createdAt, metadata.lastPromptAt ?? 0)
           updatedAt: createdAt,
@@ -15472,7 +15550,16 @@ export async function registerArchivedForks(
     await attachSessionToWorkspace(ctx, id, cwd)
     if (typeof emit !== 'function') continue
     try {
-      const summary = {
+      /** Same `never`-narrowing reason as the target path above: optional fields keep the report reachable. */
+      const summary   
+                          
+                          
+                               
+                            
+                        
+                      
+                    
+        = {
         sessionId: id,
         // summarizeCold: updatedAt = max(createdAt, metadata.lastPromptAt ?? 0)
         updatedAt: typeof header?.createdAt === 'number' ? header.createdAt : Date.now(),

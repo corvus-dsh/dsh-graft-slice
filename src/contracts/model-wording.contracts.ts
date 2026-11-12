@@ -8,6 +8,23 @@
  * 正则从这里 import、不重新抄写，因此 `CONTRACT.re === REGEX` 结构性成立。
  */
 import type { WordingPattern } from './types.js'
+/**
+ * ── THE `.ts` EXTENSION HERE IS DELIBERATE, AND THE TYPE CHECKER'S 5097 IS THE PRICE ────────────
+ *
+ * Measured, both ways:
+ *   · with `./model-wording.js` — `tsc` is happy (code 5097 gone) but Node, which loads THIS file
+ *     directly (test/contracts-model-wording.test.mjs imports the `.ts`), fails with
+ *     `ERR_MODULE_NOT_FOUND … model-wording.js`. Node does not rewrite `.js` → `.ts`.
+ *   · with `./model-wording.ts` — Node resolves the real file; `tsc` reports 5097 because
+ *     `allowImportingTsExtensions` is off.
+ *
+ * The first option breaks a green test to satisfy a checker that this file is deliberately outside
+ * the production dependency graph. The second keeps the contract *structurally* true: the regex is
+ * imported, never re-typed, so `CONTRACT.re === REGEX` cannot drift.
+ *
+ * So this is an explained exception, not a typo — and check-cycles records it as a known edge rather
+ * than leaving it "unresolved", because an acyclicity claim cannot rest on an edge nobody understands.
+ */
 import { TODO_TOOL_NAME, CONSTRAINT_PATTERN, EMPHATIC, STANDING_PROHIBITION } from './model-wording.ts'
 
 export const TODO_TOOL_NAME_CONTRACT: WordingPattern = {

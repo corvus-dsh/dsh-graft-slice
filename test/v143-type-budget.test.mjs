@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const SCRIPT = join(ROOT, 'scripts', 'type-budget.mjs')
+const TYPE_CHECK = join(ROOT, 'scripts', 'type-check.mjs')
 const SOURCE = readFileSync(SCRIPT, 'utf8')
 
 /** 运行脚本并把退出码与输出一起拿到（它按设计以非零退出表示违规）。 */
@@ -138,6 +139,60 @@ test('v143: it exits 2 — not 0 — when the compiler is unavailable', () => {
   assert.match(SOURCE, /process\.exit\(2\)/u, 'a resource failure must exit 2, never 0')
   assert.match(SOURCE, /RESOURCE condition, not a pass/u,
     'the script must say that missing compiler is a resource condition, not a pass')
+})
+
+test('v143: environment defects are counted SEPARATELY from code defects', (t) => {
+  /**
+   * ── 用户裁定：33 条缺 @types/node 的诊断与代码无关，必须单列 ────────────────────────────────
+   *
+   * 判据是诊断在说什么，不是「我记得哪几个 code」：
+   *   2307 解析不到 node 内置模块的类型声明
+   *   2580 找不到 node 全局 process
+   * 两者都只在 package.json 声明 @types/node 之后才消失，**改代码永远改不掉**。
+   *
+   * 为什么非要分开：混在一张表里，下一个读表的人会想把 61 清到 0，而其中 33 条的修法不是改代码 ——
+   * 与之前「196 里 33 条是环境问题」那次混乱同一个坑。
+   *
+   * 为什么预算表也必须用同一套判据：否则「某文件被触及后数字变了」会反映一个与本提交无关的原因。
+   */
+  if (!requireCompiler(t)) return
+
+  const out = execFileSync(process.execPath, [TYPE_CHECK], { cwd: ROOT, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
+  assert.match(out, /CODE HEALTH: (\d+) diagnostic/u, 'the summary must state a code-health count')
+  assert.match(out, /ENVIRONMENT: (\d+) diagnostic/u, 'the summary must state an environment count separately')
+  assert.match(out, /NOT code defects, @types\/node would retire them/u,
+    'the environment line must say they are not code defects and how they would go away')
+  assert.match(out, /do NOT "fix" these by editing code/u,
+    'the summary must warn against "fixing" them in code')
+
+  const codeHealth = Number(/CODE HEALTH: (\d+)/u.exec(out)?.[1])
+  const environment = Number(/ENVIRONMENT: (\d+)/u.exec(out)?.[1])
+  const artifact = Number(/COMPILER ARTIFACT: (\d+)/u.exec(out)?.[1] ?? '0')
+  const total = Number(/type-check: (\d+) diagnostic/u.exec(out)?.[1])
+
+  /**
+   * ── 三类互斥，合起来才是全部 ────────────────────────────────────────────────────────────────────
+   *
+   * 早先这条断言写的是 `code + environment === total`，加了「编译器产物」这一类之后它必然失败 ——
+   * 而失败的原因是**分类变细了**，不是有诊断丢了。这正是「断言的主语写错」那一族：
+   * 要钉的是「每条诊断恰好落进一类」，不是「只有两类」。
+   */
+  assert.equal(codeHealth + environment + artifact, total,
+    `code (${codeHealth}) + environment (${environment}) + compiler artifact (${artifact}) ` +
+    `must equal the total (${total}) — every diagnosis belongs to exactly one bucket`)
+  assert.ok(environment > 0, 'the environment bucket must not be silently empty')
+  assert.match(out, /strict:true reports 0 here/u,
+    'the compiler artifact must state that a STRICTER setting reports nothing here — ' +
+    'otherwise a reader concludes the code is wrong')
+
+  /**
+   * 预算的 `--baseline` 必须用同一口径：它的 code total 要等于 type-check 的 CODE HEALTH，
+   * 而不是全部诊断数。两个工具各说各话是最容易漏的一类不一致。
+   */
+  const { out: budgetOut } = run(['--baseline'])
+  const budgetCodeTotal = Number(/code total: (\d+)/u.exec(budgetOut)?.[1])
+  assert.equal(budgetCodeTotal, codeHealth,
+    `type-budget's baseline (${budgetCodeTotal}) must match type-check's CODE HEALTH (${codeHealth})`)
 })
 
 test('v143: the gate is reachable — the script runs on the real tree and names the move-only code', (t) => {

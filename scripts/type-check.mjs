@@ -118,8 +118,63 @@ for (const diagnostic of diagnostics) {
   rows.push({ file, line, code: diagnostic.code, message })
 }
 
+/**
+ * ── 环境问题不是代码问题，必须分开数 ────────────────────────────────────────────────────────────
+ *
+ * 用户裁定（2026-11-12）：33 条来自「缺 @types/node」，与代码无关；
+ * 如果和代码错误混在一张表里，下一个读表的人会去「修」它们，而修法不是改代码，是装类型定义 ——
+ * 与之前「196 里 33 条是环境问题」那次混乱同一个坑。
+ *
+ * 判据不是「我记得哪几个 code」，而是**这两类诊断的 message 在说什么**：
+ *   · 2307 `Cannot find module 'node:os' …`  —— 解析不到 node 内置模块的类型声明
+ *   · 2580 `Cannot find name 'process' …`    —— 缺 node 全局对象
+ * 两者都只在 package.json 声明了 `@types/node` 之后才消失，改代码永远改不掉。
+ */
+const ENVIRONMENT_CODES = new Map([
+  [2307, "cannot resolve a node builtin's type declarations (needs @types/node)"],
+  [2580, 'cannot find the node global `process` (needs @types/node)'],
+])
+const isEnvironment = (row) => ENVIRONMENT_CODES.has(row.code)
+
+/**
+ * ── 一条由「编译器口径」而非代码造成的诊断 —— 明示，不静默 ──────────────────────────────────────
+ *
+ * 实测（同一份 src/，只改 `strict`）：
+ *
+ *     strict: false → 49 条        strict: true → 58 条
+ *     差异：① 本条 2339 只在 strict:false 出现；
+ *           ② index.ts:3455 的 2345 只在 strict:true 出现；
+ *           ③ 9 条 7006（隐式 any）只在 strict:true 出现。
+ *
+ * 本条是 `if (!safety.ok) … safety.reason`。`strict: true` 下 TypeScript 正确地把它收窄成
+ * `{ ok: false; reason: string }`，**0 条诊断**；`strict: false` 下不收窄，于是报「reason 不存在」。
+ * 最小复现（typescript 5.9.3，三行代码）确认这是 strictness 造成的，不是代码问题。
+ *
+ * 用户裁定：保持 `strict: false`（切到 true 会立刻引入 9 条 7006 的新债，且与历史数字不可比），
+ * 但**必须标注**这一条 —— 否则下一个人会去「修」一个在当前口径下不存在的问题，
+ * 或者更糟：看到它消失就以为是自己修好的。
+ *
+ * 判据用「文件+行号+code」三元组而不是 message 文本：message 会随编译器版本改写。
+ */
+const COMPILER_ARTIFACT = new Map([
+  ['index.ts:9792:2339', 'strict:false does not narrow `!safety.ok`; strict:true reports 0 here'],
+])
+
+const artifactKey = (row) => `${row.file}:${row.line}:${row.code}`
+const isArtifact = (row) => COMPILER_ARTIFACT.has(artifactKey(row))
+
+const envRows = rows.filter(isEnvironment)
+const artifactRows = rows.filter((row) => !isEnvironment(row) && isArtifact(row))
+const codeRows = rows.filter((row) => !isEnvironment(row) && !isArtifact(row))
+
 if (asJson) {
-  console.log(JSON.stringify({ total: rows.length, diagnostics: rows }, null, 1))
+  console.log(JSON.stringify({
+    total: rows.length,
+    code: codeRows.length,
+    environment: envRows.length,
+    compilerArtifact: artifactRows.length,
+    diagnostics: rows,
+  }, null, 1))
   process.exit(0)
 }
 
@@ -136,6 +191,33 @@ if (excluded.length > 0) {
   console.log(`excluded (evidence, not source): ${excluded.join(', ')}`)
 }
 console.log(`type-check: ${rows.length} diagnostic(s)${onlyCode === undefined ? '' : ` with code ${onlyCode}`}${onlyGrep === undefined ? '' : ` mentioning "${onlyGrep}"`}`)
+/**
+ * ── 把环境问题从「代码健康度」里摘出来，单独数 ──────────────────────────────────────────────────
+ *
+ * 用户裁定：33 条缺 @types/node 的诊断与代码无关，必须单列。
+ * 只写「196 条里有 33 条是环境问题」不够 —— 下一次读表的人看到「196」就会想把它清到 0，
+ * 而清法不是改代码。所以两者从一开始就分成两个数：
+ *
+ *     code health : 28   ← 这些要修
+ *     environment : 33   ← 这些装 @types/node 就消失，不是缺陷
+ */
+if (onlyCode === undefined && onlyGrep === undefined && envRows.length > 0) {
+  console.log('')
+  console.log(`CODE HEALTH: ${codeRows.length} diagnostic(s) — these are real type defects in this repo`)
+  console.log(`ENVIRONMENT: ${envRows.length} diagnostic(s) — NOT code defects, @types/node would retire them`)
+  for (const [code, why] of ENVIRONMENT_CODES) {
+    const n = envRows.filter((row) => row.code === code).length
+    if (n > 0) console.log(`  ${String(code).padEnd(6)} ${String(n).padStart(3)}  ${why}`)
+  }
+  console.log('  (do NOT "fix" these by editing code: package.json declares no dependencies, deliberately)')
+  if (artifactRows.length > 0) {
+    console.log(`COMPILER ARTIFACT: ${artifactRows.length} diagnostic(s) — caused by strict:false, not by the code`)
+    for (const row of artifactRows) {
+      console.log(`  ${row.file}:${row.line}  [${row.code}]  ${COMPILER_ARTIFACT.get(artifactKey(row))}`)
+    }
+    console.log('  (strict:true reports 0 here; do NOT "fix" it, and do not read its disappearance as a fix)')
+  }
+}
 /**
  * ── ONE SAMPLE PER CODE IS MISLEADING ───────────────────────────────────────────────────────────
  *
