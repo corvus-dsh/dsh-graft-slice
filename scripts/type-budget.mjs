@@ -164,15 +164,76 @@ const COMPILER_ARTIFACT = { code: 2339, file: 'index.ts', match: /Property 'reas
 
 function countsByFile (report) {
   const counts = new Map()
-  for (const d of report.diagnostics) {
-    if (ENVIRONMENT_CODES.has(d.code)) continue
-    // 与 type-check.mjs 同一条判据：按文件 + code + message 子串，**不用行号**
-    // （行号会因任何一处注释增删而失效，本轮已经实测过一次）
-    if (d.code === COMPILER_ARTIFACT.code && d.file === COMPILER_ARTIFACT.file && COMPILER_ARTIFACT.match.test(d.message)) continue
+  for (const d of codeDefects(report)) {
     counts.set(d.file, (counts.get(d.file) ?? 0) + 1)
   }
   return counts
 }
+
+/** 一条诊断是否为「代码缺陷」（排除环境问题与编译器产物）。两个工具共用同一条判据。 */
+function isCodeDefect (d) {
+  if (ENVIRONMENT_CODES.has(d.code)) return false
+  if (d.code === COMPILER_ARTIFACT.code && d.file === COMPILER_ARTIFACT.file && COMPILER_ARTIFACT.match.test(d.message)) return false
+  return true
+}
+
+const codeDefects = (report) => report.diagnostics.filter(isCodeDefect)
+
+/**
+ * ── 诊断的「身份」：文件 + code + message ───────────────────────────────────────────────────────
+ *
+ * ── 为什么光有「每文件计数」不够 ────────────────────────────────────────────────────────────────
+ *
+ * 用户裁定（2026-11-12）：按每文件计数，允许「修好 1 条 + 弄坏 1 条 = 数字不变 = 通过」。
+ * 本轮就发生过一次等价交换：2339 少 1 条，同时那条 artifact 被重新归类 —— 总数看起来没动。
+ *
+ * 剩下要清的 10 条里，2345×3 / 2322×2 / 2353×2 / 2554×2 的修法都是「改签名或改类型」，
+ * 而改签名最容易在别处引入新错误。若只有计数防线，「修 3 条、坏 3 条」会静默通过。
+ *
+ * ── 身份里为什么没有行号 ───────────────────────────────────────────────────────────────────────
+ *
+ * 上一轮把 artifact 标注成 `index.ts:9792:2339`，本轮加了一条三行注释就让它失效 ——
+ * **用位置当身份，位置一变识别就没了**。这里同样只用 (文件, code, message)。
+ *
+ * ── 为什么是「多重集」而不是「集合」──────────────────────────────────────────────────────────
+ *
+ * 实测：`2554 Expected 0 arguments, but got 1.` 在 index.ts 里出现 2 次，message 完全一样；
+ * `2345` 也有两条同 message。若用 Set，两条会塌成一条，「多出一条同 message 的错误」就看不见。
+ * 所以按 `身份 → 次数` 记，比较次数。
+ */
+function defectIdentities (report) {
+  const multiset = new Map()
+  for (const d of codeDefects(report)) {
+    const key = `${d.file}\u0000${d.code}\u0000${d.message}`
+    multiset.set(key, (multiset.get(key) ?? 0) + 1)
+  }
+  return multiset
+}
+
+/** 可读的诊断身份（用于打印）。 */
+const describeIdentity = (key) => {
+  const [file, code, message] = key.split('\u0000')
+  return `${file} [${code}] ${message.slice(0, 120)}`
+}
+
+/**
+ * ── 冻结的身份基线 ────────────────────────────────────────────────────────────────────────────
+ *
+ * 与 BASELINE 的每文件计数**同源**：都由 `--baseline` 从同一份实测输出生成。
+ * 两张表必须同时下降，否则会出现「计数变了但身份表没变」这类自相矛盾。
+ */
+const BASELINE_IDENTITIES = new Map([
+  ['contracts/model-wording.contracts.ts\u00005097\u0000An import path can only end with a \'.ts\' extension when \'allowImportingTsExtensions\' is enabled.', 1],
+  ['core/ignition.ts\u00002322\u0000Type \'readonly string[]\' is not assignable to type \'string\'.', 1],
+  ['core/ignition.ts\u00002345\u0000Argument of type \'{ detail: string; targetSessionId?: string; at: string; kind: string; sessionId: string; }\' is not assignable to parameter of type \'{ at: string; kind: string; sessionId: string; targetSessionId: string; detail: string; }\'.   Property \'targetSessionId\' is optional in type \'{ detail: string; targetSessionId?: string; at: string; kind: string; sessionId: string; }\' but required in type \'{ at: string; kind: string; sessionId: string; targetSessionId: string; detail: string; }\'.', 1],
+  ['index.ts\u00002322\u0000Type \'"command-asked"\' is not assignable to type \'"lock-wait" | "lock-stale" | "lock-stale-forced" | "lock-owner-mismatch" | "lock-reclaimed" | "command-blocked" | "chain-guard" | "model-nudge" | "nudge-escalation" | "force-graft" | "target-created"\'.', 1],
+  ['index.ts\u00002345\u0000Argument of type \'GraftPlan\' is not assignable to parameter of type \'GraftPlanShape\'.   Property \'tape\' is missing in type \'GraftPlan\' but required in type \'GraftPlanShape\'.', 1],
+  ['index.ts\u00002345\u0000Argument of type \'LogReading | { session: any; events: any[]; }\' is not assignable to parameter of type \'SessionLogSnapshotLike\'.   Type \'LogReading\' is not assignable to type \'SessionLogSnapshotLike\'.     Types of property \'session\' are incompatible.       Property \'id\' is missing in type \'Record<string, unknown>\' but required in type \'SessionHeaderLike\'.', 1],
+  ['index.ts\u00002353\u0000Object literal may only specify known properties, and \'phaseRoadmap\' does not exist in type \'{ system: number; goal: number; title: number; oldSummary: number; taskStatus: number; subagentReports: number; tape: number; pending: number; workspaceFiles: number; openTurn: number; omittedTurns: number; readback: number; total: number; }\'.', 1],
+  ['index.ts\u00002353\u0000Object literal may only specify known properties, and \'tailRefreshed\' does not exist in type \'GraftReport\'.', 1],
+  ['index.ts\u00002554\u0000Expected 0 arguments, but got 1.', 2],
+  ['index.ts\u00002741\u0000Property \'totalHits\' is missing in type \'{ found: false; query: string; regex: true; totalMatches: number; truncated: false; hits: undefined[]; error: string; }\' but required in type \'GraftSearchResult\'.', 1],
+])
 
 const argOf = (flag) => {
   const i = process.argv.indexOf(flag)
@@ -186,6 +247,7 @@ if (showBaseline) {
   const counts = countsByFile(report)
   console.log('current baseline (paste into BASELINE):')
   for (const [file, n] of [...counts].sort((a, b) => b[1] - a[1])) console.log(`  ['${file}', ${n}],`)
+
   /**
    * 这里必须打印**代码健康度**的合计，不是所有诊断的合计。
    * 实测：第一版打印 report.total（61），而上面的每文件列表已经排除了 33 条环境问题，
@@ -194,6 +256,15 @@ if (showBaseline) {
   const codeTotal = [...counts.values()].reduce((s, n) => s + n, 0)
   const envTotal = report.diagnostics.filter((d) => ENVIRONMENT_CODES.has(d.code)).length
   console.log(`  code total: ${codeTotal}   (environment, not in this table: ${envTotal})`)
+
+  // 身份基线：与上表同源，一起生成，避免两张表自相矛盾
+  console.log('\nidentity baseline (paste into BASELINE_IDENTITIES):')
+  const ids = defectIdentities(report)
+  for (const [key, n] of [...ids].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const [file, code, message] = key.split('\u0000')
+    console.log(`  [${JSON.stringify(`${file}\\u0000${code}\\u0000${message}`)}, ${n}],`)
+  }
+  console.log(`  identity total: ${[...ids.values()].reduce((s, n) => s + n, 0)}`)
   process.exit(0)
 }
 
@@ -233,6 +304,42 @@ if (process.argv.includes('--self-test')) {
   const absolutePass = absoluteFails(1) === true && absoluteFails(0) === false
   console.log(`  ${absolutePass ? 'PASS' : 'FAIL'}  2459 is ABSOLUTE — it fails even if no file was touched`)
   if (!absolutePass) ok = false
+
+  /**
+   * ── 身份判据：抓「修一条坏一条」的等价交换 ────────────────────────────────────────────────────
+   *
+   * 这一组是用户裁定要补的那条防线。计数判据对下列情形完全无感：
+   * 同一个文件里修好一条、弄坏另一条 → 计数不变 → 计数判据通过 → 缺陷被静默换掉。
+   *
+   * 所以自测里必须有一条**计数相同但身份变了**的用例，并且它必须判红。
+   * 如果这条用例不存在，「计数 + 身份」看起来像两条防线，实际只有一条。
+   */
+  const identityCheck = (frozen, current) => {
+    const added = []
+    for (const [key, n] of current) {
+      const base = frozen.get(key) ?? 0
+      if (n > base) added.push(key)
+    }
+    return added.length
+  }
+  const frozenIds = new Map([['a.ts\u00002339\u0000old', 1], ['a.ts\u00002345\u0000keep', 1]])
+  const identityCases = [
+    ['identity unchanged — allowed',
+      new Map([['a.ts\u00002339\u0000old', 1], ['a.ts\u00002345\u0000keep', 1]]), 0],
+    ['one fixed, one NEW, same COUNT — must fail (the equivalent swap)',
+      new Map([['a.ts\u00002345\u0000keep', 1], ['a.ts\u00002339\u0000brand-new', 1]]), 1],
+    ['a frozen identity got MORE occurrences — must fail',
+      new Map([['a.ts\u00002339\u0000old', 2], ['a.ts\u00002345\u0000keep', 1]]), 1],
+    ['one fixed, nothing new — allowed',
+      new Map([['a.ts\u00002345\u0000keep', 1]]), 0],
+  ]
+  for (const [name, current, expected] of identityCases) {
+    const got = identityCheck(frozenIds, current)
+    const pass = got === expected
+    console.log(`  ${pass ? 'PASS' : 'FAIL'}  ${name}${pass ? '' : ` (expected ${expected} violation(s), got ${got})`}`)
+    if (!pass) ok = false
+  }
+
   console.log(ok ? '\nSELF-TEST PASS' : '\nSELF-TEST FAIL')
   process.exit(ok ? 0 : 1)
 }
@@ -278,6 +385,45 @@ for (const item of improvements) {
   console.log(`  IMPROVED ${item.file}: ${item.base} → ${item.now}  (lower BASELINE to ${item.now})`)
 }
 
+/**
+ * ── 身份检查：新增一条我们没冻结的诊断 = 红，哪怕总计数没变 ─────────────────────────────────────
+ *
+ * 用户裁定（2026-11-12）：按每文件计数，允许「修好 1 条 + 弄坏 1 条 = 数字不变 = 通过」。
+ * 本轮真的发生过一次等价交换：2339 少 1 条，同时那条 artifact 被重新归类。
+ *
+ * 剩下的修法（2345/2322/2353/2554）都是改签名或改类型，而改签名最容易在别处引入新错误。
+ * 只有计数防线的话，「修 3 条、坏 3 条」会静默通过 —— 这条防线是给那种情况准备的。
+ *
+ * 与每文件计数**同时**检查，两者都要过：计数不许增，且身份不许新增。
+ */
+const identities = defectIdentities(report)
+const newIdentities = []
+const grownIdentities = []
+for (const [key, n] of identities) {
+  const frozen = BASELINE_IDENTITIES.get(key) ?? 0
+  if (frozen === 0) newIdentities.push({ key, n })
+  else if (n > frozen) grownIdentities.push({ key, frozen, n })
+}
+
+if (newIdentities.length > 0 || grownIdentities.length > 0) {
+  console.error('\nFAIL: this change introduced type defects that are not in the frozen identity baseline.')
+  for (const item of newIdentities) {
+    console.error(`  NEW      ${describeIdentity(item.key)}`)
+  }
+  for (const item of grownIdentities) {
+    console.error(`  MORE     ${describeIdentity(item.key)}  (${item.frozen} → ${item.n})`)
+  }
+  console.error('\nA per-file count can stay flat while one defect is fixed and another introduced.')
+  console.error('Fix the new defect, or freeze the identity in BASELINE_IDENTITIES with a written reason.')
+  process.exit(1)
+}
+
+const droppedIdentities = [...BASELINE_IDENTITIES.keys()].filter((key) => !identities.has(key))
+if (droppedIdentities.length > 0) {
+  console.log(`  ${droppedIdentities.length} frozen identit${droppedIdentities.length === 1 ? 'y is' : 'ies are'} gone — regenerate with --baseline`)
+  for (const key of droppedIdentities) console.log(`    GONE  ${describeIdentity(key)}`)
+}
+
 if (violations.length > 0) {
   console.error(`\nFAIL type budget on ${violations.length} touched file(s):`)
   for (const v of violations) console.error(`  ${v.file}: ${v.base} → ${v.now}  (${v.why})`)
@@ -297,6 +443,25 @@ console.log(`\nOK — every touched file is at or under its frozen baseline (mov
  * 所以通过一次只证明「连宽松检查都过了」，不证明类型正确。
  */
 const measuredTotal = [...counts.values()].reduce((s, n) => s + n, 0)
+
+/**
+ * ── strict:true 的数字必须现测，不能写死 ────────────────────────────────────────────────────────
+ *
+ * 第一版这一行写死了 `strict:true reports 58 here`。实测发现它本轮就过期了：
+ * 修掉 4 条之后 strict:true 从 58 变成 54 —— 写死的数字从「说明」变成「谎话」。
+ *
+ * 这与本轮修掉的那批同族：行号当身份、手写基线表、写死的 786。**会变的东西必须测量。**
+ * 测量失败时明说「未能测量」，不退回一个记忆中的数字。
+ */
+let strictTrueNote = 'strict:true was not measured on this run'
+try {
+  const raw = execFileSync(process.execPath, [TYPE_CHECK, '--strict-comparison'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  const parsed = JSON.parse(raw.trim())
+  strictTrueNote = `strict:true reports ${parsed.strictTrue} here`
+} catch {
+  // a missing compiler is handled earlier; anything else means the comparison could not run
+}
+
 console.log('  scope: measured under strict:false — this is "what the loose settings can see",')
-console.log(`         not "type health". strict:true reports 58 here (this baseline sums to ${measuredTotal}).`)
+console.log(`         not "type health". ${strictTrueNote} (this baseline sums to ${measuredTotal}).`)
 console.log('         Reaching 0 here means "even the loose check passes", not "types are correct".')

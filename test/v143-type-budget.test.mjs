@@ -257,10 +257,74 @@ test('v143: the baseline number declares its SCOPE — 15 is not "type health"',
     'the RUN OUTPUT must declare the scope — the comment is not enough')
   assert.match(out, /not "type health"/u,
     'the output must say the number is not a health metric')
-  assert.match(out, /strict:true reports 58/u,
-    'the output must name what a stricter setting would report')
   assert.match(out, /not "types are correct"/u,
     'the output must say reaching 0 does not mean the types are correct')
+
+  /**
+   * ── strict:true 的数字必须**现测**，不能写死 ──────────────────────────────────────────────────
+   *
+   * 第一版这一行写死 `strict:true reports 58 here`。本轮修掉 4 条之后它变成 54 ——
+   * 断言若钉在 58 上，就会在代码变好之后变红（与 v141/v142 那两次「断言钉住缺陷」同族），
+   * 而若钉在「任意数字」上，它又拦不住「写死」这件事本身。
+   *
+   * 所以钉的是**机制**：输出里的数字必须等于 `--strict-comparison` 当场测到的值。
+   */
+  const comparison = execFileSync(process.execPath, [TYPE_CHECK, '--strict-comparison'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  const measured = JSON.parse(comparison.trim())
+  assert.match(out, new RegExp(`strict:true reports ${measured.strictTrue} here`, 'u'),
+    `the output must report the MEASURED strict:true count (${measured.strictTrue}), not a remembered one`)
+  assert.ok(measured.strictTrue > measured.strictFalse,
+    'the stricter setting must report MORE — otherwise the scope warning is meaningless')
+})
+
+test('v143: a NEW diagnostic identity is RED even when the per-file COUNT is unchanged', (t) => {
+  /**
+   * ── 用户裁定（2026-11-12）：计数防线抓不住「修一条、坏一条」 ─────────────────────────────────
+   *
+   * 按每文件计数，`修好 1 条 + 弄坏 1 条 = 数字不变 = 通过`。本轮真的发生过一次等价交换：
+   * 2339 少 1 条，同时那条 artifact 被重新归类，总数看起来没动。
+   *
+   * 剩下要清的 10 条里，2345/2322/2353/2554 都是「改签名或改类型」，而改签名最容易在别处
+   * 引入新错误。只有计数防线时，「修 3 条、坏 3 条」会静默通过。
+   *
+   * 所以补一条「诊断身份集合」：身份 = 文件 + code + message，**不含行号**（位置会变，身份不会）。
+   * 通过条件 = 计数不增 **且** 没有新增身份。
+   */
+  if (!requireCompiler(t)) return
+
+  const source = readFileSync(SCRIPT, 'utf8')
+  assert.match(source, /BASELINE_IDENTITIES/u, 'the identity baseline must exist as a named table')
+  assert.match(source, /NEW\s/, 'the failure output must mark new identities')
+  assert.match(source, /A per-file count can stay flat while one defect is fixed and another introduced/u,
+    'the failure message must explain WHY the count rule is not enough')
+
+  // 身份里不许有行号：位置一变识别就没了（上一轮实测过）
+  assert.doesNotMatch(source, /const key = `\$\{d\.file\}:\$\{d\.line\}/u,
+    'identity must not be keyed on a line number')
+
+  // 自测里必须有「计数相同、身份变了 → 红」这一条，否则两条防线实际只有一条
+  const { out: selfTest } = run(['--self-test'])
+  assert.match(selfTest, /one fixed, one NEW, same COUNT — must fail/u,
+    'the self-test must contain the equivalent-swap case')
+  assert.match(selfTest, /a frozen identity got MORE occurrences — must fail/u,
+    'the self-test must catch "same identity, more occurrences"')
+})
+
+test('v143: on the real tree the identity baseline matches the measured one', (t) => {
+  if (!requireCompiler(t)) return
+
+  const { out } = run(['--baseline'])
+  assert.match(out, /identity baseline/u, '--baseline must print the identity table too')
+  const identityTotal = Number(/identity total: (\d+)/u.exec(out)?.[1])
+  const codeTotal = Number(/code total: (\d+)/u.exec(out)?.[1])
+  assert.equal(identityTotal, codeTotal,
+    `the identity multiset (${identityTotal}) and the per-file counts (${codeTotal}) describe the same ` +
+    'diagnostics and must agree — two tables, ONE source')
+
+  // and the frozen table must currently be satisfied (otherwise the gate would be red right now)
+  const { code, out: gateOut } = run([])
+  assert.equal(code, 0, `the gate must be green on the current tree; got:\n${gateOut}`)
+  assert.doesNotMatch(gateOut, /FAIL: this change introduced type defects/u)
 })
 
 test('v143: the gate is reachable — the script runs on the real tree and names the move-only code', (t) => {

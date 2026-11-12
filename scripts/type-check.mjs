@@ -183,6 +183,33 @@ const envRows = rows.filter(isEnvironment)
 const artifactRows = rows.filter((row) => !isEnvironment(row) && isArtifact(row))
 const codeRows = rows.filter((row) => !isEnvironment(row) && !isArtifact(row))
 
+/**
+ * ── `--strict-comparison`：把「更严的设置会看到多少」实测出来 ────────────────────────────────────
+ *
+ * 为什么需要它：type-budget 的输出要声明「这个数字是 strict:false 口径」，
+ * 而那一句原本把 `strict:true reports 58 here` **写死**了。实测发现它已经过期 ——
+ * 本轮修掉 4 条之后，strict:true 从 58 变成 54。
+ *
+ * 这正是「把会变的东西写死」那一族（行号当身份、手写基线表、写死的 786）：数字一过期，
+ * 它就从说明变成谎话。所以让它每次现测。
+ */
+if (process.argv.includes('--strict-comparison')) {
+  const measure = (strict) => {
+    const program = ts.createProgram(files, {
+      target: ts.ScriptTarget.ESNext,
+      module: ts.ModuleKind.ESNext,
+      moduleResolution: ts.ModuleResolutionKind.Bundler,
+      strict,
+      noEmit: true,
+      skipLibCheck: true,
+      allowJs: false,
+    })
+    return ts.getPreEmitDiagnostics(program).length
+  }
+  console.log(JSON.stringify({ strictFalse: measure(false), strictTrue: measure(true) }))
+  process.exit(0)
+}
+
 if (asJson) {
   console.log(JSON.stringify({
     total: rows.length,
