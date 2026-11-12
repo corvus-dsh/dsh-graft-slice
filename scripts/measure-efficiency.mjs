@@ -72,6 +72,8 @@ const boundary = { boundarySeq: log.events[log.events.length - 1].seq }
 const CALLERS = {
   buildTape: (fn) => () => fn(log.events, { recentTurns: 8 }, boundary, 'session-source'),
   inheritedConstraintAnchor: (fn) => () => fn(log.events, 'session-source', 3),
+  extractSemanticState: (fn) => () => fn(log.events),
+  extractOpenTurnCarryover: (fn) => () => fn(log.events, 'session-source'),
 }
 const make = CALLERS[subject]
 if (make === undefined) {
