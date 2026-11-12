@@ -9054,32 +9054,8 @@ export function extractSourceTemplate(events                             )      
               
                    
                     
-     
-                                                                                                    
-    
-                                                                                   
-                                                                                                 
-    
-                                                                                                     
-    
-                                                                                                      
-                                                                                                      
-                                                                                                  
-                                                                                                  
-                                                                               
-    
-                                                                                                      
-                                                                                                   
-                                                                                    
-    
-                                                                                           
-     
-                       
-                
-               
-                     
-                         
-    
+                                                                                                     
+                                                                                              
  
 
 /**

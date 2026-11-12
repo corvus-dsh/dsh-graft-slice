@@ -86,6 +86,7 @@ const KINDS = new Map([
   ['who-references.mjs', 'INSTRUMENT'],
   ['calibrate-who-references.mjs', 'INSTRUMENT'],
   ['inventory-source-guards.mjs', 'INSTRUMENT'],
+  ['families.mjs', 'INSTRUMENT'],
 
   // ── OPS: needs a live store/host, or is a drill ──
   // ── TOOLING: the build/publish path, not a check of it ──
@@ -129,6 +130,7 @@ const NOT_A_CI_STEP = new Map([
   ['inventory-source-guards.mjs', 'inventory/report; test/v126 asserts the coverage it describes'],
   ['verify-import-edges.mjs', 'produces the edge diff that test/v136 consumes; v136 is the CI step, this is its instrument'],
   ['calibrate-who-references.mjs', 'a CALIBRATION for who-references.mjs: it asserts a known answer (5 real references across three shapes). It is run by test/v141 as a precondition, which is the point — the classifier must be calibrated BEFORE its answer is trusted, not after it is published'],
+  ['families.mjs', 'needs closure.mjs and who-references.mjs, both of which need the TypeScript compiler this package deliberately does not depend on. It also answers a question that only exists DURING a refactor — "which declarations still cluster together" — so there is nothing to assert on a tree with no pending move; the 10-component table it printed is quoted in the step5 commit message instead of pinned here'],
 ])
 
 const scriptNames = readdirSync(join(ROOT, 'scripts')).filter((name) => name.endsWith('.mjs')).sort()
@@ -269,7 +271,18 @@ test('meta: no script hard-codes an absolute path (it would only work on one mac
     const pattern = new RegExp(
       `['"\`](?:[A-Za-z]:[\\\\/](?:[^'"\`]*dsh-graft-slice|Users[\\\\/][^'"\`]*)|/home/[^'"\`]*|/Users/[^'"\`]*)['"\`]`,
       'gu')
-    for (const match of code.matchAll(pattern)) offenders.push(`${name}: ${match[1].slice(0, 60)}`)
+    /**
+     * `match[0]`, not `match[1]` — and this guard crashed the first time it ever found something.
+     *
+     * Every group in `pattern` is NON-capturing (`(?:…)`), so `match[1]` was always `undefined` and
+     * `.slice(0, 60)` threw. The crash only happened when `offenders` was non-empty, which is exactly
+     * the case the assertion exists to REPORT: the guard could never name an offender, only die on one.
+     *
+     * It had never fired because no script matched before `families.mjs` did. That is the same shape as
+     * every other instrument defect in this repo — a discriminator that was never exercised is not a
+     * discriminator that works. The message must carry the offending literal, so it uses the whole match.
+     */
+    for (const match of code.matchAll(pattern)) offenders.push(`${name}: ${match[0].slice(0, 60)}`)
   }
   assert.deepEqual(offenders, [],
     'these scripts embed an absolute path, which only resolves on the machine that wrote it: ' +

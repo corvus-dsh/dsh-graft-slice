@@ -2050,32 +2050,8 @@ interface AssistantRecord {
   text: string
   callIds: string[]
   pointers: string[]
-  /**
-   * ── v7.4 P4-1 tool pointers, which the INTERFACE forgot ────────────────────────────────────────
-   *
-   * `tsc` reported seven diagnostics (2551 ×4, 2561 ×3) all saying the same thing:
-   * `Property 'toolPointers' does not exist on type 'AssistantRecord'. Did you mean 'pointers'?`
-   *
-   * ── THE RUNTIME WAS ALWAYS RIGHT; THE DECLARATION WAS BEHIND IT ─────────────────────────────────
-   *
-   * Measured before editing: `toolPointers` appears 7 times in this file, and every place that PUSHES
-   * an assistant record initialises it — 3 sites write `pointers: [], toolPointers: []`. So the field
-   * existed on every object the code ever built, and `target.toolPointers.some(...)` never threw.
-   * The only thing missing was the type, which is why nothing ever failed: `stripTypeScriptTypes`
-   * erases the interface, and tests exercise the objects, not the declaration.
-   *
-   * That makes this the mirror image of the `goal-extraction` defect: there a real export was missing
-   * and the code still worked by accident; here a real field was undeclared and the code worked on
-   * purpose. Both were invisible to tests, and both are what `tsc --noEmit` is for.
-   *
-   * Type narrowed to what the constructor pushes: `{ name, seq, isError?, unavailable? }`.
-   */
-  toolPointers: Array<{
-    name: string
-    seq: number
-    isError?: boolean
-    unavailable?: boolean
-  }>
+  /** v7.4 P4-1: the runtime always had this field; only the type was missing. See commit 837eb0c. */
+  toolPointers: Array<{ name: string; seq: number; isError?: boolean; unavailable?: boolean }>
 }
 
 /**
