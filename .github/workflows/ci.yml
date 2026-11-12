@@ -194,25 +194,39 @@ jobs:
 
       # ── the incremental type budget ───────────────────────────────────────────────────────────
       #
-      # ── THIS STEP DOES NOT RUN IN CI, ON PURPOSE, AND SAYS SO ─────────────────────────────────
+      # ── THIS GATE CANNOT MEASURE ON THIS RUNNER, AND SAYS SO OUT LOUD ─────────────────────────
       #
-      # `package.json` declares no dependencies, so there is no `typescript` on the runner and
-      # `type-budget.mjs` exits 2 ("a RESOURCE condition, not a pass"). Deliberately NOT solved by
-      # adding typescript as a devDependency: that would turn a local gate into a 61-error red build
-      # on every push — the "CI is always red" failure the user rejected by name.
+      # `package.json` declares no dependencies, so there is no `typescript` here and
+      # `type-budget.mjs` exits 2 by design ("a RESOURCE condition, not a pass").
       #
-      # So the gate is LOCAL, and this step makes that visible instead of silently absent. A skipped
-      # step that prints why is honest; a green step that never ran is a lie.
-      - name: Incremental type budget (LOCAL ONLY — no compiler on the runner)
+      # Two wrong ways to handle that, both rejected:
+      #   1. add typescript as a devDependency — turns the gate into a 15-error red build on every
+      #      push, which is the "CI is always red" failure the user rejected by name;
+      #   2. `exit 0` silently — a green step that never ran is a lie.
+      #
+      # The rule (user ruling 2026-11-12): report RESOURCE and exit 0, but the LOG MUST SAY the
+      # check did not happen. Same shape as `t.skip('RESOURCE: …')` in test/v143.
+      #
+      # This is also the answer to "a gate nobody runs is a comment" — the reason `check-cycles`
+      # shipped a hard-coded `D:/` path that passed locally and failed here (#118) is that nobody
+      # was running it. Now the step runs on every push, and when it cannot measure, the log says so.
+      - name: Incremental type budget (needs a compiler the runner does not have)
         run: |
           set +e
           node scripts/type-budget.mjs
           code=$?
+          set -e
           if [ "$code" -eq 2 ]; then
-            echo "::warning::type-budget could not run (no typescript here). This is the documented local-only gate, not a pass."
+            echo "::warning::TYPE BUDGET NOT CHECKED THIS RUN — no typescript on the runner."
+            echo "  This is a RESOURCE condition, not a pass: the 15-defect baseline was NOT verified."
+            echo "  It is enforced on any machine that has a compiler (and by test/v143 there)."
             exit 0
           fi
-          exit "$code"
+          if [ "$code" -ne 0 ]; then
+            echo "::error::type-budget FAILED — a touched file gained type errors."
+            exit "$code"
+          fi
+          echo "type-budget: enforced and green."
 
       # ── exact identifier references, never substring matches ──────────────────────────────────
       #

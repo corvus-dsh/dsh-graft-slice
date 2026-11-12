@@ -45,12 +45,31 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const TYPE_CHECK = join(ROOT, 'scripts', 'type-check.mjs')
 
 /**
- * ── 冻结基线（实测 2026-11-12，按「代码健康度」口径）────────────────────────────────────────────
+ * ── 冻结基线（实测 2026-11-12）────────────────────────────────────────────────────────────────
  *
- *     28 条代码缺陷 / 3 个文件      ← 这张表只管这个
+ *     15 条代码缺陷 / 3 个文件       ← 这张表只管这个
  *     33 条环境问题（2307×18 + 2580×15）← 不在这张表里：装 @types/node 就消失，不是缺陷
+ *      1 条编译器产物（strict:false 造成）← 单独一类，strict:true 下 0 条
  *
  * 用户裁定：两者必须分开数，否则下一个读表的人会去「修」那 33 条，而修法不是改代码。
+ *
+ * ── 「15」的正确读法：宽松模式下的可见缺陷，不是「类型健康度」──────────────────────────────────
+ *
+ * 这个数字是 **`strict: false`** 口径测出来的。而 `strict: false` 下「干净」不等于「类型正确」：
+ * 它容忍隐式 any、不做 null/undefined 检查、容忍双变。
+ *
+ * 实测同一份 src/ 只改 strict：
+ *
+ *     strict: false → 49 条        strict: true → 58 条
+ *     只在 strict:true 出现：9 条 7006（隐式 any）+ 1 条 2345（string | undefined）
+ *     只在 strict:false 出现：1 条 2339（已单列为 COMPILER ARTIFACT）
+ *
+ * 所以：
+ *   · 「15」= 宽松模式下有几个错，**不是**「还剩几个错」；
+ *   · 「清到 0」不等于类型安全 —— 只意味着「连宽松检查都过了」。
+ *
+ * 不切 strict:true：那会让 58 条一次全红，正是用户明确否决的「CI 永远红」。
+ * 但这句警告必须留在这里，否则下一个把 15 清到 0 的人会以为自己得到了类型安全。
  *
  * 这是「今天的尺寸」，不是目标。它只允许**下降**：每清掉一组同根因的缺陷就把数字调低；
  * 任何上升都必须显式改这个表并写理由 —— 与 v130 的 EXEMPT 同一种用法。
@@ -262,3 +281,17 @@ if (violations.length > 0) {
 }
 
 console.log(`\nOK — every touched file is at or under its frozen baseline (move-only code ${MOVE_ONLY_CODE}: 0)`)
+
+/**
+ * ── 每次通过都要声明这个数字的口径，不只在注释里 ────────────────────────────────────────────────
+ *
+ * 注释只有改脚本的人会读；跑门禁的人只看输出。而这句是这个数字最容易被误读的地方：
+ * 「15 条」会被读成「还剩 15 个问题」，然后被读成「清到 0 就类型安全了」。
+ *
+ * 实测：strict:false → 49 条，strict:true → 58 条（多出 9 条隐式 any 与 1 条 null 检查）。
+ * 所以通过一次只证明「连宽松检查都过了」，不证明类型正确。
+ */
+const measuredTotal = [...counts.values()].reduce((s, n) => s + n, 0)
+console.log('  scope: measured under strict:false — this is "what the loose settings can see",')
+console.log(`         not "type health". strict:true reports 58 here (this baseline sums to ${measuredTotal}).`)
+console.log('         Reaching 0 here means "even the loose check passes", not "types are correct".')

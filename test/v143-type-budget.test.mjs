@@ -195,6 +195,74 @@ test('v143: environment defects are counted SEPARATELY from code defects', (t) =
     `type-budget's baseline (${budgetCodeTotal}) must match type-check's CODE HEALTH (${codeHealth})`)
 })
 
+test('v143: the CI step exists, and when it cannot measure the LOG SAYS SO', () => {
+  /**
+   * ── 「A GATE NOBODY RUNS IS A COMMENT」这次不许第三次成立 ─────────────────────────────────────
+   *
+   * 用户裁定（2026-11-12）：先把 v143 接进 CI，不要先清存量。理由是这不是理论：
+   * `check-cycles` 写死了 `D:/` 路径，**本机每次过、CI 每次红**，因为它当时没进 CI（#118）。
+   * v143 之前处于同一状态 —— 15 条清完，但下一个人的改动把错误从 15 涨到 20，CI 不会红。
+   *
+   * 两个错误处置方式，都必须被这条测试挡住：
+   *   ① 给 CI 装 typescript → 15 条错误变成每次 push 全红，正是用户否决的「CI 永远红」；
+   *   ② 缺编译器时静默 `exit 0` → 没跑的东西看起来像通过了。
+   *
+   * 正确：报告 RESOURCE 并 exit 0，**但日志必须说这次没检查**。
+   */
+  const ci = readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8')
+
+  assert.match(ci, /node scripts\/type-budget\.mjs/u,
+    'ci.yml must actually run the budget — a gate nobody runs is a comment')
+
+  const step = /- name: Incremental type budget[\s\S]*?(?=\n {6}- name:|\n {2}[\w-]+:|\s*$)/u.exec(ci)?.[0] ?? ''
+  assert.ok(step.length > 0, 'the budget step must be findable in ci.yml')
+
+  // ① must NOT install the compiler just to make the gate绿
+  assert.doesNotMatch(step, /npm (?:install|i) .*typescript/u,
+    'the step must not install typescript — that turns the gate into an always-red build')
+
+  // ② the RESOURCE branch must be honest, not silent
+  assert.match(step, /-eq 2/u, 'the step must branch on exit 2 (the RESOURCE condition)')
+  assert.match(step, /NOT CHECKED/u, 'the log must say the check did NOT happen')
+  assert.match(step, /not a pass/u, 'the log must say this is not a pass')
+  assert.match(step, /was NOT verified/u, 'the log must name the consequence: the baseline was not verified')
+
+  // ③ a real failure must still propagate (not be swallowed by the RESOURCE branch)
+  assert.match(step, /exit "\$code"/u, 'a non-zero, non-2 exit must propagate so CI can fail')
+})
+
+test('v143: the baseline number declares its SCOPE — 15 is not "type health"', (t) => {
+  /**
+   * ── 用户裁定（2026-11-12）：基线 15 是 strict:false 口径，不是类型健康度 ───────────────────────
+   *
+   * `strict: false` 容忍隐式 any、不做 null/undefined 检查、容忍双变。所以：
+   *   · 「15」= 宽松模式下有几个错，**不是**「还剩几个错」；
+   *   · 「清到 0」只意味着「连宽松检查都过了」，**不意味着类型安全**。
+   *
+   * 实测同一份 src/ 只改 strict：false → 49，true → 58（9 条隐式 any + 1 条 null 检查只在 true 出现）。
+   *
+   * 不切 strict:true（会 58 条一次全红）。但这句警告必须在**输出里**，不能只在注释里：
+   * 注释只有改脚本的人读，跑门禁的人只看输出。
+   */
+  if (!requireCompiler(t)) return
+
+  const source = readFileSync(SCRIPT, 'utf8')
+  assert.match(source, /宽松模式下的可见缺陷，不是「类型健康度」/u,
+    'the BASELINE comment must say what the number measures')
+  assert.match(source, /strict: false → 49 条[\s\S]{0,80}strict: true → 58 条/u,
+    'the comment must carry the measured strict delta, not a remembered one')
+
+  const { out } = run([])
+  assert.match(out, /measured under strict:false/u,
+    'the RUN OUTPUT must declare the scope — the comment is not enough')
+  assert.match(out, /not "type health"/u,
+    'the output must say the number is not a health metric')
+  assert.match(out, /strict:true reports 58/u,
+    'the output must name what a stricter setting would report')
+  assert.match(out, /not "types are correct"/u,
+    'the output must say reaching 0 does not mean the types are correct')
+})
+
 test('v143: the gate is reachable — the script runs on the real tree and names the move-only code', (t) => {
   if (!requireCompiler(t)) return
   const { code, out } = run([])
