@@ -33,13 +33,26 @@ const argOf = (flag) => {
 }
 
 const beforeRef = argOf('--before')
-const afterRef = argOf('--after') ?? 'HEAD'
+const afterRef = argOf('--after') // undefined ⇒ the WORKING TREE's index.js
 if (beforeRef === undefined) {
   console.error('usage: node scripts/verify-bundle-purity.mjs --before <ref> [--after <ref>]')
   process.exit(2)
 }
 
+/**
+ * `--after` 省略时读**工作树**的 index.js，不是 HEAD。
+ *
+ * 实测到的不一致：文档头写的就是「省略时用工作树」，实现却默认 `HEAD`，
+ * 结果在提交前跑它永远是 VACUOUS —— 而提交前正是唯一有意义的时机。
+ */
 const bundleAt = (ref) => {
+  if (ref === undefined) {
+    try {
+      return readFileSync(join(REPO, 'index.js'), 'utf8')
+    } catch {
+      return undefined
+    }
+  }
   try {
     return execFileSync('git', ['show', `${ref}:index.js`], { cwd: REPO, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })
   } catch {
@@ -108,7 +121,7 @@ diffs.sort((p, q) => (q.after - q.before) - (p.after - p.before) || p.line.local
 
 const total = (m) => [...m.values()].reduce((s, n) => s + n, 0)
 console.log(`before : ${beforeRef}   code lines: ${total(a)}`)
-console.log(`after  : ${afterRef}   code lines: ${total(b)}`)
+console.log(`after  : ${afterRef ?? 'working tree'}   code lines: ${total(b)}`)
 console.log(`bundle : ${before.length} -> ${after.length} bytes`)
 console.log('')
 
