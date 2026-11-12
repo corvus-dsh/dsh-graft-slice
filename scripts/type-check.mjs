@@ -46,12 +46,30 @@ try {
   process.exit(2)
 }
 
+/**
+ * ── EVIDENCE FILES ARE IN THE TREE BUT NOT IN THE SOURCE ────────────────────────────────────────
+ *
+ * `src/core/ignition.ts.bak-cut` is a v7.6 baseline backup. It is deliberately tracked (v125 keeps it
+ * present, v126 keeps it in the SCANNED set, v125 also asserts it never ships). Running the type checker
+ * over it produced diagnostics for a file that is not compiled, not shipped, and not edited —
+ * measured: code 6054 fired on it.
+ *
+ * Those diagnostics are NOISE, and noise in a diagnostic list is how real errors get ignored. But silently
+ * dropping a file is its own kind of lie, so the exclusion is DECLARED and the count is printed.
+ */
+const NOT_SOURCE = new Set(['core/ignition.ts.bak-cut'])
+
 const files = []
+const excluded = []
 const walk = (dir) => {
   for (const entry of readdirSync(dir).sort()) {
     const full = join(dir, entry)
     if (statSync(full).isDirectory()) walk(full)
-    else if (/\.ts(?:\.|$)/u.test(entry)) files.push(full)
+    else if (/\.ts(?:\.|$)/u.test(entry)) {
+      const rel = relative(SRC, full).split('\\').join('/')
+      if (NOT_SOURCE.has(rel)) { excluded.push(rel); continue }
+      files.push(full)
+    }
   }
 }
 walk(SRC)
@@ -94,11 +112,39 @@ for (const row of rows) {
   if (!sampleByCode.has(row.code)) sampleByCode.set(row.code, row.message)
 }
 
+if (excluded.length > 0) {
+  console.log(`excluded (evidence, not source): ${excluded.join(', ')}`)
+}
 console.log(`type-check: ${rows.length} diagnostic(s)${onlyCode === undefined ? '' : ` with code ${onlyCode}`}${onlyGrep === undefined ? '' : ` mentioning "${onlyGrep}"`}`)
-console.log('\nby code:')
+/**
+ * ── ONE SAMPLE PER CODE IS MISLEADING ───────────────────────────────────────────────────────────
+ *
+ * Measured: code 2304 has 115 rows across 20 DIFFERENT missing names. Printing the first row's message
+ * made the summary read "Cannot find name 'textOfMessage'" — a name that accounts for 2 of the 115.
+ * A reader would reasonably conclude the problem was textOfMessage; it was `graftError` (49) that
+ * dominated. So the summary shows the distinct names, with counts, when they differ.
+ */
+const namesByCode = new Map()
+for (const row of rows) {
+  const m = /Cannot find name '([^']+)'/u.exec(row.message)
+  if (m === null) continue
+  if (!namesByCode.has(row.code)) namesByCode.set(row.code, new Map())
+  const names = namesByCode.get(row.code)
+  names.set(m[1], (names.get(m[1]) ?? 0) + 1)
+}
+
+console.log('')
+console.log('by code:')
 for (const [code, count] of [...byCode].sort((a, b) => b[1] - a[1])) {
-  // the sample must come from a diagnostic ALREADY FILTERED, or the label describes a different row
-  console.log(`  ${String(code).padEnd(8)} ${String(count).padStart(4)}  ${(sampleByCode.get(code) ?? '').slice(0, 70)}`)
+  const names = namesByCode.get(code)
+  if (names !== undefined && names.size > 1) {
+    const top = [...names].sort((a, b) => b[1] - a[1]).slice(0, 5)
+    console.log(`  ${String(code).padEnd(8)} ${String(count).padStart(4)}  ${names.size} distinct names:`)
+    for (const [name, n] of top) console.log(`             ${String(n).padStart(4)}  ${name}`)
+    if (names.size > top.length) console.log(`             … and ${names.size - top.length} more`)
+  } else {
+    console.log(`  ${String(code).padEnd(8)} ${String(count).padStart(4)}  ${(sampleByCode.get(code) ?? '').slice(0, 70)}`)
+  }
 }
 console.log('\nby file:')
 for (const [file, count] of [...byFile].sort((a, b) => b[1] - a[1])) {

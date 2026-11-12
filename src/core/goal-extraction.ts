@@ -5,7 +5,7 @@ import { isRecord, truncateEnd } from '../utils/serialize.js'
 import { textOfMessage } from './watermark.js'
 import type { GraftTape } from './tape-shape.js'
 
-interface GoalResult {
+export interface GoalResult {
   goal: string
   source: GraftTape['goalSource']
   /**
@@ -38,8 +38,8 @@ interface GoalResult {
     afterObjective: boolean
   }
 }
-type GoalLayer = 'objective' | 'dag-node' | 'transcript'
-function objectiveOf(events: readonly SessionEventLike[]): { objective: string; seq?: number } | undefined {
+export type GoalLayer = 'objective' | 'dag-node' | 'transcript'
+export function objectiveOf(events: readonly SessionEventLike[]): { objective: string; seq?: number } | undefined {
   const change = extractActiveGoalChange(events)
   if (change === undefined) return undefined
   const goal = change.goal
@@ -55,7 +55,7 @@ function objectiveOf(events: readonly SessionEventLike[]): { objective: string; 
   }
   return seq === undefined ? { objective } : { objective, seq }
 }
-function currentDagNode(graphText: string | undefined): string | undefined {
+export function currentDagNode(graphText: string | undefined): string | undefined {
   if (typeof graphText !== 'string' || graphText.trim().length === 0) return undefined
   /**
    * ── THE ID MUST NOT CONSUME THE SEPARATOR (measured the hard way) ─────────────────────────────
@@ -74,7 +74,7 @@ function currentDagNode(graphText: string | undefined): string | undefined {
   }
   return undefined
 }
-function extractGoal(events: readonly SessionEventLike[], dagText?: string): GoalResult {
+export function extractGoal(events: readonly SessionEventLike[], dagText?: string): GoalResult {
   /**
    * ── LAYERS 1 AND 2 ANSWER BEFORE THE TRANSCRIPT IS READ AT ALL ─────────────────────────────────
    *
