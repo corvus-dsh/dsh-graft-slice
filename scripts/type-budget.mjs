@@ -83,8 +83,6 @@ const TYPE_CHECK = join(ROOT, 'scripts', 'type-check.mjs')
  * 所以这张表只能来自 `node scripts/type-budget.mjs --baseline`。
  */
 const BASELINE = new Map([
-  ['index.ts', 8],
-  ['core/ignition.ts', 2],
   ['contracts/model-wording.contracts.ts', 1],
 ])
 
@@ -223,16 +221,7 @@ const describeIdentity = (key) => {
  * 两张表必须同时下降，否则会出现「计数变了但身份表没变」这类自相矛盾。
  */
 const BASELINE_IDENTITIES = new Map([
-  ['contracts/model-wording.contracts.ts\u00005097\u0000An import path can only end with a \'.ts\' extension when \'allowImportingTsExtensions\' is enabled.', 1],
-  ['core/ignition.ts\u00002322\u0000Type \'readonly string[]\' is not assignable to type \'string\'.', 1],
-  ['core/ignition.ts\u00002345\u0000Argument of type \'{ detail: string; targetSessionId?: string; at: string; kind: string; sessionId: string; }\' is not assignable to parameter of type \'{ at: string; kind: string; sessionId: string; targetSessionId: string; detail: string; }\'.   Property \'targetSessionId\' is optional in type \'{ detail: string; targetSessionId?: string; at: string; kind: string; sessionId: string; }\' but required in type \'{ at: string; kind: string; sessionId: string; targetSessionId: string; detail: string; }\'.', 1],
-  ['index.ts\u00002322\u0000Type \'"command-asked"\' is not assignable to type \'"lock-wait" | "lock-stale" | "lock-stale-forced" | "lock-owner-mismatch" | "lock-reclaimed" | "command-blocked" | "chain-guard" | "model-nudge" | "nudge-escalation" | "force-graft" | "target-created"\'.', 1],
-  ['index.ts\u00002345\u0000Argument of type \'GraftPlan\' is not assignable to parameter of type \'GraftPlanShape\'.   Property \'tape\' is missing in type \'GraftPlan\' but required in type \'GraftPlanShape\'.', 1],
-  ['index.ts\u00002345\u0000Argument of type \'LogReading | { session: any; events: any[]; }\' is not assignable to parameter of type \'SessionLogSnapshotLike\'.   Type \'LogReading\' is not assignable to type \'SessionLogSnapshotLike\'.     Types of property \'session\' are incompatible.       Property \'id\' is missing in type \'Record<string, unknown>\' but required in type \'SessionHeaderLike\'.', 1],
-  ['index.ts\u00002353\u0000Object literal may only specify known properties, and \'phaseRoadmap\' does not exist in type \'{ system: number; goal: number; title: number; oldSummary: number; taskStatus: number; subagentReports: number; tape: number; pending: number; workspaceFiles: number; openTurn: number; omittedTurns: number; readback: number; total: number; }\'.', 1],
-  ['index.ts\u00002353\u0000Object literal may only specify known properties, and \'tailRefreshed\' does not exist in type \'GraftReport\'.', 1],
-  ['index.ts\u00002554\u0000Expected 0 arguments, but got 1.', 2],
-  ['index.ts\u00002741\u0000Property \'totalHits\' is missing in type \'{ found: false; query: string; regex: true; totalMatches: number; truncated: false; hits: undefined[]; error: string; }\' but required in type \'GraftSearchResult\'.', 1],
+  ['contracts/model-wording.contracts.ts 5097 An import path can only end with a \'.ts\' extension when \'allowImportingTsExtensions\' is enabled.', 1],
 ])
 
 const argOf = (flag) => {

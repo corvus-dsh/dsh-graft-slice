@@ -162,7 +162,7 @@ export interface IgnitionDeps {
     at: string
     kind: string
     sessionId: string
-    targetSessionId: string
+    targetSessionId?: string // optional in the real type (utils/logger.ts:GraftAuditEntry)
     detail: string
   }) => void
   logWarn?: (message: string) => void

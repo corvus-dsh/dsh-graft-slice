@@ -125,6 +125,12 @@ function clampRatio(value        , low        , high        )         {
                         
                    
                       
+       
+                                                                                           
+                                                                                      
+                      
+       
+                     
                
                     
                           
@@ -1940,7 +1946,13 @@ function withFileLock   (
                   
                                  
                     
-                     
+         
+                                                                    
+                                                                                                    
+                                                                                                     
+                                                                                         
+         
+                                         
                              
       
               
@@ -2355,7 +2367,7 @@ const DEFAULT_IGNITION_PROMPT =
               
                 
                      
-                           
+                                                                                           
                   
             
                                      
@@ -4186,7 +4198,7 @@ const GRAFT_REPLAY_SOURCE_KIND = 'plugin:graft-replay'
                                  
              
            
-           
+                                                                                  
                      
                     
  
@@ -7656,6 +7668,8 @@ export { isGraftAuthored, isHumanAuthored }
                  
                       
                       
+                                                                                           
+                        
                            
                 
                    
@@ -7706,6 +7720,16 @@ export { isGraftAuthored, isHumanAuthored }
             
                    
    
+     
+                                                                                   
+                                                                                      
+                                                 
+     
+                                                                                    
+                                                                                              
+                 
+                                                      
+                      
                     
  
 
@@ -13785,7 +13809,10 @@ async function graftSliceAndInjectUnlocked(
         return undefined
       }
     })()
-    const plan = buildInjectionPlan(raw, settings, fastConstraints, 'regex-fallback', availableTools)
+    // `raw` is a union: caller snapshot (`session: any`) or gateway `LogReading`
+    // (`session?: Record<string, unknown>`, no promised `id`). buildInjectionPlan wants
+    // `SessionLogSnapshotLike` (`session.id: string`), so the narrowing is stated at the call site.
+    const plan = buildInjectionPlan(raw                                     , settings, fastConstraints, 'regex-fallback', availableTools)
     const runtimeIntent = options?.runtimeIntent ?? extractRuntimeIntent(raw.events)
     const events = buildInjectionEvents(plan, settings, newId, sourceId, runtimeIntent, raw.events)
     const types = events.map((event) => event.type)
@@ -14315,7 +14342,8 @@ async function graftSliceAndInjectUnlocked(
         ignition.reason ?? 'ignition failed',
       )
       pendingIgnitions.delete(newId)
-      persistPendingIgnitions(ctx)
+      // the ctx argument was a leftover: the function reads module state now (see commit msg)
+      persistPendingIgnitions()
       ignition = { ...ignition, rollback }
     }
     if (!ignition.ok) {
@@ -14511,6 +14539,7 @@ export async function graftSearchHistory(
         query: needle,
         regex: true,
         totalMatches: 0,
+        totalHits: 0, // was missing: `GraftSearchResult` requires it on every path, including errors
         truncated: false,
         hits: [],
         error: `invalid regular expression: ${String((error       )?.message ?? error)}`,
@@ -16315,7 +16344,7 @@ export function apply(ctx                   , config              = {})       {
   loadPendingConstraints(ctx)
   // v0.19: ignition intents a crash (or a missing channel) left behind. Consumed
   // below, once the services this needs are actually resolvable.
-  loadPendingIgnitions(ctx)
+  loadPendingIgnitions()
   loadDrafts(ctx)
   loadLeftovers(ctx)
   loadAutoGraftSuppression()

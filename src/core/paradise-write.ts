@@ -61,7 +61,13 @@ export interface ParadiseSessionLike {
       text: string
       mode: 'queue' | 'interrupt'
       origin: string
-      marker?: string
+      /**
+       * A STRING or a LIST. The list form is the real host contract
+       * (`dsh-paradise/src/adapters/dsh/trigger.ts:56`): entry 0 is what gets stamped, the rest are
+       * historical aliases honoured only by the read-side idempotence check. This mirror had drifted
+       * to `string`, which made passing `IGNITION_MARKERS` a type error. See commit msg.
+       */
+      marker?: string | readonly string[]
       fallbackModes?: boolean
     },
   ): Promise<{

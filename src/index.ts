@@ -663,6 +663,8 @@ export interface GraftReport {
     title: number
     oldSummary: number
     taskStatus: number
+    /** v7.4: counted here (index.ts:7371) but missing from this shape — see commit msg. */
+    phaseRoadmap: number
     subagentReports: number
     tape: number
     pending: number
@@ -713,6 +715,16 @@ export interface GraftReport {
   retired: {
     source: boolean
   }
+  /**
+   * v7.4b: present only when the reviewed tail changed before the write committed.
+   * Read by the tool renderer (index.ts:11208) — the field existed at runtime but was
+   * missing from this interface. See commit msg.
+   */
+  tailRefreshed?: { kinds: string[]; reviewedChars: number; committedChars: number }
+  /** v7.4: the plan-level task status, passed through so the caller does not re-derive it. */
+  taskStatus: any
+  /** v7.4: subagent reports carried into the tape. */
+  subagentReports: any
   warnings: string[]
 }
 
@@ -6795,7 +6807,10 @@ async function graftSliceAndInjectUnlocked(
         return undefined
       }
     })()
-    const plan = buildInjectionPlan(raw, settings, fastConstraints, 'regex-fallback', availableTools)
+    // `raw` is a union: caller snapshot (`session: any`) or gateway `LogReading`
+    // (`session?: Record<string, unknown>`, no promised `id`). buildInjectionPlan wants
+    // `SessionLogSnapshotLike` (`session.id: string`), so the narrowing is stated at the call site.
+    const plan = buildInjectionPlan(raw as unknown as SessionLogSnapshotLike, settings, fastConstraints, 'regex-fallback', availableTools)
     const runtimeIntent = options?.runtimeIntent ?? extractRuntimeIntent(raw.events)
     const events = buildInjectionEvents(plan, settings, newId, sourceId, runtimeIntent, raw.events)
     const types = events.map((event) => event.type)
@@ -7325,7 +7340,8 @@ async function graftSliceAndInjectUnlocked(
         ignition.reason ?? 'ignition failed',
       )
       pendingIgnitions.delete(newId)
-      persistPendingIgnitions(ctx)
+      // the ctx argument was a leftover: the function reads module state now (see commit msg)
+      persistPendingIgnitions()
       ignition = { ...ignition, rollback }
     }
     if (!ignition.ok) {
@@ -7521,6 +7537,7 @@ export async function graftSearchHistory(
         query: needle,
         regex: true,
         totalMatches: 0,
+        totalHits: 0, // was missing: `GraftSearchResult` requires it on every path, including errors
         truncated: false,
         hits: [],
         error: `invalid regular expression: ${String((error as any)?.message ?? error)}`,
@@ -9338,7 +9355,7 @@ export function apply(ctx: PluginContextLike, config: GraftConfig = {}): void {
   loadPendingConstraints(ctx)
   // v0.19: ignition intents a crash (or a missing channel) left behind. Consumed
   // below, once the services this needs are actually resolvable.
-  loadPendingIgnitions(ctx)
+  loadPendingIgnitions()
   loadDrafts(ctx)
   loadLeftovers(ctx)
   loadAutoGraftSuppression()

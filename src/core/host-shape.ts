@@ -61,7 +61,7 @@ export interface GraftSourceShape {
 export interface GraftPlanShape {
   cwd: string
   goal: any
-  tape: any
+  tape?: any // neither consumer reads it (see commit msg); was a stale `required`
   sourceTemplate: any
   [key: string]: any
 }

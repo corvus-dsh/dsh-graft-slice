@@ -29,6 +29,12 @@ export interface GraftAuditEntry {
     | 'nudge-escalation'
     | 'force-graft'
     | 'target-created'
+    /**
+     * A command policy returned `ask` and the pre-step gate stopped to consult. Written by
+     * index.ts:10628 but missing from this union, so the audit call was a type error.
+     * See commit msg.
+     */
+    | 'command-asked'
   file?: string
   sessionId?: string
   targetSessionId?: string
