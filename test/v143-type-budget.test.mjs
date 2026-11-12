@@ -35,11 +35,41 @@ function run (args = []) {
   }
 }
 
-test('v143: the rule is INCREMENTAL — a touched file may not gain errors, an untouched one is out of scope', () => {
+/**
+ * ── CI HAS NO COMPILER, AND THAT MUST BE A SKIP, NOT A FAILURE ────────────────────────────────────
+ *
+ * Measured on CI run #120: both Node jobs failed at step 12 (Test), because `type-budget.mjs` exits 2
+ * when `typescript` is absent — by design, since a missing compiler is a RESOURCE condition and must
+ * never read as a pass. But the tests that RUN it then failed, turning an honest "cannot measure" into
+ * a red build on every push.
+ *
+ * `test/v142` already solved exactly this with `t.skip('RESOURCE: …')`. Same rule here.
+ *
+ * ── THE PROBE MUST BE THE MEASURING SUBCOMMAND, NOT `--self-test` ────────────────────────────────
+ *
+ * First draft probed with `--self-test`, which needs NO compiler (it uses fake data) — so it returned
+ * 0 and the skip never triggered. Simulated with the scripts copied outside the workspace (where
+ * `require('typescript')` cannot resolve): `--self-test` → 0, `--baseline` → 2, no args → 2.
+ * The probe therefore has to be a subcommand that actually needs the compiler.
+ */
+const requireCompiler = (t) => {
+  const { code, out } = run(['--baseline'])
+  if (code === 0) return true
+  if (/typescript is not installed|RESOURCE condition|compiler unavailable/u.test(out)) {
+    t.skip('RESOURCE: typescript is not installed on this machine, so the budget cannot be measured')
+    return false
+  }
+  assert.fail(`the budget failed for a reason other than a missing compiler:\n${out}`)
+}
+
+test('v143: the rule is INCREMENTAL — a touched file may not gain errors, an untouched one is out of scope', (t) => {
   /**
    * 这是本门禁最容易被「改松」的一处：一旦有人把判据改成「全树总量不变」，存量债会把门禁锁死；
    * 改成「全树必须为 0」就是用户明确否决的「一次全红」。
    * 所以自测里必须同时有「触及文件变多要红」与「未触及文件变多不许红」两条。
+   *
+   * 自测本身不需要编译器（它用假数据），所以这条在 CI 上也跑 —— 这是**唯一**一条在无编译器机器上
+   * 仍然真实执行的 v143 断言，因此它承担了「判据本身没被改松」的全部责任。
    */
   const { code, out } = run(['--self-test'])
   assert.equal(code, 0, `the self-test must pass; got:\n${out}`)
@@ -64,7 +94,8 @@ test('v143: code 2459 is an ABSOLUTE rule, not a per-file budget', () => {
     'the source must say WHY 2459 is absolute')
 })
 
-test('v143: on the real tree the budget holds, and the baseline table is the MEASURED one', () => {
+test('v143: on the real tree the budget holds, and the baseline table is the MEASURED one', (t) => {
+  if (!requireCompiler(t)) return
   /**
    * ── 基线表必须来自 `--baseline`，不能手写 ────────────────────────────────────────────────────
    *
@@ -109,7 +140,8 @@ test('v143: it exits 2 — not 0 — when the compiler is unavailable', () => {
     'the script must say that missing compiler is a resource condition, not a pass')
 })
 
-test('v143: the gate is reachable — the script runs on the real tree and names the move-only code', () => {
+test('v143: the gate is reachable — the script runs on the real tree and names the move-only code', (t) => {
+  if (!requireCompiler(t)) return
   const { code, out } = run([])
   assert.equal(code, 0, `the budget must hold on the current tree; got:\n${out}`)
   assert.match(out, /2459 \(imported-but-not-exported\): 0/u)
