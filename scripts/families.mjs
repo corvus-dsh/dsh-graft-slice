@@ -39,6 +39,44 @@ const report = run('closure.mjs', [TARGET])
 const members = [...report.matchAll(/^\s+index\.ts:(\w+) \[(\w+)\]/gmu)].map((m) => ({ name: m[1], kind: m[2] }))
 console.log(`${TARGET}: ${members.length} declaration(s), ${/lines\s*:\s*(\d+)/u.exec(report)?.[1]} lines`)
 
+/**
+ * ── AMBIGUOUS MEMBERS LEAVE THE TABLE ENTIRELY ──────────────────────────────────────────────────
+ *
+ * 用户裁定（2026-11-12）：`name` 移出分量表，单列一行 AMBIGUOUS + 声明点数。
+ *
+ * 上一版只剔除**边**、仍把 `name` 留在**成员表**里，于是它自己变成一个 1-decl 分量，
+ * 把分量数从 13 推到 14 —— 一个「我们测量不了的东西」占据了一个格子，读者会以为那里有个族。
+ *
+ * 实测：`name` 在整棵树有 17 个声明点（1 个模块级 `export const name` + 16 个函数内局部 `const name`），
+ * 对它的任何「引用行」都无法归给某一个符号。判据来自 `who-references --json` 的 `ambiguous` 字段，
+ * 消费方不另立一套。
+ */
+const findingsByMember = new Map()
+const ambiguousMembers = []
+const ambiguousDeclCounts = new Map()
+for (const m of members) {
+  let findings
+  try {
+    findings = JSON.parse(run('who-references.mjs', ['--json', m.name]))
+  } catch {
+    console.error(`families: cannot parse who-references --json for ${m.name}`)
+    continue
+  }
+  if (findings.some((f) => f.ambiguous === true)) {
+    ambiguousMembers.push(m.name)
+    ambiguousDeclCounts.set(m.name, findings.filter((f) => f.kind === 'DECL').length)
+    continue
+  }
+  findingsByMember.set(m.name, findings)
+}
+
+if (ambiguousMembers.length > 0) {
+  const parts = ambiguousMembers.map((n) => `${n} (${ambiguousDeclCounts.get(n)} declaration site(s))`)
+  console.log(`AMBIGUOUS — removed from the component table: ${parts.join(', ')}`)
+}
+
+const liveMembers = members.filter((m) => !ambiguousMembers.includes(m.name))
+
 /** 每个声明的行区间 [start, end]（1-based）。 */
 const lines = readFileSync(SRC, 'utf8').split('\n')
 const spanOf = (name, kind) => {
@@ -55,21 +93,34 @@ const spanOf = (name, kind) => {
    * 第一版在第一行没看到 `{` 就判定为单行声明，于是 buildTape 被算成 1 行 ——
    * 分量表因此把最大的那个声明当成最小的，整张表失去意义。
    * 判据改成：在遇到 `;`（语句结束）之前出现的第一个 `{` 开始配平。
+   *
+   * ── 反向的同类缺陷：**没有**任何括号的单行声明 ─────────────────────────────────────────────
+   *
+   * 实测：`export const name = 'dsh-graft-slice'` 既没有 `{` 也没有 `;`，于是旧逻辑一路向下扫，
+   * 直到撞上下一条带 `{` 的声明才收尾，把一个 1 行常量报成 **20 行**。
+   *
+   * 修法用同一套括号（`(` `[` `{` 三种都参与配平）：
+   *   · 首行没有任何开括号 ⇒ 这一行就是整条声明；
+   *   · 有开括号 ⇒ 配平到深度归零那一行（自动覆盖 `new Set([...])` 这类一行写完的字面量）。
    */
+  const pairs = { '(': ')', '[': ']', '{': '}' }
+  const closers = new Set([')', ']', '}'])
   let depth = 0
   let opened = false
   for (let i = start; i < lines.length; i++) {
     for (const ch of lines[i]) {
-      if (ch === '{') { depth += 1; opened = true }
-      else if (ch === '}') depth -= 1
+      if (pairs[ch] !== undefined) { depth += 1; opened = true }
+      else if (closers.has(ch)) depth -= 1
       else if (ch === ';' && !opened) return [start + 1, i + 1]
     }
     if (opened && depth === 0) return [start + 1, i + 1]
+    if (!opened) return [start + 1, i + 1]
   }
   return [start + 1, lines.length]
 }
 
 const spans = new Map()
+// 跨度对**全部**声明计算（含歧义成员）：自校验需要它，展示只用 liveMembers
 for (const m of members) {
   const span = spanOf(m.name, m.kind)
   if (span !== undefined) spans.set(m.name, span)
@@ -85,7 +136,7 @@ const ownerOf = (line) => {
   return best
 }
 
-const memberSet = new Set(members.map((m) => m.name))
+const memberSet = new Set(liveMembers.map((m) => m.name))
 /**
  * ── 根节点不参与连通 ──────────────────────────────────────────────────────────────────────────
  *
@@ -97,35 +148,12 @@ const memberSet = new Set(members.map((m) => m.name))
  */
 const ROOT = TARGET
 const rootsRefs = new Set()
-const edges = new Map(members.map((m) => [m.name, new Set()]))
+const edges = new Map(liveMembers.map((m) => [m.name, new Set()]))
 const unresolvedRefs = []
-const ambiguousMembers = []
 
-/**
- * ── AMBIGUOUS NAMES CONTRIBUTE NO EDGES ──────────────────────────────────────────────────────────
- *
- * 用户裁定（2026-11-12）：修的是 `who-references` 的作用域，不是这个脚本。
- *
- * 实测：族 #2 那 17 个声明之所以连成一团，是因为 12 条边都指向 `name` —— 而 `name` 在整棵树里有
- * 17 个声明点（1 个模块级 `export const name` + 16 个函数内的局部 `const name`）。
- * 对这样的名字，「引用行」无法归给某一个符号，于是任何一条由它产生的边都是编的。
- *
- * 所以这里不再自己判歧义：`who-references --json` 已经给每条 finding 标了 `ambiguous`，
- * 消费方只需跳过。**判据属于仪器，消费方不许另立一套** —— 否则两个工具会各说各话。
- */
+/** 边只从**非歧义**成员的 findings 里取；歧义成员已在上面整体移出成员表。 */
 for (const name of memberSet) {
-  const raw = run('who-references.mjs', ['--json', name])
-  let findings
-  try {
-    findings = JSON.parse(raw)
-  } catch {
-    console.error(`families: cannot parse who-references --json for ${name}`)
-    continue
-  }
-  if (findings.some((f) => f.ambiguous === true)) {
-    ambiguousMembers.push(name)
-    continue
-  }
+  const findings = findingsByMember.get(name) ?? []
   for (const f of findings) {
     if (f.file !== 'index.ts') continue
     if (f.kind !== 'CODE' && f.kind !== 'TYPE') continue
@@ -137,11 +165,6 @@ for (const name of memberSet) {
     edges.get(from).add(name)
     edges.get(name).add(from) // 无向连通
   }
-}
-
-if (ambiguousMembers.length > 0) {
-  console.log(`AMBIGUOUS members skipped (same text, more than one declaration): ${ambiguousMembers.join(', ')}`)
-  console.log('')
 }
 
 const seen = new Set()
@@ -174,8 +197,28 @@ components.sort((a, b) => {
   return lb - la
 })
 
-const total = members.reduce((s, m) => s + sizeOf(m.name), 0)
-console.log(`\n${components.length} connected component(s), ${total} lines total\n`)
+/**
+ * ── 自校验：声明跨度之和必须等于 closure 报的闭包行数 ────────────────────────────────────────────
+ *
+ * 实测到的症状：修 `spanOf` 之前，各分量之和是 **1,068**，而 `closure.mjs` 说闭包是 **974 行**。
+ * 差 94 行不是噪声，是 `spanOf` 把「没有分号的一行常量」一路扫到下一条带括号的声明造成的虚胖
+ * （`name` 被报成 20 行、`ATTACHMENT_KINDS` 与 `WRITE_TOOL_NAMES` 同样被放大）。
+ *
+ * 修好后两者相等（863 = 863）。这个等式因此可以当断言用：一旦再次不等，就是 spanOf 又偏了。
+ * 不相等时**依然打印整张表**，只在末尾给出警告 —— 一张有瑕疵的表比没有表有用，但瑕疵必须被说出来。
+ */
+const closureLineTotal = Number(/lines\s*:\s*(\d+)/u.exec(report)?.[1])
+const spanTotal = members.reduce((s, m) => s + sizeOf(m.name), 0)
+
+const total = spanTotal
+const inTable = components.reduce((s, c) => s + c.reduce((q, n) => q + sizeOf(n), 0), 0)
+console.log(`\n${components.length} connected component(s), ${inTable} lines in the table (+ ${total - inTable} for the removed ambiguous member = ${total})`)
+console.log('行的口径：每个分量的数字是**声明跨度和**（`families.mjs` 自身的 spanOf），')
+console.log('          既不是「切除区间」，也不是「`index.ts` 实测净变化」；只用于排序与族大小比较。\n')
+if (spanTotal !== closureLineTotal) {
+  console.log(`WARNING: declaration spans total ${spanTotal} != closure total ${closureLineTotal}`)
+  console.log('         spanOf disagreed with closure.mjs — treat these numbers as unreliable until it is fixed.\n')
+}
 let idx = 0
 for (const comp of components) {
   idx += 1
