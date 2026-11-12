@@ -242,3 +242,48 @@ test('v136: verify-pure-move EXCLUDES import lines — the gap is pinned, not ju
   assert.ok(module.includes('verify-pure-move.mjs cannot see these by design'),
     'the edge checker must state WHY it exists next to the script it complements')
 })
+
+test('v137: a pure-move run against a tree with NO diff is VACUOUS, and exits 2', () => {
+  /**
+   * ── THE WORST POSSIBLE OUTPUT FOR THIS TOOL IS A GREEN "IDENTICAL" ──────────────────────────────
+   *
+   * Measured: `node scripts/verify-pure-move.mjs` on a clean tree, with the default `--against HEAD`,
+   * printed `IDENTICAL — the content-line multiset is unchanged (pure move)` and exited 0. Both sides
+   * were the same commit. The comparison was real; there was simply nothing on the other side.
+   *
+   * That is a vacuous run, and it is exactly the shape that would make EVERY future move "pass":
+   * the word IDENTICAL is the one a reviewer looks for, so a check invoked after the commit instead
+   * of before it would look like proof. The tool now distinguishes the two.
+   *
+   * The test runs the DEFAULT invocation on the current tree, which (in CI and after a commit) has no
+   * src/ diff against HEAD. It asserts exit 2 AND the word VACUOUS — not merely "non-zero", because a
+   * crash would also be non-zero and would tell the reader nothing.
+   */
+  const status = execFileSync('git', ['status', '--porcelain', '--', 'src'], { cwd: ROOT, encoding: 'utf8' }).trim()
+  const diff = (() => {
+    try {
+      execFileSync('git', ['diff', '--quiet', 'HEAD', '--', 'src'], { cwd: ROOT, stdio: 'ignore' })
+      return false
+    } catch {
+      return true
+    }
+  })()
+
+  if (status !== '' || diff) {
+    // a dirty tree is the normal state DURING a move; the vacuous case cannot be exercised here
+    return
+  }
+
+  let code = 0
+  let out = ''
+  try {
+    out = execFileSync(process.execPath, [PURE_MOVE], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  } catch (error) {
+    code = error.status ?? 1
+    out = `${error.stdout ?? ''}${error.stderr ?? ''}`
+  }
+  assert.equal(code, 2, `a vacuous comparison must exit 2 (a usage/resource condition), got ${code}:\n${out}`)
+  assert.match(out, /VACUOUS/u, 'the output must say VACUOUS so nobody reads it as a pass')
+  assert.match(out, /NOT a pass/u, 'the output must say this is not a pass')
+  assert.doesNotMatch(out, /IDENTICAL/u, 'a vacuous run must never print IDENTICAL')
+})

@@ -249,6 +249,41 @@ if (isMain) {
     const after = multisetOfTree()
     const difference = firstDifference(before, after)
 
+    /**
+     * ── A COMPARISON WITH NOTHING ON THE OTHER SIDE IS NOT A PASS ────────────────────────────────
+     *
+     * Measured: running this with the default `--against HEAD` on a clean tree printed
+     * `IDENTICAL — the content-line multiset is unchanged (pure move)` and exited 0. Both sides were
+     * the same commit, so of course they matched. That is a VACUOUS run, and it is the most dangerous
+     * possible output for this tool: every future move would "pass" if the check were ever invoked
+     * after the commit instead of before it, and nobody would notice because the word IDENTICAL is
+     * the one everybody looks for.
+     *
+     * So: if `src/` has no differences from the ref at all — no modified file, no untracked module —
+     * there is nothing to compare, and this exits 2 (a RESOURCE/usage condition, never a pass).
+     *
+     * Checked with both `git diff` (tracked changes) and `git status --porcelain` (which also sees
+     * untracked new modules — a move creates exactly one of those).
+     */
+    const srcDiff = (() => {
+      try {
+        execFileSync('git', ['diff', '--quiet', ref, '--', 'src'], { cwd: REPO, stdio: 'ignore' })
+        return '' // exit 0 → no tracked changes
+      } catch {
+        return 'changed' // exit 1 → differences exist
+      }
+    })()
+    const srcStatus = execFileSync('git', ['status', '--porcelain', '--', 'src'], { cwd: REPO, encoding: 'utf8' }).trim()
+    if (srcDiff === '' && srcStatus === '') {
+      console.log(`ref     : ${ref}`)
+      console.log('tree    : working')
+      console.log('')
+      console.log('VACUOUS — src/ has NO differences from the ref, so there is nothing to compare.')
+      console.log('This is NOT a pass: a pure-move check with no diff on one side cannot fail.')
+      console.log(`Run it against the commit BEFORE the move (e.g. --against <parent>), not against ${ref}.`)
+      process.exit(2)
+    }
+
     const total = (counts) => [...counts.values()].reduce((sum, n) => sum + n, 0)
     console.log(`ref     : ${ref}   content lines: ${total(before)}`)
     console.log(`tree    : working   content lines: ${total(after)}`)
