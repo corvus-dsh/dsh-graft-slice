@@ -154,14 +154,30 @@ const isEnvironment = (row) => ENVIRONMENT_CODES.has(row.code)
  * 但**必须标注**这一条 —— 否则下一个人会去「修」一个在当前口径下不存在的问题，
  * 或者更糟：看到它消失就以为是自己修好的。
  *
- * 判据用「文件+行号+code」三元组而不是 message 文本：message 会随编译器版本改写。
+ * 判据刻意**不用行号**：第一版用 `index.ts:9792:2339` 做键，而本轮编辑在我自己写的一条内联注释上
+ * 让那行下移了 11 行 —— 标注立刻失效，那条假阳性悄悄变成「代码缺陷 12 条里的 1 条」。
+ * 键换成「文件 + code + message 的关键子串」，位置变化不再影响身份。
  */
 const COMPILER_ARTIFACT = new Map([
-  ['index.ts:9792:2339', 'strict:false does not narrow `!safety.ok`; strict:true reports 0 here'],
+  ['2339', { file: 'index.ts', match: /Property 'reason' does not exist on type '\{ ok: true; \}/u, why: 'strict:false does not narrow `!safety.ok`; strict:true reports 0 here' }],
 ])
 
-const artifactKey = (row) => `${row.file}:${row.line}:${row.code}`
-const isArtifact = (row) => COMPILER_ARTIFACT.has(artifactKey(row))
+const isArtifact = (row) => {
+  for (const [code, spec] of COMPILER_ARTIFACT) {
+    if (String(row.code) !== code) continue
+    if (row.file !== spec.file) continue
+    if (!spec.match.test(row.message)) continue
+    return true
+  }
+  return false
+}
+
+const artifactWhy = (row) => {
+  for (const [code, spec] of COMPILER_ARTIFACT) {
+    if (String(row.code) === code && row.file === spec.file && spec.match.test(row.message)) return spec.why
+  }
+  return ''
+}
 
 const envRows = rows.filter(isEnvironment)
 const artifactRows = rows.filter((row) => !isEnvironment(row) && isArtifact(row))
@@ -213,7 +229,7 @@ if (onlyCode === undefined && onlyGrep === undefined && envRows.length > 0) {
   if (artifactRows.length > 0) {
     console.log(`COMPILER ARTIFACT: ${artifactRows.length} diagnostic(s) — caused by strict:false, not by the code`)
     for (const row of artifactRows) {
-      console.log(`  ${row.file}:${row.line}  [${row.code}]  ${COMPILER_ARTIFACT.get(artifactKey(row))}`)
+      console.log(`  ${row.file}:${row.line}  [${row.code}]  ${artifactWhy(row)}`)
     }
     console.log('  (strict:true reports 0 here; do NOT "fix" it, and do not read its disappearance as a fix)')
   }

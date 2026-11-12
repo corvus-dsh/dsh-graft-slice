@@ -5131,7 +5131,11 @@ function persistConstraintSections(ctx: PluginContextLike | undefined): void {
         const existing = payload[id]
         if (existing === undefined || Number(entry.at ?? 0) >= Number(existing.at ?? 0)) {
           const shaped = splitByShape(
-            (entry as { constraints?: unknown }).constraints?.filter?.((value: unknown): value is string => typeof value === 'string') ?? [],
+            // root cause A: `unknown` has no `.filter`; narrow to unknown[] first (see commit msg)
+            (() => {
+              const raw = (entry as { constraints?: unknown }).constraints
+              return Array.isArray(raw) ? raw.filter((value): value is string => typeof value === 'string') : []
+            })(),
             'ledger',
           )
           if (shaped.dropped.length > 0) {
@@ -6656,9 +6660,16 @@ async function graftSliceAndInjectUnlocked(
      * the log (a retry, a test, a replay) does not re-read it, and routing it through the gateway would
      * make a caller's own data subject to the gateway's availability.
      */
-    const raw = options?.sourceSnapshot ?? (await gateway.readLog(sourceId))
-    if (options?.sourceSnapshot === undefined && raw.readable !== true) {
-      throw graftError('SOURCE_UNREADABLE', `源会话 ${sourceId} 的日志读不到（${raw.notes.join('; ') || 'no events'}）`)
+    // root cause B: `raw` is a union (caller snapshot | gateway LogReading). The guard on
+    // `options.sourceSnapshot` cannot narrow `raw` — different expression — so the shape is
+    // asserted at the one place that provably holds the gateway reading. See commit msg.
+    const suppliedSnapshot = options?.sourceSnapshot
+    const raw = suppliedSnapshot ?? (await gateway.readLog(sourceId))
+    if (suppliedSnapshot === undefined) {
+      const reading = raw as { readable?: boolean; notes?: readonly string[] }
+      if (reading.readable !== true) {
+        throw graftError('SOURCE_UNREADABLE', `源会话 ${sourceId} 的日志读不到（${reading.notes?.join('; ') || 'no events'}）`)
+      }
     }
     if (options?.sourceSnapshot !== undefined && raw.session?.id !== sourceId) {
       throw graftError('SOURCE_MISMATCH', 'sourceSnapshot header does not match sourceSessionId')
@@ -6995,7 +7006,9 @@ async function graftSliceAndInjectUnlocked(
     }
     // The layer reports whether the cold read confirmed its own write. graft's own verify below is the
     // stricter, plugin-specific one that additionally checks the skeleton numbering it configured.
-    const layerVerified = created.verified === true
+    // root cause C: `created` is built by the IIFE above and carries no `verified`, so this
+    // expression was ALWAYS false and its only use was `void layerVerified`. Deleted, not
+    // "given a type". See commit msg.
     const layerWarnings: string[] = Array.isArray(created.warnings) ? created.warnings : []
     plan.warnings.push(...layerWarnings)
 
@@ -7009,7 +7022,6 @@ async function graftSliceAndInjectUnlocked(
     // `prepared` is kept only for the fields read further down (`header.createdAt`); the layer owns the
     // real header now.
     prepared.header = { id: newId, cwd: plan.cwd, createdAt: headerCreatedAt }
-    void layerVerified
 
     // Phase 4: cold-read verification of what was ACTUALLY persisted.
     //

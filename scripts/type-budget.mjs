@@ -83,7 +83,7 @@ const TYPE_CHECK = join(ROOT, 'scripts', 'type-check.mjs')
  * 所以这张表只能来自 `node scripts/type-budget.mjs --baseline`。
  */
 const BASELINE = new Map([
-  ['index.ts', 12],
+  ['index.ts', 8],
   ['core/ignition.ts', 2],
   ['contracts/model-wording.contracts.ts', 1],
 ])
@@ -156,14 +156,19 @@ const ENVIRONMENT_CODES = new Set([2307, 2580])
  * 否则「某文件被触及后数字变了」会反映一个与本提交无关的原因。
  *
  * 两个工具的口径必须一致 —— 否则它们会各说各话，而 v143 的断言正是拿两边对照的。
+ *
+ * 编译器产物的判据**不用行号**：第一版用 `index.ts:9792:2339`，而本轮编辑让那行下移 11 行，
+ * 标注立刻失效、那条假阳性混回了代码缺陷。改成「文件 + code + message 子串」后位置无关。
  */
-const COMPILER_ARTIFACT = new Set(['index.ts:9792:2339'])
+const COMPILER_ARTIFACT = { code: 2339, file: 'index.ts', match: /Property 'reason' does not exist on type '\{ ok: true; \}/u }
 
 function countsByFile (report) {
   const counts = new Map()
   for (const d of report.diagnostics) {
     if (ENVIRONMENT_CODES.has(d.code)) continue
-    if (COMPILER_ARTIFACT.has(`${d.file}:${d.line}:${d.code}`)) continue
+    // 与 type-check.mjs 同一条判据：按文件 + code + message 子串，**不用行号**
+    // （行号会因任何一处注释增删而失效，本轮已经实测过一次）
+    if (d.code === COMPILER_ARTIFACT.code && d.file === COMPILER_ARTIFACT.file && COMPILER_ARTIFACT.match.test(d.message)) continue
     counts.set(d.file, (counts.get(d.file) ?? 0) + 1)
   }
   return counts
