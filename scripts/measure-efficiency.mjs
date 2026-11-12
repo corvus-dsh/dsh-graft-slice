@@ -149,31 +149,40 @@ console.log(`before (best)  : ${best(aSamples).toFixed(2)} µs/call`)
 console.log(`after  (best)  : ${best(bSamples).toFixed(2)} µs/call`)
 console.log(`delta          : ${fmt(delta)}   (min-of-samples, CPU-bound convention)`)
 console.log('')
-console.log(`control delta  : ${fmt(controlDelta)}  (same bundle vs itself — must be ~0)`)
+console.log(`resolution     : ±${fmt(controlDelta)}  ← this machine's measured noise floor, NOT zero`)
+console.log('                 (control = the same bundle measured against itself)')
 console.log('')
 
 /**
- * ── 对照组失败 ⇒ 仪器不成立，不能说「回归」 ────────────────────────────────────────────────────
+ * ── 结论的措辞只有三档，且必须提到分辨率 ────────────────────────────────────────────────────────
  *
- * 实测：同一份代码在噪声大的机器上被算出 +19.21%，而真正的差值是 0。
- * 如果这时输出 REGRESSION，仪器就在制造假警 —— 比不测更糟，因为它会让人去「修」一个不存在的问题。
+ * 用户裁定（2026-11-12）：他的机器上对照组是 7.79%，不是 0.64% —— 所以「−2.27%」的正确读法是
+ * **「测不出回归」**，不是「快了 2.3%」。任何小于本机分辨率的差值都不能当结论。
  *
- * 所以对照组一旦超过阈值，结论只能是「不可测」，exit 2（资源条件），并把原因说清楚。
+ * 第一版这里会输出 `FASTER by 2.26%` —— 那是把噪声说成结论。三档改成一个方向：
+ *
+ *   control > 10%      → INSTRUMENT UNFIT（exit 2）：连 10% 都分辨不了，任何结论都是编的
+ *   |delta| <= control → NOT RESOLVABLE：差值落在分辨率里，只能说「测不出」
+ *   delta > +10% 且超出 control → REGRESSION（exit 1）
+ *
+ * 「变快」永不作结论 —— 纯位移没有变快的机制，报「变快」等于承认仪器在测噪声。
  */
 if (controlDelta > 0.10) {
-  console.log(`VERDICT: NOT MEASURABLE — the control (identical code on both sides) deviates ${fmt(controlDelta)},`)
-  console.log(`         which exceeds the 10% threshold. This machine cannot resolve a 10% difference right now.`)
+  console.log(`VERDICT: INSTRUMENT UNFIT — the control deviates ${fmt(controlDelta)}, above the 10% threshold.`)
+  console.log('         This machine cannot resolve a 10% difference right now, so no verdict is possible.')
   console.log('         Expected value for a pure move: 0% by construction (no code, no call count changed).')
-  console.log('         Recorded as "not measurable, expected 0" — NOT as a pass and NOT as a regression.')
+  console.log('         Recorded as "not measurable, expected 0" — NOT a pass and NOT a regression.')
   process.exit(2)
 }
 
-if (Math.abs(delta) <= 0.10) {
-  console.log(`VERDICT: no regression — ${fmt(delta)} is within the ±10% band, and the control passed`)
-  console.log(`         (${fmt(controlDelta)}). Expected for a pure move: 0%.`)
-} else if (delta > 0) {
-  console.log(`VERDICT: REGRESSION — ${fmt(delta)} exceeds +10%, and the control passed (${fmt(controlDelta)}).`)
+if (Math.abs(delta) <= controlDelta) {
+  console.log(`VERDICT: NOT RESOLVABLE — |${fmt(delta)}| is inside this machine's resolution ±${fmt(controlDelta)}.`)
+  console.log('         The correct reading is "no regression detected", NOT "faster" or "slower".')
+  console.log('         Expected value for a pure move: 0% by construction.')
+} else if (delta > 0.10) {
+  console.log(`VERDICT: REGRESSION — ${fmt(delta)} exceeds +10% AND this machine's resolution ±${fmt(controlDelta)}.`)
   process.exitCode = 1
 } else {
-  console.log(`VERDICT: FASTER by ${fmt(-delta)} — outside the band but in the improvement direction.`)
+  console.log(`VERDICT: outside the resolution (±${fmt(controlDelta)}) but inside the 10% band.`)
+  console.log('         Not a regression; also not evidence of improvement — a pure move has no mechanism to be faster.')
 }

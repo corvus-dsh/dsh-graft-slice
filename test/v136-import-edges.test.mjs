@@ -243,7 +243,7 @@ test('v136: verify-pure-move EXCLUDES import lines — the gap is pinned, not ju
     'the edge checker must state WHY it exists next to the script it complements')
 })
 
-test('v137: a pure-move run against a tree with NO diff is VACUOUS, and exits 2', () => {
+test('v136x: a pure-move run against a tree with NO diff is VACUOUS, and exits 2', () => {
   /**
    * ── THE WORST POSSIBLE OUTPUT FOR THIS TOOL IS A GREEN "IDENTICAL" ──────────────────────────────
    *
