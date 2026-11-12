@@ -59,6 +59,26 @@ try {
  */
 const NOT_SOURCE = new Set(['core/ignition.ts.bak-cut'])
 
+/**
+ * ── TRANSIENT PROBE FILES ARE NOT SOURCE ────────────────────────────────────────────────────────
+ *
+ * Several tests write a throwaway probe into `src/` and delete it in a `finally`: v141 writes
+ * `core/__v141-probe.ts`, the calibration writes `core/__calibration-probe.ts`. That is deliberate —
+ * the classifier and the compiler both only look under `src/`, so a probe must live there to be seen.
+ *
+ * ── WHY THIS MATTERS TO THE BUDGET, NOT JUST TO NOISE ───────────────────────────────────────────
+ *
+ * Measured: running `npm test` with node's default file-level parallelism let v143's `--baseline` scan
+ * happen while v141's probe existed. The probe has no `@types/node`, so it produced its own
+ * diagnostics, `--baseline` listed `core/__v141-probe.ts`, and the frozen-baseline assertion failed —
+ * a test failing because ANOTHER test was mid-run. The same thing would happen to a developer who ran
+ * the budget while a probe was on disk, and the report would name a file that does not exist a moment
+ * later.
+ *
+ * The exclusion is printed, never silent: an exclusion nobody can see is how a real file gets ignored.
+ */
+const TRANSIENT_PROBE = /(?:^|\/)__[^/]*probe[^/]*\.ts$/u
+
 const files = []
 const excluded = []
 const walk = (dir) => {
@@ -67,7 +87,7 @@ const walk = (dir) => {
     if (statSync(full).isDirectory()) walk(full)
     else if (/\.ts(?:\.|$)/u.test(entry)) {
       const rel = relative(SRC, full).split('\\').join('/')
-      if (NOT_SOURCE.has(rel)) { excluded.push(rel); continue }
+      if (NOT_SOURCE.has(rel) || TRANSIENT_PROBE.test(rel)) { excluded.push(rel); continue }
       files.push(full)
     }
   }

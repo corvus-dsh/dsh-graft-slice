@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const SCRIPT = join(ROOT, 'scripts', 'who-references.mjs')
+const CALIBRATION = join(ROOT, 'scripts', 'calibrate-who-references.mjs')
 const PROBE = join(ROOT, 'src', 'core', '__v141-probe.ts')
 
 const PROBE_SOURCE = [
@@ -143,6 +144,33 @@ test('v141: the probe really exercises the classifier (a denominator)', () => {
    */
   const findings = runProbe()
   assert.equal(findings.length, 9, `expected nine findings in the probe, got ${findings.length}: ${JSON.stringify(findings)}`)
+})
+
+test('v141: the CALIBRATION baseline passes — run it before trusting any answer from this tool', () => {
+  /**
+   * ── 用户硬要求（2026-11-12）：这个工具已经在同一个位置错过五次 ──────────────────────────────────
+   *
+   *   1. 子串匹配（GraftSource 命中 GraftSourceShape / pendingGraftSources）
+   *   2. 完全不处理字符串字面量
+   *   3. 不认正则字面量（引号开了字符串，污染整个区域）
+   *   4. `//` 状态跨行（吞掉下一行的 /​** ，150 行错判）
+   *   5. `--code` 明细静默截断 40 行
+   *
+   * 五次全部错向「少报」。而少报在这个项目里的后果不是「少查一次」：
+   * **C2「生产调用者 = 0」是搬移许可的核心证据** —— 少报一个，就把还有依赖的东西当孤儿搬走。
+   *
+   * 所以这里不放「注意小心」的注释，放一份已知答案的样本（scripts/calibrate-who-references.mjs）：
+   * N = 5 条真实引用，覆盖普通调用 / 模板插值 / 正则含引号三种形态 + `//` 紧邻 `/**` 的跨行样本
+   * + 一条子串邻居必须不命中的反向样本。
+   *
+   * 三条历史回归都实测能红（注入后立刻失败）：
+   *   去掉正则分支 → CODE 5→2，第 23 行误判 PROSE
+   *   `//` 状态跨行 → CODE 5→3，4 行错判
+   *   去掉 \b 边界 → CODE 5→6，子串邻居被算成引用
+   */
+  const output = execFileSync(process.execPath, [CALIBRATION], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  assert.match(output, /CALIBRATION PASS/u, `the calibration baseline must pass; got:\n${output}`)
+  assert.match(output, /5 code reference\(s\)/u, 'the known answer is 5 real references (N >= 3, three shapes)')
 })
 
 test('v141: on the real tree, a known prose-only mention is classified as prose', () => {

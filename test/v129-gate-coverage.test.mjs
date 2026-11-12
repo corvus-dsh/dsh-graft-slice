@@ -80,9 +80,11 @@ const KINDS = new Map([
   ['closure.mjs', 'INSTRUMENT'],
   ['move-gate.mjs', 'INSTRUMENT'],
   ['type-check.mjs', 'INSTRUMENT'],
+  ['type-budget.mjs', 'INSTRUMENT'],
   ['verify-import-edges.mjs', 'INSTRUMENT'],
   ['verify-pure-move.mjs', 'INSTRUMENT'],
   ['who-references.mjs', 'INSTRUMENT'],
+  ['calibrate-who-references.mjs', 'INSTRUMENT'],
   ['inventory-source-guards.mjs', 'INSTRUMENT'],
 
   // ── OPS: needs a live store/host, or is a drill ──
@@ -122,9 +124,11 @@ const NOT_A_CI_STEP = new Map([
   ['verify-pure-move.mjs', 'compares the working tree to a git ref, which is IDENTICAL by construction in CI; its --self-test is run locally'],
   ['move-gate.mjs', 'needs closure.mjs, and is a MEASURING instrument: it prints four tiers and does not assert on them in CI'],
   ['type-check.mjs', 'needs the TypeScript compiler; the incremental budget gate that consumes it is a separate proposal (PROPOSAL-incremental-type-check.md)'],
+  ['type-budget.mjs', 'needs the TypeScript compiler, which this package deliberately does not depend on; it exits 2 by design in CI, and test/v143 exercises its judgement locally'],
   ['audit-line-numbers.mjs', 'produces the audit table that test/v140 consumes; v140 is the CI step, this is its instrument'],
   ['inventory-source-guards.mjs', 'inventory/report; test/v126 asserts the coverage it describes'],
   ['verify-import-edges.mjs', 'produces the edge diff that test/v136 consumes; v136 is the CI step, this is its instrument'],
+  ['calibrate-who-references.mjs', 'a CALIBRATION for who-references.mjs: it asserts a known answer (5 real references across three shapes). It is run by test/v141 as a precondition, which is the point — the classifier must be calibrated BEFORE its answer is trusted, not after it is published'],
 ])
 
 const scriptNames = readdirSync(join(ROOT, 'scripts')).filter((name) => name.endsWith('.mjs')).sort()

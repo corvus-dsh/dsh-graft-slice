@@ -192,6 +192,28 @@ jobs:
       - name: The module dependency graph has no cycles
         run: node scripts/check-cycles.mjs
 
+      # ── the incremental type budget ───────────────────────────────────────────────────────────
+      #
+      # ── THIS STEP DOES NOT RUN IN CI, ON PURPOSE, AND SAYS SO ─────────────────────────────────
+      #
+      # `package.json` declares no dependencies, so there is no `typescript` on the runner and
+      # `type-budget.mjs` exits 2 ("a RESOURCE condition, not a pass"). Deliberately NOT solved by
+      # adding typescript as a devDependency: that would turn a local gate into a 61-error red build
+      # on every push — the "CI is always red" failure the user rejected by name.
+      #
+      # So the gate is LOCAL, and this step makes that visible instead of silently absent. A skipped
+      # step that prints why is honest; a green step that never ran is a lie.
+      - name: Incremental type budget (LOCAL ONLY — no compiler on the runner)
+        run: |
+          set +e
+          node scripts/type-budget.mjs
+          code=$?
+          if [ "$code" -eq 2 ]; then
+            echo "::warning::type-budget could not run (no typescript here). This is the documented local-only gate, not a pass."
+            exit 0
+          fi
+          exit "$code"
+
       # ── exact identifier references, never substring matches ──────────────────────────────────
       #
       # Observed twice: includes('GraftSource') also matched GraftSourceShape and pendingGraftSources,
