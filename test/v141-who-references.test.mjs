@@ -80,6 +80,21 @@ const PROBE_SOURCE = [
   '  return GraftSource.value',
   '}',
   '',
+  /**
+   * ── A NAME WITH TWO DECLARATIONS IS NOT ONE SYMBOL ─────────────────────────────────────────────
+   *
+   * Measured on the real tree: `families.mjs` glued 17 declarations into ONE component, and all
+   * twelve gluing edges pointed at `name` — the plugin constant `export const name` — while every
+   * actual reference was to a shadowing local `const name` inside a function. A text matcher cannot
+   * tell those apart, so the tool must refuse to count: a name with more than one declaration site
+   * is AMBIGUOUS and excluded, and the exclusion is printed.
+   */
+  'export const ShadowSymbol = 1',
+  'export function probeShadowing(): number {',
+  '  const ShadowSymbol = 2',
+  '  return ShadowSymbol',
+  '}',
+  '',
 ].join('\n')
 
 const runProbe = () => {
@@ -144,6 +159,42 @@ test('v141: the probe really exercises the classifier (a denominator)', () => {
    */
   const findings = runProbe()
   assert.equal(findings.length, 9, `expected nine findings in the probe, got ${findings.length}: ${JSON.stringify(findings)}`)
+})
+
+test('v141: a name with more than one declaration is AMBIGUOUS — excluded, printed, and never counted', () => {
+  /**
+   * ── 实测到的根问题：同一段文本在不同作用域里是不同的符号 ────────────────────────────────────────
+   *
+   * `families.mjs` 曾把 `buildTape` 的 17 个声明连成一个分量，12 条边全部指向 `name`
+   * （插件常量 `export const name`），而每一条「引用」其实都是被遮蔽的局部 `const name`。
+   *
+   * 这个工具按 `\bname\b` 匹配行，不可能解析绑定。所以判据必须是：**同名多声明 ⇒ 不计数**，
+   * 并且剔除清单必须打印出来（与这个仓库其他所有剔除同一条规则）。
+   */
+  writeFileSync(PROBE, PROBE_SOURCE, 'utf8')
+  try {
+    const out = execFileSync(process.execPath, [SCRIPT, '--json', 'ShadowSymbol'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
+    const findings = JSON.parse(out).filter((f) => f.file === 'core/__v141-probe.ts')
+
+    assert.ok(findings.length > 0, 'the shadowing probe must produce findings, else this test proves nothing')
+    assert.ok(findings.every((f) => f.ambiguous === true),
+      'EVERY finding for a doubly-declared name must carry ambiguous:true — the JSON consumer is ' +
+      'families.mjs, so a guard that only exists in the human output is not a guard')
+
+    const decls = findings.filter((f) => f.kind === 'DECL')
+    assert.equal(decls.length, 2, `expected two declaration sites, got ${decls.length}`)
+    assert.equal(decls.filter((d) => d.nested === false).length, 1, 'exactly one declaration is module-level')
+    assert.equal(decls.filter((d) => d.nested === true).length, 1, 'exactly one declaration is nested (the shadow)')
+
+    // and the human-readable mode must PRINT the exclusion rather than silently subtracting
+    const human = execFileSync(process.execPath, [SCRIPT, 'ShadowSymbol'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
+    assert.match(human, /AMBIGUOUS/u, 'the exclusion must be announced')
+    assert.match(human, /ShadowSymbol/u, 'the exclusion must name the symbol')
+    assert.match(human, /nested — shadows/u, 'the report must distinguish the shadowing declaration')
+    assert.match(human, /EXCLUDED/u, 'the reference count must say EXCLUDED, not print a number')
+  } finally {
+    unlinkSync(PROBE)
+  }
 })
 
 test('v141: the CALIBRATION baseline passes — run it before trusting any answer from this tool', () => {

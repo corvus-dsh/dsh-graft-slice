@@ -99,11 +99,37 @@ const ROOT = TARGET
 const rootsRefs = new Set()
 const edges = new Map(members.map((m) => [m.name, new Set()]))
 const unresolvedRefs = []
+const ambiguousMembers = []
 
+/**
+ * ── AMBIGUOUS NAMES CONTRIBUTE NO EDGES ──────────────────────────────────────────────────────────
+ *
+ * 用户裁定（2026-11-12）：修的是 `who-references` 的作用域，不是这个脚本。
+ *
+ * 实测：族 #2 那 17 个声明之所以连成一团，是因为 12 条边都指向 `name` —— 而 `name` 在整棵树里有
+ * 17 个声明点（1 个模块级 `export const name` + 16 个函数内的局部 `const name`）。
+ * 对这样的名字，「引用行」无法归给某一个符号，于是任何一条由它产生的边都是编的。
+ *
+ * 所以这里不再自己判歧义：`who-references --json` 已经给每条 finding 标了 `ambiguous`，
+ * 消费方只需跳过。**判据属于仪器，消费方不许另立一套** —— 否则两个工具会各说各话。
+ */
 for (const name of memberSet) {
-  const out = run('who-references.mjs', [name])
-  for (const m of out.matchAll(/^\s+\[(?:CODE|TYPE)\s*\] index\.ts:(\d+)/gmu)) {
-    const from = ownerOf(Number(m[1]))
+  const raw = run('who-references.mjs', ['--json', name])
+  let findings
+  try {
+    findings = JSON.parse(raw)
+  } catch {
+    console.error(`families: cannot parse who-references --json for ${name}`)
+    continue
+  }
+  if (findings.some((f) => f.ambiguous === true)) {
+    ambiguousMembers.push(name)
+    continue
+  }
+  for (const f of findings) {
+    if (f.file !== 'index.ts') continue
+    if (f.kind !== 'CODE' && f.kind !== 'TYPE') continue
+    const from = ownerOf(f.line)
     if (from === undefined || from === name) continue
     if (!memberSet.has(from)) continue
     if (from === ROOT) { rootsRefs.add(name); continue }
@@ -111,6 +137,11 @@ for (const name of memberSet) {
     edges.get(from).add(name)
     edges.get(name).add(from) // 无向连通
   }
+}
+
+if (ambiguousMembers.length > 0) {
+  console.log(`AMBIGUOUS members skipped (same text, more than one declaration): ${ambiguousMembers.join(', ')}`)
+  console.log('')
 }
 
 const seen = new Set()

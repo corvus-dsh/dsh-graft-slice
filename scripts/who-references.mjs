@@ -249,6 +249,13 @@ for (const file of sourceFiles(SRC)) {
         symbol: name, file: rel, line: index + 1,
         kind: isDecl ? 'DECL' : isImport ? 'IMPORT' : isType ? 'TYPE' : 'CODE',
         text: line.trim().slice(0, 110),
+        /**
+         * `nested` must be captured from the RAW line, before the trim — the indentation IS the signal.
+         * Measured: a first version derived it from the trimmed `text`, so every local `const name`
+         * inside a function was labelled `[module-level]`, and the ambiguity report could not show
+         * which declarations were shadowing.
+         */
+        nested: /^\s+\S/u.test(line),
       })
     }
     // prose mentions are reported separately — never as references
@@ -259,7 +266,59 @@ for (const file of sourceFiles(SRC)) {
   }
 }
 
+/**
+ * ── SCOPE: A NAME WITH MORE THAN ONE DECLARATION IS NOT ONE SYMBOL ──────────────────────────────
+ *
+ * Measured (2026-11-12): `families.mjs` reported ONE connected component of 17 declarations gluing
+ * `buildTape`'s helpers together. All twelve of the edges that did the gluing pointed at `name` —
+ * the plugin constant `export const name = 'dsh-graft-slice'` — but every single reference was to a
+ * SHADOWING local: `const name = …` inside `attachmentPointer` (index.ts:3554), `name` as an object
+ * property, `name` as a local tool-name variable.
+ *
+ * This tool matches `\bname\b` on a line. It never claimed to resolve bindings, and it cannot: the
+ * same text is a different symbol at every scope. So a name that is declared more than once is
+ * reported as AMBIGUOUS and EXCLUDED from the reference count — because a count that silently mixes
+ * scopes is not a lower bound and not an upper bound, it is a wrong number.
+ *
+ * The exclusion is PRINTED, never silent (same rule as every other exclusion in this repo).
+ *
+ * ── THIS MUST RUN BEFORE THE `--json` EXIT ───────────────────────────────────────────────────────
+ *
+ * Measured: the first version computed ambiguity AFTER `if (asJson) … exit(0)`, so the machine-readable
+ * output never carried `ambiguous` at all — and `families.mjs` consumes exactly that output. A guard
+ * that only exists in the human-readable path is not a guard for the consumers.
+ */
+const declSites = new Map()
+for (const f of findings) {
+  if (f.kind !== 'DECL') continue
+  if (!declSites.has(f.symbol)) declSites.set(f.symbol, [])
+  declSites.get(f.symbol).push(f)
+}
+
+/** A declaration is NESTED when its raw line was indented; a module-level one starts at column 0. */
+const isNested = (f) => f.nested === true
+
+const ambiguous = new Map()
+for (const [symbol, sites] of declSites) {
+  // more than one declaration site ⇒ shadowing is possible; we cannot tell which one a reference means
+  if (sites.length > 1) ambiguous.set(symbol, sites)
+}
+
+for (const f of findings) {
+  if (ambiguous.has(f.symbol)) f.ambiguous = true
+}
+
+
 if (asJson) { console.log(JSON.stringify(findings, null, 1)); process.exit(0) }
+
+if (ambiguous.size > 0) {
+  console.log('AMBIGUOUS (excluded from reference counts — same text, more than one declaration):')
+  for (const [symbol, sites] of [...ambiguous].sort((a, b) => a[0].localeCompare(b[0]))) {
+    console.log(`  ${symbol}: ${sites.length} declaration site(s)`)
+    for (const s of sites) console.log(`      ${s.file}:${s.line}${isNested(s) ? '  [nested — shadows]' : '  [module-level]'}  ${s.text.slice(0, 70)}`)
+  }
+  console.log('')
+}
 
 for (const symbol of names) {
   const mine = findings.filter((f) => f.symbol === symbol)
@@ -267,7 +326,12 @@ for (const symbol of names) {
   const proseOnly = mine.filter((f) => f.kind === 'PROSE')
   console.log(`\n${symbol}`)
   console.log(`  declarations : ${mine.filter((f) => f.kind === 'DECL').length}`)
-  console.log(`  references   : ${refs.length}  (files: ${[...new Set(refs.map((f) => f.file))].join(', ') || 'none'})`)
+  if (ambiguous.has(symbol)) {
+    console.log(`  references   : EXCLUDED — ${ambiguous.get(symbol).length} declarations share this name,`)
+    console.log('                 so a reference here cannot be attributed to one symbol')
+  } else {
+    console.log(`  references   : ${refs.length}  (files: ${[...new Set(refs.map((f) => f.file))].join(', ') || 'none'})`)
+  }
   console.log(`  prose mentions: ${proseOnly.length}  ← NOT references`)
   for (const f of mine) console.log(`    [${f.kind.padEnd(6)}] ${f.file}:${f.line}  ${f.text}`)
 }

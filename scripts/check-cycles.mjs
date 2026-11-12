@@ -16,7 +16,20 @@ import { fileURLToPath } from 'node:url'
  * delayed report — and the delay is exactly one push.
  */
 const REPO = fileURLToPath(new URL('..', import.meta.url))
-const SRC = join(REPO, 'src')
+/**
+ * `GRAFT_CHECK_CYCLES_SRC` lets a test point this at a TEMPORARY copy of src/.
+ *
+ * Measured: `test/v144` proves the unresolved-edge failure by injecting a bad import into
+ * `src/core/layout.ts` and restoring it in a `finally`. Node's test runner runs FILES in parallel,
+ * so any other test that reads the tree during that window sees a broken repo — the suite failed
+ * intermittently with "v144" while v144 itself passed in isolation.
+ *
+ * A test that mutates the real tree is a test that fails other tests. The override makes the
+ * injection happen in a copy, so nothing outside the test can observe it.
+ */
+const SRC = process.env.GRAFT_CHECK_CYCLES_SRC !== undefined && process.env.GRAFT_CHECK_CYCLES_SRC !== ''
+  ? resolve(process.env.GRAFT_CHECK_CYCLES_SRC)
+  : join(REPO, 'src')
 
 function walk (dir, out = []) {
   for (const e of readdirSync(dir)) {

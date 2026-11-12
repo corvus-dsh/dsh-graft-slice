@@ -21,8 +21,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -67,23 +68,46 @@ test('v144: the resolver understands a `.ts` specifier (that shape is deliberate
 test('v144: an unresolved edge is a FAILURE, not a footnote — and that is proven by injection', () => {
   /**
    * 只断言 `unresolved === 0` 是不够的：如果脚本永远打印 0，它也会通过。
-   * 所以这里真的制造一条解析不到的边，确认 exit 1，然后恢复。
-   * 恢复必须被验证 —— 一个留下注入的测试比没有测试更糟。
+   * 所以这里真的制造一条解析不到的边，确认 exit 1。
+   *
+   * ── 注入必须发生在**副本**里，不能碰真实 src/ ─────────────────────────────────────────────────
+   *
+   * 实测：第一版直接改 `src/core/layout.ts` 再在 `finally` 里恢复。Node 的测试运行器**并行跑文件**，
+   * 于是别的测试在这段窗口里读到一棵坏树 —— 整套测试间歇性地报 “v144 失败”，而 v144 单跑是绿的。
+   * **会改真实树的测试 = 会让别的测试失败的测试。**
+   *
+   * 现在：把 src/ 复制到临时目录，在副本里注入，用 `GRAFT_CHECK_CYCLES_SRC` 指向它。
+   * 真实树全程不被触碰，副本用完即删。
    */
-  const target = join(ROOT, 'src', 'core', 'layout.ts')
-  const before = readFileSync(target, 'utf8')
-  assert.equal(run().code, 0, 'precondition: the tree must be green before the injection')
+  assert.equal(run().code, 0, 'precondition: the real tree must be green')
 
+  const sandbox = mkdtempSync(join(tmpdir(), 'v144-'))
+  const copied = join(sandbox, 'src')
   try {
+    cpSync(join(ROOT, 'src'), copied, { recursive: true })
+    const target = join(copied, 'core', 'layout.ts')
+    const before = readFileSync(target, 'utf8')
     writeFileSync(target, "import { __nothing } from './__does-not-exist.js'\n" + before, 'utf8')
-    const { code, out } = run()
+
+    let code = 0
+    let out = ''
+    try {
+      out = execFileSync(process.execPath, [SCRIPT], {
+        cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+        env: { ...process.env, GRAFT_CHECK_CYCLES_SRC: copied },
+      })
+    } catch (error) {
+      code = error.status ?? 1
+      out = `${error.stdout ?? ''}${error.stderr ?? ''}`
+    }
     assert.equal(code, 1, `an unresolvable import must fail the check; got:\n${out}`)
     assert.match(out, /graph is incomplete|proves nothing/u,
       'the failure must say WHY a partial graph is useless, not just that something is missing')
     assert.match(out, /__does-not-exist/u, 'the failure must name the offending specifier')
   } finally {
-    writeFileSync(target, before, 'utf8')
+    rmSync(sandbox, { recursive: true, force: true })
   }
 
-  assert.equal(run().code, 0, 'the restore must leave the tree green')
+  // and the real tree was never touched
+  assert.equal(run().code, 0, 'the real tree must be green after the sandbox run')
 })
