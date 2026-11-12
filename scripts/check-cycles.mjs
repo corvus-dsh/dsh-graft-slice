@@ -2,8 +2,20 @@
 // 输出：节点数、边数、所有环（若有）。
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, dirname, resolve, relative } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const REPO = 'D:/持久层能力架构/dsh-graft-slice'
+/**
+ * ── THE REPO PATH MUST BE DERIVED, NOT TYPED ─────────────────────────────────────────────────────
+ *
+ * The first version hard-coded `D:/持久层能力架构/dsh-graft-slice` — this machine's absolute path.
+ * It passed every local run and failed on its very first CI run (#118, step 19) because on the
+ * runner there is no `D:` drive at all. Every other script in this directory already derives the
+ * root from `import.meta.url`; this one did not, and nothing local could catch it.
+ *
+ * A path constant that only exists on one machine is not a configuration, it is a bug with a
+ * delayed report — and the delay is exactly one push.
+ */
+const REPO = fileURLToPath(new URL('..', import.meta.url))
 const SRC = join(REPO, 'src')
 
 function walk (dir, out = []) {

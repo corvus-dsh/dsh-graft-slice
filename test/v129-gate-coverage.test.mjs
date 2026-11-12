@@ -227,3 +227,47 @@ test('meta: check-docs and the two README gates are all CI steps (the three that
       `${name} is not referenced by ci.yml — this is precisely the state it was already found in once`)
   }
 })
+
+test('meta: no script hard-codes an absolute path (it would only work on one machine)', () => {
+  /**
+   * ── MEASURED ON ITS FIRST CI RUN (#118, step 19) ──────────────────────────────────────────────
+   *
+   * `scripts/check-cycles.mjs` opened with `const REPO = 'D:/…/dsh-graft-slice'` — this machine's own
+   * path. Every local run passed, because locally that path exists. The first runner has no `D:` drive,
+   * so the step failed with NO local symptom whatsoever. The gap between writing the bug and seeing it
+   * was exactly one push, which is the worst feedback loop a gate can have.
+   *
+   * Every other script in this directory already derives its root from `import.meta.url`. This
+   * assertion makes the difference CHECKABLE instead of remembered.
+   *
+   * Comments are stripped first on purpose: several files legitimately MENTION `D:/…` while explaining
+   * a Windows behaviour (`closure.mjs` documents where tsc lives, this very comment names the bug). A
+   * guard that failed on a comment would be deleted rather than fixed.
+   */
+  const scripts = readdirSync(join(ROOT, 'scripts')).filter((name) => name.endsWith('.mjs'))
+  assert.ok(scripts.length >= 20, `expected the full script set, scanned only ${scripts.length}`)
+
+  const offenders = []
+  for (const name of scripts) {
+    const source = readFileSync(join(ROOT, 'scripts', name), 'utf8')
+    const code = source
+      .replace(/\/\*[\s\S]*?\*\//gu, '')
+      .split('\n').filter((line) => !/^\s*\/\//u.test(line)).join('\n')
+    /**
+     * The pattern targets a path that names THIS machine, not any path-shaped string.
+     *
+     * `e2e-multiproject.mjs` writes `'D:\\\\proj\\\\' + sessionId` — a SYNTHETIC fixture path, already
+     * double-escaped inside a JSON.stringify argument, deliberately generic (`proj`). It is test data.
+     * `check-cycles.mjs` wrote `'D:/…/dsh-graft-slice'` — a real, resolvable, this-repo path. Only the
+     * second kind is the defect, so the discriminator is "does the literal name this working tree or a
+     * user home" rather than "does it start with a drive letter".
+     */
+    const pattern = new RegExp(
+      `['"\`](?:[A-Za-z]:[\\\\/](?:[^'"\`]*dsh-graft-slice|Users[\\\\/][^'"\`]*)|/home/[^'"\`]*|/Users/[^'"\`]*)['"\`]`,
+      'gu')
+    for (const match of code.matchAll(pattern)) offenders.push(`${name}: ${match[1].slice(0, 60)}`)
+  }
+  assert.deepEqual(offenders, [],
+    'these scripts embed an absolute path, which only resolves on the machine that wrote it: ' +
+    offenders.join(' | '))
+})
