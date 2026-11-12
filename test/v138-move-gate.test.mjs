@@ -15,19 +15,37 @@
  *
  * 这三个都不是「测试没覆盖」，是**仪器测的不是它以为的东西**。所以本测试用四个已知答案校准。
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync, unlinkSync } from 'node:fs'
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const GATE = join(ROOT, 'scripts', 'move-gate.mjs')
 const SRC = join(ROOT, 'src', 'index.ts')
 
+/**
+ * ── 探针写进 src/ 的临时副本，不写真实树 ────────────────────────────────────────────────────────
+ *
+ * 实测：第一版把 `__v138-c4-probe.ts` 写进真实 `src/core/` 再删除 —— 与 v141 同一个缺陷。
+ * Node 的测试运行器并行跑文件，别的测试在这段窗口里会读到多出来的模块；症状会报在**别的**测试上
+ * （v144 的间歇失败就是这么来的，见 v144 的注释）。
+ *
+ * 现在：复制 src/ 到临时目录，探针写副本，用 `GRAFT_MOVE_GATE_SRC` 把整个门槛（连同它 spawn 的
+ * `closure.mjs`）指向副本，跑完删除。真实树全程不被触碰。
+ */
+const SANDBOX = mkdtempSync(join(tmpdir(), 'v138-'))
+const SANDBOX_SRC = join(SANDBOX, 'src')
+cpSync(join(ROOT, 'src'), SANDBOX_SRC, { recursive: true })
+after(() => rmSync(SANDBOX, { recursive: true, force: true }))
+
+const gateEnv = { ...process.env, GRAFT_MOVE_GATE_SRC: SANDBOX_SRC }
+
 const gateJson = (cluster) => JSON.parse(execFileSync(process.execPath, [GATE, '--cluster', cluster, '--json'], {
-  cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+  cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: gateEnv,
 }))
 
 /**
@@ -131,7 +149,7 @@ test('v138: C4 can actually DETECT a read of a container local (its 0 must mean 
    * This test plants such a probe and requires a hit, so "0 reads" for a real cluster is a finding rather
    * than an empty scan.
    */
-  const probe = join(ROOT, 'src', 'core', '__v138-c4-probe.ts')
+  const probe = join(SANDBOX_SRC, 'core', '__v138-c4-probe.ts')
   const sourceText = [
     '/** v138 probe: reads a buildTape local, so C4 must flag it. */',
     'export function v138ProbeReadsContainerLocal(): unknown {',
@@ -147,7 +165,7 @@ test('v138: C4 can actually DETECT a read of a container local (its 0 must mean 
     assert.equal(report.C4.verdict, 'REVIEW')
     assert.ok(reads.some((entry) => entry.local === 'sliced'))
   } finally {
-    unlinkSync(probe)
+    rmSync(probe, { force: true })
   }
 })
 

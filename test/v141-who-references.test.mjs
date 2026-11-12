@@ -17,17 +17,50 @@
  * 修法：splitProse 改为跟踪跨行的引号状态，模板里的 `${ … }` 拷进 CODE 半（并跟踪花括号嵌套，
  * 因为 `${a ? \`${b}\` : c}` 会嵌套）。本测试钉住三种形态 + 嵌套插值 + 转义引号。
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync, unlinkSync } from 'node:fs'
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const SCRIPT = join(ROOT, 'scripts', 'who-references.mjs')
 const CALIBRATION = join(ROOT, 'scripts', 'calibrate-who-references.mjs')
-const PROBE = join(ROOT, 'src', 'core', '__v141-probe.ts')
+
+/**
+ * ── 探针写进 src/ 的临时副本，不写真实树 ────────────────────────────────────────────────────────
+ *
+ * 实测：第一版把 `__v141-probe.ts` 写进真实 `src/core/` 再删除。Node 的测试运行器**并行跑文件**，
+ * 在这段窗口里别的测试会读到多出来的模块 —— 依赖图、产物构建、计数门禁都可能因此抖动，
+ * 而症状会报在**别的**测试上。v144 那条间歇失败就是这么来的（详见 v144 的注释）。
+ *
+ * 现在：复制 src/ 到临时目录，探针写副本，用 `GRAFT_WHO_REFS_SRC` 把扫描指向副本，跑完删除。
+ * 真实树全程不被触碰。
+ */
+const SANDBOX = mkdtempSync(join(tmpdir(), 'v141-'))
+const SANDBOX_SRC = join(SANDBOX, 'src')
+cpSync(join(ROOT, 'src'), SANDBOX_SRC, { recursive: true })
+const PROBE = join(SANDBOX_SRC, 'core', '__v141-probe.ts')
+const PROBE_REL = 'core/__v141-probe.ts'
+
+after(() => rmSync(SANDBOX, { recursive: true, force: true }))
+
+/** 所有对本工具的调用都带上沙箱根，否则测的是真实树。 */
+const runWhoRefs = (args) => {
+  try {
+    return {
+      code: 0,
+      out: execFileSync(process.execPath, [SCRIPT, ...args], {
+        cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+        env: { ...process.env, GRAFT_WHO_REFS_SRC: SANDBOX_SRC },
+      }),
+    }
+  } catch (error) {
+    return { code: error.status ?? 1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` }
+  }
+}
 
 const PROBE_SOURCE = [
   'export function probeStringLiteral(): string {',
@@ -100,10 +133,10 @@ const PROBE_SOURCE = [
 const runProbe = () => {
   writeFileSync(PROBE, PROBE_SOURCE, 'utf8')
   try {
-    const out = execFileSync(process.execPath, [SCRIPT, '--json', 'GraftSource'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
-    return JSON.parse(out).filter((f) => f.file === 'core/__v141-probe.ts')
+    const { out } = runWhoRefs(['--json', 'GraftSource'])
+    return JSON.parse(out).filter((f) => f.file === PROBE_REL)
   } finally {
-    unlinkSync(PROBE)
+    rmSync(PROBE, { force: true })
   }
 }
 
@@ -173,8 +206,8 @@ test('v141: a name with more than one declaration is AMBIGUOUS — excluded, pri
    */
   writeFileSync(PROBE, PROBE_SOURCE, 'utf8')
   try {
-    const out = execFileSync(process.execPath, [SCRIPT, '--json', 'ShadowSymbol'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
-    const findings = JSON.parse(out).filter((f) => f.file === 'core/__v141-probe.ts')
+    const { out } = runWhoRefs(['--json', 'ShadowSymbol'])
+    const findings = JSON.parse(out).filter((f) => f.file === PROBE_REL)
 
     assert.ok(findings.length > 0, 'the shadowing probe must produce findings, else this test proves nothing')
     assert.ok(findings.every((f) => f.ambiguous === true),
@@ -187,13 +220,13 @@ test('v141: a name with more than one declaration is AMBIGUOUS — excluded, pri
     assert.equal(decls.filter((d) => d.nested === true).length, 1, 'exactly one declaration is nested (the shadow)')
 
     // and the human-readable mode must PRINT the exclusion rather than silently subtracting
-    const human = execFileSync(process.execPath, [SCRIPT, 'ShadowSymbol'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
+    const { out: human } = runWhoRefs(['ShadowSymbol'])
     assert.match(human, /AMBIGUOUS/u, 'the exclusion must be announced')
     assert.match(human, /ShadowSymbol/u, 'the exclusion must name the symbol')
     assert.match(human, /nested — shadows/u, 'the report must distinguish the shadowing declaration')
     assert.match(human, /EXCLUDED/u, 'the reference count must say EXCLUDED, not print a number')
   } finally {
-    unlinkSync(PROBE)
+    rmSync(PROBE, { force: true })
   }
 })
 

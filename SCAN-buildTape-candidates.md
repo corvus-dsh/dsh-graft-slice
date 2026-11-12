@@ -66,6 +66,15 @@ outside。但 `closure.mjs --block` 报 **1 个：`name [const]`** —— 因为
 **工具是对的，我的脚本错了**：切割后那段代码里出现的是标识符 `name`，读代码的人不看声明就分不清指哪一个。
 `artifact scan loop`（L4073..L4085）与 `artifact scan + note`（L4073..L4089）同样受影响，已一并订正。
 
+**2026-11-12 补充更正（本条结论需要打折）**：上面的结论只对了一半。当时认为「工具对、脚本错」，但后来实测发现
+`closure.mjs --block` 的 `OUTSIDE` **不建模作用域** —— 块内局部声明遮蔽掉的同名模块级符号，它照样报成 OUTSIDE。
+
+证据：把附件指针块（当时 L3534..L3569）整段抽成独立模块，块内就有 `const name = …`，用 TS 编译 API 单独编译
+得到 **0 条 `Cannot find name 'name'`**。而 `closure --block` 对该块报 `OUTSIDE: name`。
+
+所以真实情况是：**工具会多报被遮蔽的名字，脚本会漏报，两边都需要人工核对 `OUTSIDE` 清单**。
+完整登记见 `docs/backlog/graft-slice-phase-a-issues.md` 的 B-2。
+
 这一处与「仪器测的不是你以为的东西」同族，但方向相反：**这次错的是我的分析脚本**，不是被测工具。
 
 ### 交叉核对（订正后，工具与脚本一致）

@@ -76,6 +76,19 @@ test('v144: an unresolved edge is a FAILURE, not a footnote — and that is prov
    * 于是别的测试在这段窗口里读到一棵坏树 —— 整套测试间歇性地报 “v144 失败”，而 v144 单跑是绿的。
    * **会改真实树的测试 = 会让别的测试失败的测试。**
    *
+   * 症状为什么总落在 v144 自己头上：`node --test` 每次只把"某个文件失败"报出来，而失败的判定取决于
+   * 谁恰好在那几毫秒里扫了 src/。所以真正的受害者可能是**任何一个**读树的测试
+   * （`check-cycles` / `closure` / `build` / 计数门禁），只是 v144 的名字被印出来了。
+   *
+   * 同一缺陷当时还有两处（2026-11-12 一并修掉）：
+   *   · `test/v141-who-references.test.mjs` 把 `__v141-probe.ts` 写进真实 `src/core/`
+   *     → 现用 `GRAFT_WHO_REFS_SRC` 指向副本；
+   *   · `test/v138-move-gate.test.mjs` 把 `__v138-c4-probe.ts` 写进真实 `src/core/`
+   *     → 现用 `GRAFT_MOVE_GATE_SRC` 指向副本（并转发给 closure.mjs 的 `GRAFT_CLOSURE_SRC`）。
+   *   加上 `scripts/calibrate-who-references.mjs` 自带沙箱，现在**没有任何测试或仪器往真实 src/ 写**。
+   *
+   * 判据不是"单跑绿"，是"整套并行连跑 5 次全绿"—— 单跑绿恰恰是这个缺陷的原始症状。
+   *
    * 现在：把 src/ 复制到临时目录，在副本里注入，用 `GRAFT_CHECK_CYCLES_SRC` 指向它。
    * 真实树全程不被触碰，副本用完即删。
    */

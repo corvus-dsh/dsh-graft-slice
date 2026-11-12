@@ -27,11 +27,20 @@
  *   node scripts/who-references.mjs --json GraftSource
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const REPO = fileURLToPath(new URL('..', import.meta.url))
-const SRC = join(REPO, 'src')
+/**
+ * `GRAFT_WHO_REFS_SRC` 让测试把扫描指向 src/ 的**临时副本**。
+ *
+ * 实测：本仓库的探针测试曾把 `__v141-probe.ts` 写进真实 `src/core/` 再删除。Node 的测试运行器
+ * 并行跑文件，别的测试在这段窗口里会读到多出来的模块（依赖图、产物构建、计数门禁都可能因此抖动）。
+ * 给仪器一个指向副本的入口，测试就不必碰真实树 —— 与 `check-cycles.mjs` / `closure.mjs` 同一做法。
+ */
+const SRC = process.env.GRAFT_WHO_REFS_SRC !== undefined && process.env.GRAFT_WHO_REFS_SRC !== ''
+  ? resolve(process.env.GRAFT_WHO_REFS_SRC)
+  : join(REPO, 'src')
 
 const args = process.argv.slice(2)
 const asJson = args.includes('--json')

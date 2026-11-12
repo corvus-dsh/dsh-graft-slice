@@ -31,7 +31,15 @@ import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const REPO = fileURLToPath(new URL('..', import.meta.url))
-const SRC = join(REPO, 'src')
+/**
+ * `GRAFT_CLOSURE_SRC` lets a test measure a TEMPORARY copy of src/.
+ *
+ * 理由与 `check-cycles.mjs` 的 `GRAFT_CHECK_CYCLES_SRC` 相同：一个会往真实树里写探针文件的测试，
+ * 在并行运行器下会让别的测试读到坏树。给仪器一个可指向副本的入口，测试就不必碰真实树。
+ */
+const SRC = process.env.GRAFT_CLOSURE_SRC !== undefined && process.env.GRAFT_CLOSURE_SRC !== ''
+  ? resolve(process.env.GRAFT_CLOSURE_SRC)
+  : join(REPO, 'src')
 
 async function loadTypeScript() {
   for (const name of ['typescript', 'typescript/lib/typescript.js']) {

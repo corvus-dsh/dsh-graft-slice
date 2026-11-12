@@ -22,13 +22,28 @@
  * 退出码：0 = 全部吻合；1 = 有偏差（打印逐条差异）。
  */
 import { execFileSync } from 'node:child_process'
-import { writeFileSync, unlinkSync } from 'node:fs'
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const TOOL = join(ROOT, 'scripts', 'who-references.mjs')
-const PROBE = join(ROOT, 'src', 'core', '__calibration-probe.ts')
+
+/**
+ * ── 校准探针写进 src/ 的**临时副本**，不写真实树 ─────────────────────────────────────────────────
+ *
+ * 实测：第一版把 `__calibration-probe.ts` 写进真实 `src/core/` 再删除。Node 的测试运行器并行跑文件，
+ * 在这段窗口里别的测试会读到多出来的模块 —— 依赖图、产物构建、计数门禁都可能因此抖动，
+ * 而症状会报在**别的**测试上（v144 就是这样被误报的）。
+ *
+ * 现在：复制 src/ 到临时目录，探针写副本，用 `GRAFT_WHO_REFS_SRC` 把扫描指向副本，用完删除。
+ * 真实树全程不被触碰。
+ */
+const SANDBOX = mkdtempSync(join(tmpdir(), 'cal-who-refs-'))
+const SANDBOX_SRC = join(SANDBOX, 'src')
+cpSync(join(ROOT, 'src'), SANDBOX_SRC, { recursive: true })
+const PROBE = join(SANDBOX_SRC, 'core', '__calibration-probe.ts')
 const SYMBOL = 'CalSymbol'
 
 /**
@@ -118,10 +133,11 @@ const run = () => {
   try {
     const out = execFileSync(process.execPath, [TOOL, '--json', SYMBOL], {
       cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+      env: { ...process.env, GRAFT_WHO_REFS_SRC: SANDBOX_SRC },
     })
     return JSON.parse(out).filter((f) => f.file === 'core/__calibration-probe.ts')
   } finally {
-    unlinkSync(PROBE)
+    rmSync(PROBE, { force: true })
   }
 }
 
@@ -169,7 +185,9 @@ if (problems.length > 0) {
   console.error(`\nCALIBRATION FAILED (${problems.length}):`)
   for (const p of problems) console.error(`  ${p}`)
   console.error('\nFix the classifier before using its output to decide whether a symbol has callers.')
+  rmSync(SANDBOX, { recursive: true, force: true })
   process.exit(1)
 }
 
+rmSync(SANDBOX, { recursive: true, force: true })
 console.log('CALIBRATION PASS — the classifier agrees with every known answer, including the five historical failures.')

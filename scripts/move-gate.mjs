@@ -32,11 +32,19 @@
  */
 import { execFileSync } from 'node:child_process'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const REPO = fileURLToPath(new URL('..', import.meta.url))
-const SRC = join(REPO, 'src')
+/**
+ * `GRAFT_MOVE_GATE_SRC` 让测试把整个门槛指向 src/ 的**临时副本**（并转发给 closure.mjs）。
+ *
+ * 与 `check-cycles.mjs` / `closure.mjs` / `who-references.mjs` 同一做法：会往真实树里写探针的测试
+ * 必须有一个不碰真实树的入口，否则并行运行器下别的测试会读到坏树。
+ */
+const SRC = process.env.GRAFT_MOVE_GATE_SRC !== undefined && process.env.GRAFT_MOVE_GATE_SRC !== ''
+  ? resolve(process.env.GRAFT_MOVE_GATE_SRC)
+  : join(REPO, 'src')
 const INDEX = join(SRC, 'index.ts')
 const TOOL = join(REPO, 'scripts', 'closure.mjs')
 
@@ -102,6 +110,8 @@ function sourceFiles(dir) {
 const declarationTable = (() => {
   const output = execFileSync(process.execPath, [TOOL, '--declarations'], {
     encoding: 'utf8', maxBuffer: 128 * 1024 * 1024,
+    // 沙箱副本必须一路传下去：否则 closure 仍读真实 src/，门槛与测试看到的不是同一棵树
+    env: { ...process.env, GRAFT_CLOSURE_SRC: SRC },
   })
   // the banner (compiler version + path) precedes the JSON; the table is the last line
   const json = output.trim().split('\n').pop()
@@ -202,7 +212,10 @@ const resolveDeclaration = (name) => allDeclarations.get(name)
 
 const runClosure = (name) => {
   try {
-    const output = execFileSync(process.execPath, [TOOL, name], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    const output = execFileSync(process.execPath, [TOOL, name], {
+      encoding: 'utf8', maxBuffer: 64 * 1024 * 1024,
+      env: { ...process.env, GRAFT_CLOSURE_SRC: SRC },
+    })
     return {
       declarations: Number(/declarations : (\d+)/u.exec(output)?.[1]),
       lines: Number(/lines\s+: (\d+)/u.exec(output)?.[1]),
