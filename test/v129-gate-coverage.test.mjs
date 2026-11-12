@@ -31,6 +31,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -210,6 +211,33 @@ test('meta: every instrument is either a CI step or exempt with a written reason
   const unaccounted = INSTRUMENTS.filter((name) => !referenced.has(name) && !NOT_A_CI_STEP.has(name))
   assert.deepEqual(unaccounted, [], 'instruments that are neither CI steps nor explained: ' + unaccounted.join(', '))
   assert.ok(INSTRUMENTS.length >= 6, `expected at least 6 instruments, found ${INSTRUMENTS.length}`)
+})
+
+test('meta: measure-efficiency REFUSES fewer than 5 independent runs (exit 2, no verdict line)', () => {
+  /**
+   * 用户裁定（2026-11-12）：`--repeat` 下限 5。
+   *
+   * 判据必须同时是两条：
+   *   ① exit 2（拒绝运行），不是 exit 0 带着「不可信」的标注继续跑；
+   *   ② 输出里**一行 VERDICT 都没有** —— 否则「跑一下再标注」的结果会被下游引用成结论。
+   *
+   * 实测背景（B-6）：单轮运行报出过 +23.83% 的假 REGRESSION。
+   */
+  const bundle = join(ROOT, 'index.js')
+  let code = 0
+  let out = ''
+  try {
+    out = execFileSync(process.execPath, [
+      join(ROOT, 'scripts', 'measure-efficiency.mjs'),
+      '--before', bundle, '--after', bundle, '--export', 'buildTape', '--repeat', '1',
+    ], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  } catch (error) {
+    code = error.status ?? 1
+    out = `${error.stdout ?? ''}${error.stderr ?? ''}`
+  }
+  assert.equal(code, 2, `fewer than 5 runs must exit 2; got ${code}:\n${out.slice(0, 400)}`)
+  assert.equal(/VERDICT/u.test(out), false, `a refused run must print NO verdict line:\n${out.slice(0, 400)}`)
+  assert.match(out, />= 5/u, 'the refusal must say the minimum')
 })
 
 test('meta: every exemption names a real file and states a reason long enough to argue with', () => {

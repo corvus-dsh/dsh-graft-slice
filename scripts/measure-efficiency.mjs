@@ -172,6 +172,22 @@ const runOneRound = () => {
  *   ③ 符号一致性：N 轮里有正有负 ⇒ 差值连方向都不稳定 ⇒ NOT RESOLVABLE。
  */
 const repeats = Number(argOf('--repeat', '5'))
+
+/**
+ * ── 少于 5 轮不是「更快的测量」，是「没有测量」──────────────────────────────────────────────────
+ *
+ * 用户裁定（2026-11-12）：`--repeat` 下限 5，否则 exit 2。
+ *
+ * 理由就是 B-6 的实测：单轮运行报出过 +23.83% 的假 REGRESSION。轮数不足以覆盖噪声时，
+ * 输出的三档结论只是把噪声排版了一遍。所以这里**直接拒绝运行**，而不是「跑一下再标注不可信」——
+ * 后者会被引用成结论，前者不会。
+ */
+if (!Number.isInteger(repeats) || repeats < 5) {
+  console.error(`measure-efficiency: --repeat must be an integer >= 5 (got ${argOf('--repeat', '5')}).`)
+  console.error('A single run cannot tell a difference from this machine\'s noise; see B-6 in docs/backlog.')
+  process.exit(2)
+}
+
 const observed = []
 for (let i = 0; i < repeats; i += 1) observed.push(runOneRound())
 

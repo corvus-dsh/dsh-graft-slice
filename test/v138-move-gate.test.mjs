@@ -115,13 +115,13 @@ test('v138: spans come from the COMPILER, not from a second parser', (t) => {
 
   // The two containers are the values this whole phase is built on.
   //
-  // The SIZE is the invariant (499); the LINE NUMBERS are not — they moved by −288 when GraftConfig
+  // The SIZE is the invariant (496); the LINE NUMBERS are not — they moved by −288 when GraftConfig
   // left and by −16 when the text tools left. Hard-coding them meant this test failed on a pure move
   // whose verdict never changed. So the assertion is "the reported span really is buildTape", checked
   // against the file, not "the span starts at a remembered address".
   const report = gateJson('buildTape')
   const container = report.A.measured.declarations.find((entry) => entry.name === 'buildTape')
-  assert.equal(container.lines, 499, 'buildTape is 499 lines')
+  assert.equal(container.lines, 496, 'buildTape is 496 lines')
   {
     const lines = readFileSync(SRC, 'utf8').split('\n')
     assert.equal(lines[container.start - 1], 'export function buildTape(',
@@ -229,10 +229,10 @@ test('v138: the declaration parser reproduces independently-known spans', (t) =>
     'the compiler names the kind; a type still compiles to nothing, which is why the move is artifact-zero')
 
   // buildTape is the container C4 depends on; if it is not parsed, C4 is a false pass.
-  // Its SIZE is the calibration anchor (499); its line numbers moved by exactly the moved line count.
+  // Its SIZE is the calibration anchor (496); its line numbers moved by exactly the moved line count.
   const container = gateJson('buildTape').A.measured.declarations.find((entry) => entry.name === 'buildTape')
   assert.ok(container !== undefined, 'buildTape must be FOUND — the second bug hit longer signatures')
-  assert.equal(container.lines, 499, 'buildTape body is still 499 lines')
+  assert.equal(container.lines, 496, 'buildTape body is still 496 lines')
 
   // and the source really does have buildTape at that span — asserted against the file itself below
   const lines = readFileSync(SRC, 'utf8').split('\n')
@@ -244,10 +244,10 @@ test('v138: C4 actually counts the container body, not zero', (t) => {
   if (!requireCompiler(t)) return
   const report = gateJson('GraftConfig')
   const { containerAssignments, containerBodyLines } = report.C4.measured
-  // Measured truth: 499 body lines, EXACTLY 67 local bindings.
+  // Measured truth: 496 body lines, EXACTLY 67 local bindings.
   // An exact number, not "more than 50": the loose bound let a mutation that drops every const/let
   // binding (67 -> 62) pass, and 62 still looks like "dozens". The number is the check.
-  assert.equal(containerBodyLines, 499)
+  assert.equal(containerBodyLines, 496)
   assert.equal(containerAssignments, 67,
     'the parser must find every local binding in buildTape; a drop means the C4 signal is blind')
   assert.equal(report.C4.verdict, 'YES')

@@ -84,7 +84,7 @@ test('v7.4b: a human goal that PASTES an extracted constraints block gets the an
   // 而日志里根本没有这个信息。
   // 改为跟随 mark 之后，seq 仍指向最新块（性质未变），但代数来自 mark。
   // 2026-11-12 第二轮裁定：无标记只说明「不知道代数」，不是「原始会话」。
-  assert.match(anchor, /代次未记录（无标记）/u)
+  assert.match(anchor, /一个代次未记录的会话/u)
   assert.equal(/第 [01] 代/u.test(anchor), false, 'no mark means no generation claim')
   assert.match(anchor, /seq=17/u)
   assert.match(anchor, /副本/u)
@@ -132,7 +132,7 @@ test('v7.4b: a graft-authored goal still counts the chain in generations', () =>
   assert.match(anchor, /seq=40/u, 'the newest block is still the pointer target')
   assert.equal(/第 2 代会话/u.test(anchor), false, 'two blocks do not make a generation')
   // 2026-11-12 第二轮裁定：无标记只说明「不知道代数」，不是「原始会话」。
-  assert.match(anchor, /代次未记录（无标记）/u)
+  assert.match(anchor, /一个代次未记录的会话/u)
 
   // Same log, with the mark saying generation 2: now the generation is stated, and it
   // agrees with `goalMessage`'s `graft_generation` because both read the same mark.

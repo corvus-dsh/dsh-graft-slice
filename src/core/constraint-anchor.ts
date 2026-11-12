@@ -73,23 +73,13 @@ export function inheritedConstraintAnchor(
    * them again has to be a deliberate act, not a typo.
    */
   const blockOrdinal = goals.length
-  /**
-   * ── 三种「代数」状态，不能压成一个数字 ────────────────────────────────────────────────────────
-   *
-   * 用户裁定（2026-11-12）：`sourceGeneration === 0` 不许再说「原始会话」——
-   * 0 只说明**标记里没有记录**，可能是原始会话，也可能是标记被清过、或由别的 profile 创建。
-   * 把「不知道」写成「原始会话」是在断言一件我们没有证据的事。
-   *
-   *   number > 0   → 「第 N 代会话」  标记里有记录
-   *   'original'   → 「原始会话」    调用方确认过「确实不是目标」（本地标记无记录且 id 不是本插件生成的）
-   *   其余（含 0、undefined）→ 「代次未记录（无标记）」
-   */
+  /** 名词短语：拼在「核心约束源自」后面接宾语。0 只表示标记没记录，不表示「原始会话」。 */
   const originLabel =
     typeof sourceGeneration === 'number' && sourceGeneration > 0
       ? `第 ${sourceGeneration} 代会话`
       : sourceGeneration === 'original'
-        ? '原始会话'
-        : '代次未记录（无标记）'
+        ? '一个原始会话'
+        : '一个代次未记录的会话'
   if (blockOrdinal === 0 && humanOrigins.length > 0) {
     // v7.4b: point at the EARLIEST human statement, not the newest copy.
     //

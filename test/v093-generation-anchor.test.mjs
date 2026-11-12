@@ -84,13 +84,13 @@ test('v0.9.3: an UNRECORDED generation is not the same claim as "an original ses
   assert.ok(unrecorded !== undefined)
   assert.equal(/第 0 代/u.test(unrecorded), false, 'a mark of 0 must never render as "generation 0"')
   assert.equal(/源自第 1 代会话/u.test(unrecorded), false, 'nor be silently rounded up to 1')
-  assert.match(unrecorded, /代次未记录（无标记）/u, '0 means "the mark has no record", and must say so')
-  assert.equal(/原始会话/u.test(unrecorded), false, '0 must NOT be upgraded to "original session"')
+  assert.match(unrecorded, /一个代次未记录的会话/u, '0 means "the mark has no record", and must say so')
+  assert.equal(/一个原始会话/u.test(unrecorded), false, '0 must NOT be upgraded to "original session"')
   assert.match(unrecorded, /seq=40/u)
 
   // And the same call with the generation simply absent behaves identically.
   const omitted = inheritedConstraintAnchor(events, 'session-src')
-  assert.match(omitted ?? '', /代次未记录（无标记）/u, 'omitting the generation is also "no record"')
+  assert.match(omitted ?? '', /一个代次未记录的会话/u, 'omitting the generation is also "no record"')
 })
 
 test('v0.9.3: three states render three different sentences (recorded / unrecorded / original)', () => {
@@ -101,11 +101,11 @@ test('v0.9.3: three states render three different sentences (recorded / unrecord
   assert.match(recorded ?? '', /当前是第 4 代/u)
 
   const unrecorded = inheritedConstraintAnchor(events, 'auto-graft-abc123-def456', undefined)
-  assert.match(unrecorded ?? '', /代次未记录（无标记）/u)
+  assert.match(unrecorded ?? '', /一个代次未记录的会话/u)
   assert.equal(/当前是第/u.test(unrecorded ?? ''), false, 'with no recorded generation there is no "current is the Nth" claim either')
 
   const original = inheritedConstraintAnchor(events, 'session-legacy-fixture', 'original')
-  assert.match(original ?? '', /源自原始会话/u)
+  assert.match(original ?? '', /源自一个原始会话/u)
   assert.equal(/代次未记录/u.test(original ?? ''), false)
 
   // The three must be mutually distinguishable, not three spellings of one sentence.
@@ -114,6 +114,42 @@ test('v0.9.3: three states render three different sentences (recorded / unrecord
     return m?.[1] ?? '(none)'
   })
   assert.equal(new Set(labels).size, 3, `three states must produce three distinct labels, got ${JSON.stringify(labels)}`)
+})
+
+test('v0.9.3: the three labels are NOUN PHRASES — the sentence says "源自X（id）", never a clause', () => {
+  /**
+   * 用户裁定（2026-11-12）：三态文案必须是**名词短语**。
+   *
+   * 为什么能机器判：这个值拼在「核心约束源自」后面接宾语。写成从句就会拼出半截话
+   * （「源自代次未被记录」）。所以断言形态而不是断言措辞：
+   * 「源自」与「（id）」之间那一段必须**完整等于**三种名词短语之一 —— 多一个字都不行。
+   */
+  const events = [goalMessage(3), goalMessage(40)]
+  const texts = [
+    inheritedConstraintAnchor(events, 'session-src', 3),
+    inheritedConstraintAnchor(events, 'auto-graft-abc123', undefined),
+    inheritedConstraintAnchor(events, 'session-legacy-fixture', 'original'),
+  ]
+  const NOUN_PHRASES = [/^第 \d+ 代会话$/u, /^一个原始会话$/u, /^一个代次未记录的会话$/u]
+
+  const segments = texts.map((text) => {
+    const m = /核心约束源自([^（]+)（/u.exec(text ?? '')
+    assert.ok(m !== null, `every label must sit between 「源自」 and 「（id）」: ${text}`)
+    return m[1]
+  })
+
+  for (const segment of segments) {
+    const matches = NOUN_PHRASES.filter((re) => re.test(segment))
+    assert.equal(matches.length, 1,
+      `the segment after 源自 must be EXACTLY one of the three noun phrases; got ${JSON.stringify(segment)}`)
+  }
+  assert.equal(new Set(segments).size, 3, 'and the three must not collapse into fewer')
+
+  // A clause glued onto 源自 is the failure this guards: no sentence-final particles or verb tails.
+  for (const text of texts) {
+    assert.equal(/源自[^（]*?(了|的会话是|未被|没有记录)/u.test(text ?? ''), false,
+      `no clause may follow 源自: ${text}`)
+  }
 })
 
 test('v0.9.3: an UNMARKED auto-graft session id is classified as unrecorded, not as an original', () => {
@@ -129,11 +165,11 @@ test('v0.9.3: an UNMARKED auto-graft session id is classified as unrecorded, not
   clearGraftTargetsForTest()
 
   const auto = buildTape(events, boundary, {}, 'auto-graft-not-in-mark')
-  assert.match(auto.pendingStateText, /代次未记录（无标记）/u,
+  assert.match(auto.pendingStateText, /一个代次未记录的会话/u,
     'an unmarked auto-graft id was made by this plugin, so its generation is UNRECORDED, not original')
 
   const plain = buildTape(events, boundary, {}, 'session-legacy-fixture')
-  assert.match(plain.pendingStateText, /源自原始会话/u,
+  assert.match(plain.pendingStateText, /源自一个原始会话/u,
     'an id this plugin never generates, absent from the mark, is classified as an original session')
 })
 
@@ -152,13 +188,13 @@ test('v0.9.3: the human-origin branch names the MARK generation, never a hardcod
 
 test('v0.9.3: the human-origin branch on an unrecorded session says so, not "original"', () => {
   // 2026-11-12 裁定：0 只表示标记里没有记录。人类粘贴能证明「人写过」，
-  // 不能证明「这是原始会话」—— 所以文案是「代次未记录（无标记）」。
+  // 不能证明「这是原始会话」—— 所以文案是「一个代次未记录的会话」。
   const events = [goalMessage(17, 'user')]
   const anchor = inheritedConstraintAnchor(events, 'session-src', 0)
 
   assert.ok(anchor !== undefined)
-  assert.match(anchor, /代次未记录（无标记）/u)
-  assert.equal(/原始会话/u.test(anchor), false, '0 must not be upgraded to "original session"')
+  assert.match(anchor, /一个代次未记录的会话/u)
+  assert.equal(/一个原始会话/u.test(anchor), false, '0 must not be upgraded to "original session"')
   assert.equal(/第 [01] 代/u.test(anchor), false)
   assert.match(anchor, /seq=17/u)
 })
