@@ -148,3 +148,49 @@ COMPILER ARTIFACT: 1  ← strict:false 的假阳性
 - **不动 beta.1**：registry 上 `0.9.0-beta.1` / `0.9.0-beta.2` 已是历史，仓库版本 `0.9.2-beta.1` 未发布。发布与否等裁定。
 - **不开始另外三个仓**：等这份清单被看过再发令。
 - **不再搬单件**：叶子搬移已尽（TD-1 现状行），剩余为 `buildTape` 496 行（`families.mjs` 当时实测的声明跨度），退出条件需重新立项。
+
+---
+
+## 六、tag → HEAD 差分实测（2026-11-12）
+
+**基线**：`old-index.js` 来自 tag `v0.9.2-beta.1` = `e026a75`（构建脚本 `_scratch/build-old-baseline.mjs`，
+产出 `_scratch/baseline.json`：old 780,721 B / sha256 `E6020471…`，new 868,503 B / sha256 `1C5E2BAA…`）。
+中间隔 **124 个提交**，所以这里的差异是「124 个提交带来的行为变化」，**不是**纯搬移回归。
+
+**输入**：`test/fixtures/corpus-sample.json`（真实持久化 v4 日志，213 事件）＋ 本项目两份真实会话日志
+（`auto-graft-mw21oowu-e7kcmk` 920 事件、`auto-graft-mw1jox7o-gs23bp` 7,202 事件），
+经 `scripts/read-session-log.mjs` 读取。
+
+**方法**：12 个 case × 3 份输入 = 36 次比较，稳定序列化（键排序）后逐字符比。
+脚本 `_scratch/diff-harness.mjs`。
+
+### 结果：36 次中 8 次不同，集中在 3 个函数
+
+| 函数 | 不同的输入 | 差异 | 引入提交（**二分实测**） | 是否预期 |
+|---|---|---|---|---|
+| `inheritedConstraintAnchor(events, id, 3)` | 2 份真实日志 | `第 1 代会话` / `当前是第 2 代` → `第 3 代会话` / `当前是第 4 代` | `cbf5962` | **预期**：该提交让第三参（代数）真正生效；旧版**完全不读**第三参（实测 `cbf5962^` 三参两参输出相同） |
+| `inheritedConstraintAnchor(events, id)`（不传代数） | 2 份真实日志 | `第 1 代会话` + `当前是第 N 代` 行 → `原始会话` + 该行消失 | `cbf5962` | **预期**：新签名第三参默认 0，0 表示「不知道代数」，于是按原始会话表述 |
+| `buildTape` | 2 份真实日志 | `pendingStateText` 里锚点文案随之改变 | 下游于 `cbf5962` | **预期**（同一原因） |
+| `buildInjectionPlan` | 2 份真实日志 | ① `chunks[6].text` 锚点文案；② 约束条数 **4→3**（另一份 74→68 候选 / 69→63 归档）；③ `totalTapeChars` 3442→3483 | ① `cbf5962`；②③ `da3da13` | **预期**：`da3da13`（shape 步 2/8）让抽取门与名额门共用结构判据，被丢掉的那条是 `"请立刻执行真机切片测试："` —— 以冒号结尾的**截断片段** |
+
+**corpus-sample 上 12/12 全部相同**（包括 `buildTape`、`buildInjectionPlan`）。
+
+### 一次必须记的自我纠正（方法层面）
+
+差分脚本第一版把三个函数的参数**传错了**：`buildTape` 的参数顺序写成了 `(events, config, boundary, id)`
+（真实签名 `(events, boundary, config, id)`）、`extractOpenTurnCarryover` 的第二个参数传了对象
+（真实是 `fromSeqExclusive: number`）、`buildInjectionPlan` 传了 events
+（真实是 `log: {session, inheritedEventCount, events}`）。
+
+后果：第一版报出的「差异」里有 `（transcript，未声明目标）` 这样的伪差异 —— 那是我的调用错误造成的
+`goalSource='placeholder'` 分支，不是代码行为变化。改用仓库自己的 `locateBoundary()` 与正确签名后，
+那批伪差异全部消失，corpus-sample 变成 12/12 全同。
+
+**教训**：差分测试的输入协议也是仪器的一部分。参数传错时，两版都会返回「看起来正常」的值，
+差异看起来像行为变化 —— 这是最难自查的一类假阳性。
+
+### 未验证
+
+- 两份真实日志的**真实代数真值**未知：`第 1 代` 与 `原始会话` 哪一个更对，我没有独立证据判定。
+  只能说新版的取值来自调用方传入的代数（`cbf5962` 的声明意图），而旧版是硬编码/正则推断。
+- 只覆盖 12 个函数。「同一批日志过两版」的覆盖面取决于 case 清单，清单在 `_scratch/diff-harness.mjs` 里。
