@@ -4,6 +4,7 @@ import { nearDuplicate, normalizeText, normalizedEqual } from './text-normalize.
 import { isRecord, truncateEnd } from '../utils/serialize.js'
 import { textOfMessage } from './watermark.js'
 import type { GraftTape } from './tape-shape.js'
+import { SessionEventLike } from './watermark.js'
 
 export interface GoalResult {
   goal: string

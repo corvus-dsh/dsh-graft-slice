@@ -179,6 +179,19 @@ jobs:
       - name: The committed artifact is what this source builds
         run: node scripts/check-artifact-fresh.mjs
 
+      # ── the dependency graph must stay acyclic ────────────────────────────────────────────────
+      #
+      # Added because the type-fix aimed at the 121 "Cannot find name" diagnostics works by adding
+      # IMPORT statements (graftError ×49, GraftConfig ×18, …). Each import is an edge, and the one
+      # way such a repair can turn a green tree into a broken one is a cycle. `stripTypeScriptTypes`
+      # erases imports outright, so neither the build nor any test would see it.
+      #
+      # Measured while planning that fix: `core/watermark.ts -> ./pending-state` WOULD have closed
+      # `watermark -> pending-state -> task-state -> watermark`. It was caught before writing, by
+      # simulating the proposed edges — which is the reason this gate exists rather than a note.
+      - name: The module dependency graph has no cycles
+        run: node scripts/check-cycles.mjs
+
       # ── exact identifier references, never substring matches ──────────────────────────────────
       #
       # Observed twice: includes('GraftSource') also matched GraftSourceShape and pendingGraftSources,

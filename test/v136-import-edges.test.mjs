@@ -31,6 +31,14 @@ const EDGES = join(ROOT, 'scripts', 'verify-import-edges.mjs')
 const PURE_MOVE = join(ROOT, 'scripts', 'verify-pure-move.mjs')
 const EDGES_URL = pathToFileURL(EDGES).href
 
+/**
+ * The revision the edge comparison is made against.
+ *
+ * Kept as a named constant so the "was this symbol already used?" check cannot silently compare
+ * against a different tree than the ADDED/REMOVED report did.
+ */
+const REF = 'HEAD'
+
 const run = (script, args = []) => execFileSync(process.execPath, [script, ...args], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
 
 test('v136: the edge parser recognises every import shape this repo uses', async () => {
@@ -86,6 +94,20 @@ test('v136: the edge checker can fail — a new dependency it must report is rep
  *   (a) an edge from the file it left to the module it created  (the plumbing)
  *   (b) an edge from the module it created to existing modules   (it reuses what the old file used)
  * and nothing else. That is what "did not introduce a new dependency" means for a move.
+ *
+ * ── A MISSING IMPORT IS NOT A MISSING DEPENDENCY ────────────────────────────────────────────────
+ *
+ * Measured on the type-fix commit: adding `import { isRecord, graftError } from '../utils/serialize.js'`
+ * to `core/host-shape.ts` was reported as "a NEW dependency between two PRE-EXISTING modules".
+ * It was not. The file had called `graftError` FORTY-NINE times before that line existed; the import
+ * statement was the only thing missing. The dependency was already there — in the code, unstated in
+ * the header. Adding the statement legalises it.
+ *
+ * `verify-pure-move` cannot see any of this (it excludes import lines), and `tsc --noEmit` reports the
+ * consequence rather than the cause, so this is the only place the distinction can be made: an added
+ * edge whose symbols ALREADY APPEAR in the referencing file at the ref revision is not a new
+ * dependency, it is a repaired one. Checked against `git show <ref>:<file>`, so it is a measurement of
+ * the previous tree, not a claim about intent.
  */
 test('v136: a move may not add a dependency between two PRE-EXISTING modules', () => {
   /**
@@ -124,16 +146,87 @@ test('v136: a move may not add a dependency between two PRE-EXISTING modules', (
 
   // only genuinely NEW pairs are checked; a re-signed existing pair is fine
   const brandNew = addedPairs.filter((pair) => !removedPairs.includes(pair))
+
+  /**
+   * Symbols named on each added edge, so a "repaired" edge can be told from a new one.
+   * `verify-import-edges` prints them: `  + src/core/host-shape.ts -> ../utils/serialize [a,b]`.
+   */
+  const symbolsOnAdded = new Map()
+  for (const m of output.matchAll(/^ {2}\+ (\S+) -> (\S+) \[([^\]]*)\]/gmu)) {
+    symbolsOnAdded.set(`${m[1]} -> ${m[2]}`, m[3].split(',').map((s) => s.trim()).filter(Boolean))
+  }
+
+  /**
+   * Does the referencing file already USE these symbols at the ref revision?
+   *
+   * This is the measurement that separates "a new dependency" from "a dependency whose import
+   * statement was missing". `graftError` appeared 49 times in host-shape.ts while the file imported
+   * nothing from `../utils/serialize` — the edge existed in the code and not in the header.
+   */
+  const usedAtRef = (fileAtRef, symbols) => {
+    let source
+    try {
+      source = execFileSync('git', ['show', `${REF}:${fileAtRef}`], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    } catch { return false }
+    /**
+     * Remove only the import STATEMENTS, not every line that contains the word `import`.
+     *
+     * Measured: a first draft filtered "any line matching /^\s*(import|export).*from/", which also
+     * deleted the `export function assertColdLog(` line — so a symbol declared and used on such a
+     * line looked unused. Worse, the filter ran per line while a multi-line import leaves its
+     * `} from '…'` tail behind. Both directions are wrong. So: strip the statements structurally.
+     */
+    const body = source
+      .replace(/^\s*import\s+(?:type\s+)?[^;\n]*?from\s+['"][^'"]*['"];?/gmu, '')
+      .replace(/^\s*import\s+['"][^'"]*['"];?/gmu, '')
+      .replace(/^\s*import\s*\{(?:[^}]|\n)*?\}\s*from\s*['"][^'"]*['"];?/gmu, '')
+    return symbols.every((name) => new RegExp(`\\b${name.replace(/\$/gu, '\\$')}\\b`, 'u').test(body))
+  }
+
   for (const pair of brandNew) {
     const [from, to] = pair.split(' -> ')
     const toStem = to.replace(/^\.\//u, '')
     const fromStem = from.replace(/^src\//u, '').replace(/\.ts$/u, '')
-    const ok = createdStems.has(toStem) || createdStems.has(fromStem)
-    assert.ok(ok,
+    if (createdStems.has(toStem) || createdStems.has(fromStem)) continue
+
+    /**
+     * The file that holds the import statement is the `from` side.
+     *
+     * `verify-import-edges` prints repo-relative-to-`src` paths (`core/host-shape.ts`), while
+     * `git show` needs the repo-relative path (`src/core/host-shape.ts`). Measured mistake: stripping
+     * a `src/` prefix that was never there produced a path git could not resolve, `usedAtRef` returned
+     * false on a `catch`, and a repaired edge was reported as a new dependency.
+     */
+    const fileAtRef = from.startsWith('src/') ? from : `src/${from}`
+    const repaired = usedAtRef(fileAtRef, symbolsOnAdded.get(pair) ?? [])
+    assert.ok(repaired,
       `${pair} is a NEW dependency between two PRE-EXISTING modules.\n` +
       `A move may only add an edge INTO a module it created, or OUT OF one.\n` +
+      `An added edge is also allowed when the referencing file ALREADY USES those symbols at ${REF}\n` +
+      `(then the import was merely missing, and this commit repairs it rather than adding a dependency).\n` +
+      `checked: ${(symbolsOnAdded.get(pair) ?? []).join(', ') || '(no symbols parsed)'}\n` +
       `created by this diff: ${[...createdStems].join(', ') || 'none'}\n${output}`)
   }
+})
+
+test('v136: the "already used" exemption can still say NO (a repaired edge is not a blank cheque)', () => {
+  /**
+   * The exemption above is the dangerous kind: it lets an added edge through. If `usedAtRef` returned
+   * true for everything, the rule would silently stop existing and every future new dependency would
+   * pass. So the predicate is exercised in BOTH directions against a file whose content at HEAD is
+   * known: `core/host-shape.ts` calls `graftError` and `isRecord` (used), and never mentions
+   * `truncateEnd` (not used).
+   */
+  const source = execFileSync('git', ['show', `${REF}:src/core/host-shape.ts`], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  const body = source
+    .replace(/^\s*import\s+(?:type\s+)?[^;\n]*?from\s+['"][^'"]*['"];?/gmu, '')
+    .replace(/^\s*import\s+['"][^'"]*['"];?/gmu, '')
+  const uses = (name) => new RegExp(`\\b${name}\\b`, 'u').test(body)
+
+  assert.equal(uses('graftError'), true, 'graftError WAS used before its import existed — the edge is repaired')
+  assert.equal(uses('isRecord'), true, 'isRecord WAS used before its import existed — the edge is repaired')
+  assert.equal(uses('truncateEnd'), false,
+    'truncateEnd is imported by OTHER modules but never used in this file — a first import of it would be a real new dependency')
 })
 
 test('v136: verify-pure-move EXCLUDES import lines — the gap is pinned, not just described', () => {

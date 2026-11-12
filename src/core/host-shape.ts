@@ -167,6 +167,8 @@ export function parseIdentityMetadata(text: string): GraftIdentity | undefined {
  * shape gate existed (or bypasses it).
  */
 import { shapeOfConstraint } from './constraint-shape.js'
+import { isRecord, graftError } from '../utils/serialize.js'
+import type { SessionEventLike } from './watermark.js'
 
 function goalMessage(
   cwd: string,
@@ -322,7 +324,7 @@ function goalMessage(
  * second looked like it had vanished from the sidebar — it was there, hiding
  * under the first one's name. A per-target suffix makes them distinguishable.
  */
-function sessionTitleForGoal(goal: string, targetSessionId?: string): string {
+export function sessionTitleForGoal(goal: string, targetSessionId?: string): string {
   // v7.0: callers reach this with a possibly-absent goal (a report field that
   // was not populated, a legacy caller). Coercing here keeps the sidebar title
   // safe without every call site guarding the same thing.
@@ -414,7 +416,7 @@ function assistantMessage(
   }
 }
 
-function assertLogOnly(event: SessionEventLike, type: string): void {
+export function assertLogOnly(event: SessionEventLike, type: string): void {
   if (event.surfaceOp !== undefined) {
     throw graftError('RED_LINE_SKELETON_SURFACE', `${type} must not carry surfaceOp`)
   }
@@ -423,7 +425,7 @@ function assertLogOnly(event: SessionEventLike, type: string): void {
   }
 }
 
-function assertMessageSurface(event: SessionEventLike, type: string): void {
+export function assertMessageSurface(event: SessionEventLike, type: string): void {
   if (event.surfaceOp !== 'append') {
     throw graftError('RED_LINE_MESSAGE_SURFACE', `${type} must carry { surfaceOp: 'append' }`)
   }
@@ -449,7 +451,7 @@ function assertMessageSurface(event: SessionEventLike, type: string): void {
  * log-only event carries neither surface field. That is the same shape the old
  * `Session.append()` produced; only the store-owned writer is gone.
  */
-function materializeTape(
+export function materializeTape(
   events: ReadonlyArray<{ type: string; data: Record<string, any>; surface: boolean }>,
   createdAt: number,
 ): SessionEventLike[] {
@@ -497,7 +499,7 @@ function materializeTape(
   })
 }
 
-function sourceForReport(source: GraftSourceShape): GraftSourceShape {
+export function sourceForReport(source: GraftSourceShape): GraftSourceShape {
   const copy: GraftSourceShape = { kind: source.kind }
   if (source.provider !== undefined) copy.provider = source.provider
   if (source.model !== undefined) copy.model = source.model
@@ -509,7 +511,7 @@ function sourceForReport(source: GraftSourceShape): GraftSourceShape {
  * The real v4 header names the parent `parentSession`; older drafts used
  * `parentSessionId`, and `lineage` is checked defensively for compatibility.
  */
-function assertTopLevelHeader(header: SessionHeaderShape): void {
+export function assertTopLevelHeader(header: SessionHeaderShape): void {
   const candidate = header as any
   const hasLineage =
     candidate.parentSession !== undefined ||
@@ -526,7 +528,7 @@ function assertTopLevelHeader(header: SessionHeaderShape): void {
 }
 
 /** Build the full event list in memory and enforce every red line before any I/O. */
-function injectionSource(plan: GraftPlanShape, settings: GraftConfigShape): GraftSourceShape {
+export function injectionSource(plan: GraftPlanShape, settings: GraftConfigShape): GraftSourceShape {
   if (plan.sourceTemplate.kind === 'model') return plan.sourceTemplate
   // DSH's runtime validator requires injected assistant messages to carry a
   // model source. Sources that contain no assistant turn (for example a
@@ -593,7 +595,7 @@ export function extractRuntimeIntent(events: readonly SessionEventLike[]): Runti
   return intent
 }
 
-function buildInjectionEvents(
+export function buildInjectionEvents(
   plan: GraftPlanShape,
   settings: GraftConfigShape,
   newSessionId: string,
@@ -749,7 +751,7 @@ function buildInjectionEvents(
   return events
 }
 
-function assertColdLog(
+export function assertColdLog(
   cold: SessionLogSnapshotShape,
   cwd: string,
   expectedTypes: readonly string[],
@@ -950,7 +952,7 @@ function assertColdLog(
  * operation at the tail means the source had no goal, and copying it would
  * resurrect one the user already finished.
  */
-function extractActiveGoalChange(events: readonly SessionEventLike[]): Record<string, unknown> | undefined {
+export function extractActiveGoalChange(events: readonly SessionEventLike[]): Record<string, unknown> | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event?.type !== 'goal/change') continue
@@ -997,7 +999,7 @@ function extractActiveGoalChange(events: readonly SessionEventLike[]): Record<st
  * surface node 0 on the target's first live step (v7.0 C1), so constraints and
  * goals live in the goal `user/message`, not in this prompt.
  */
-const MIGRATION_SYSTEM_PROMPT = [
+export const MIGRATION_SYSTEM_PROMPT = [
   'You are a helpful assistant continuing a migrated coding session. Follow the injected goal and history.',
   // v7.4 P4-1（方案 B）: the tape now writes compact runs, e.g.
   //   - pwsh(seq=364,372,380) · read(seq=398)
@@ -1044,4 +1046,4 @@ export function workspaceRedline(cwd: string): string {
 export function migrationSystemPrompt(cwd: string): string {
   return [MIGRATION_SYSTEM_PROMPT, workspaceRedline(cwd)].join('\n\n')
 }
-const GRAFT_CHAIN_GRACE_TURNS = 2
+export const GRAFT_CHAIN_GRACE_TURNS = 2

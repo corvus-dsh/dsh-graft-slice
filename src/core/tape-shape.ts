@@ -1,3 +1,4 @@
+import { SemanticState } from './instruction-card.js'
 export interface GraftSource {
   kind: string
   provider?: string

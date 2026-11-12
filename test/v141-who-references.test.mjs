@@ -49,6 +49,36 @@ const PROBE_SOURCE = [
   '  return "it\'s GraftSource here"',
   '}',
   '',
+  /**
+   * ── QUOTES INSIDE A REGEX LITERAL ARE REGEX CHARACTERS ──────────────────────────────────────────
+   *
+   * Measured on the real tree: `/[{}[\\]"]/u` (host-shape.ts:336) and `matchAll(/…[^\\s"'`,;)|&]+/gu)`
+   * (command-guard.ts) each contain a quote. The scanner read that quote as a string opener, the
+   * string never closed on the line (a regex cannot span lines), and every following line was filed
+   * PROSE until an accidental matching quote much later — a whole REGION misclassified, so real
+   * callers disappeared. Under-reporting is the dangerous direction: "no caller" reads as "safe to
+   * move".
+   */
+  'export function probeRegexWithQuote(): boolean {',
+  '  return /[{}"]/u.test(GraftSource.value)',
+  '}',
+  '',
+  /**
+   * ── `//` ENDS AT THE END OF ITS OWN LINE ────────────────────────────────────────────────────────
+   *
+   * Measured on the real tree: a `//` line carried its state into the NEXT line, so the `/**` opening
+   * a block comment was swallowed. The comment body was then scanned as code, the apostrophe in
+   * "the target's constraints" opened a string, and index.ts:9936 — a real `sessionTitleForGoal` call —
+   * came back PROSE. A line comment cannot outlive its line.
+   */
+  '// a trailing comment mentioning GraftSource must not swallow the NEXT line',
+  '/**',
+  " * the next line's apostrophe in a word like it's must not open a string — GraftSource here is prose",
+  ' */',
+  'export function probeAfterLineComment (): number {',
+  '  return GraftSource.value',
+  '}',
+  '',
 ].join('\n')
 
 const runProbe = () => {
@@ -81,11 +111,38 @@ test('v141: nested interpolation stays code, and an escaped quote does not end t
   assert.equal(kindAt(18), 'PROSE', 'an escaped quote must not leak the rest of the line into code')
 })
 
-test('v141: the probe really exercises the classifier (a denominator)', () => {
-  // If the probe file were not scanned at all, every assertion above would pass for the wrong reason
-  // (kindAt would return undefined and equal nothing). Require all five findings to exist.
+test('v141: a quote inside a REGEX literal does not open a string (it used to eat a whole region)', () => {
   const findings = runProbe()
-  assert.equal(findings.length, 5, `expected five findings in the probe, got ${findings.length}: ${JSON.stringify(findings)}`)
+  const kindAt = (line) => findings.filter((f) => f.line === line).map((f) => f.kind)[0]
+
+  // `return /[{}"]/u.test(GraftSource.value)` — the `"` is a regex character, the reference is real
+  assert.equal(kindAt(22), 'CODE', 'a name after a regex literal containing a quote is still a reference')
+})
+
+test('v141: `//` ends at its own line and must not swallow the `/**` on the next line', () => {
+  const findings = runProbe()
+  const kindAt = (line) => findings.filter((f) => f.line === line).map((f) => f.kind)[0]
+
+  // the prose mention in the line comment itself
+  assert.equal(kindAt(25), 'PROSE', 'the line comment is prose')
+  // the block comment body that follows must be PROSE, not code (its apostrophe is not a string opener)
+  assert.equal(kindAt(27), 'PROSE', "the apostrophe in \"it's\" inside a block comment must not open a string")
+  // and the code after that comment must still be recognised as a reference
+  assert.equal(kindAt(30), 'CODE', 'code after an apostrophe-bearing block comment is still code')
+})
+
+test('v141: the probe really exercises the classifier (a denominator)', () => {
+  /**
+   * If the probe file were not scanned at all, every assertion above would pass for the wrong reason
+   * (kindAt would return undefined and equal nothing). Require every synthetic finding to exist.
+   *
+   * Measured: NINE findings, not the eight I first asserted. My count came from "synthetic cases I
+   * wrote" (8), but the block-comment body now names the symbol too, so it is its own finding. Counting
+   * expected findings by arithmetic over intent rather than by MEASURING the probe is the same mistake
+   * this project keeps catching — so the number below is the measured one.
+   */
+  const findings = runProbe()
+  assert.equal(findings.length, 9, `expected nine findings in the probe, got ${findings.length}: ${JSON.stringify(findings)}`)
 })
 
 test('v141: on the real tree, a known prose-only mention is classified as prose', () => {
@@ -111,9 +168,31 @@ test('v141: on the real tree, a known prose-only mention is classified as prose'
   assert.deepEqual(signatureAsImport, [],
     'a function signature naming the symbol is a TYPE use, never an IMPORT')
 
-  // The only genuine import/export clause is index.ts's own re-export.
+  /**
+   * Every import clause must be a REAL clause, and the re-export must be among them.
+   *
+   * ── WHY THIS IS NOT `assert.equal(importClauses.length, 1)` ANY MORE ──────────────────────────
+   *
+   * The count was 1 when it was written: `core/` imported nothing from `index.ts`, so the single
+   * clause in the tree was index.ts's own `export type { GraftConfig } from`. That count was a
+   * measurement of a defect, not of the classifier — `index.ts` named `GraftConfig` 18 times without
+   * importing it, which is exactly what `tsc --noEmit` reported as code 2304. Repairing that added
+   * `import { GraftConfig } from './core/graft-config.js'`, and the hard-coded 1 went red BECAUSE the
+   * code got better.
+   *
+   * The invariant that actually matters is: an IMPORT finding must be a binding clause, never a
+   * signature (asserted above), and the re-export must still be recognised. Both survive repair.
+   */
   const importClauses = findings.filter((f) => f.kind === 'IMPORT')
-  assert.equal(importClauses.length, 1, `expected exactly one import clause, got ${JSON.stringify(importClauses)}`)
-  assert.equal(importClauses[0].file, 'index.ts')
-  assert.match(importClauses[0].text, /export type \{ GraftConfig \}/u)
+  const reExport = importClauses.filter((f) => /^export\s+type\s*\{[^}]*\bGraftConfig\b/u.test(f.text))
+  assert.equal(reExport.length, 1,
+    `the re-export clause must be recognised exactly once, got ${JSON.stringify(importClauses)}`)
+  assert.equal(reExport[0].file, 'index.ts')
+  assert.match(reExport[0].text, /export type \{ GraftConfig \}/u)
+
+  // and every other clause must genuinely be a binding clause, not a signature or a declaration
+  for (const clause of importClauses) {
+    assert.match(clause.text, /^(?:import|export)\b/u,
+      `an IMPORT finding must start with import/export: ${JSON.stringify(clause)}`)
+  }
 })

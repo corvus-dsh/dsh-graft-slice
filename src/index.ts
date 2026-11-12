@@ -7630,22 +7630,6 @@ export const TURN_STOPPING_EVENT = 'agent/turn-stopping'
  * considered active.
  */
 
-export interface TokenWatermark {
-  tokens: number
-  contextWindow: number
-  ratio: number
-  /**
-   * v7.0 P0-2: which mechanism produced this number.
-   *
-   * `tokenMeter` is the host's fold and the only one comparable with the
-   * compaction engine's own threshold. `incremental` is this plugin's fold over
-   * the live log, which consumes only newly appended events. `usage` is real
-   * provider data read from a full snapshot (detached session). `estimate` is a
-   * character-count guess. Logging the source is what makes "why did it migrate
-   * at 60%?" answerable after the fact.
-   */
-  source: 'tokenMeter' | 'incremental' | 'usage' | 'estimate'
-}
 
 
 
@@ -11585,6 +11569,12 @@ export const activate = apply
 // Structural runtime types (erased by the build; kept for TypeScript readers)
 // ===========================================================================
 import type { SessionHeaderLike, SessionLogSnapshotLike, PreparedSessionLike, SessionStoreLike, SessionQueryLike, ToolRegistryLike, PluginContextLike } from './core/gateway-types.js'
+import { GraftConfig } from './core/graft-config.js'
+import { GraftBoundary, GraftSource, GraftTape, GraftTapeTurn } from './core/tape-shape.js'
+import { RuntimeIntent, sessionTitleForGoal, sourceForReport } from './core/host-shape.js'
+import { readLedgerEpoch } from './core/ledger.js'
+import { Truncation } from './utils/serialize.js'
+import { POINTER_SENTENCE_PATTERN } from './core/pending-state.js'
 
 
 

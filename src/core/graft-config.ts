@@ -1,4 +1,5 @@
 /** Per-row configuration. All fields are optional; defaults are conservative. */
+import { SafetyMode } from './command-policy.js'
 export interface GraftConfig {
   /** Number of trailing turns kept verbatim. Default 5 (used only when adaptiveDepth is off). */
   recentTurns?: number

@@ -151,8 +151,18 @@ for (const [file, count] of [...byFile].sort((a, b) => b[1] - a[1])) {
   console.log(`  ${file.padEnd(40)} ${String(count).padStart(4)}`)
 }
 
+/**
+ * ── A FILTER IS A REQUEST FOR ALL OF THEM ───────────────────────────────────────────────────────
+ *
+ * Measured: `--code 2304` reported "57 diagnostic(s)" but listed 40 and ended with "…and 17 more".
+ * A downstream script that parses the listing counted 40 and concluded the total was 40 — the
+ * instrument's own truncation became a wrong number in someone else's table. When the caller has
+ * already narrowed the set, the cap is a second, hidden filter. So: no cap under a filter; the cap
+ * stays only for the unfiltered firehose.
+ */
 if (onlyGrep !== undefined || onlyCode !== undefined) {
   console.log('\nmatching diagnostics:')
-  for (const row of rows.slice(0, 40)) console.log(`  ${row.file}:${row.line}  [${row.code}] ${row.message.slice(0, 110)}`)
-  if (rows.length > 40) console.log(`  …and ${rows.length - 40} more`)
+  for (const row of rows) console.log(`  ${row.file}:${row.line}  [${row.code}] ${row.message.slice(0, 160)}`)
+} else if (rows.length > 40) {
+  console.log('\n(no filter given: listing capped at 40 — narrow with --code or --grep)')
 }

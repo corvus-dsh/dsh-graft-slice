@@ -1,5 +1,6 @@
 import { BOARD_TRAILER, renderTaskBoard } from './task-board.js'
 import type { BoardVerification } from './task-board.js'
+import { SemanticDiscard, SemanticOutcome } from './task-board.js'
 
 export interface SemanticNextAction {
   text: string

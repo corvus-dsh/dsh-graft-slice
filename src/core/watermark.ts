@@ -13,6 +13,7 @@
  */
 
 import { clampRatio } from '../utils/serialize.js'
+import { isRecord } from '../utils/serialize.js'
 
 /**
  * The subset of the plugin config this layer reads.
@@ -470,4 +471,21 @@ export async function readTokenWatermark(
     .join('\n')
   const tokens = Math.max(usageTokens, estimateTokensFromText(text))
   return { tokens, contextWindow, ratio: tokens / contextWindow, source: 'estimate' }
+}
+
+export interface TokenWatermark {
+  tokens: number
+  contextWindow: number
+  ratio: number
+  /**
+   * v7.0 P0-2: which mechanism produced this number.
+   *
+   * `tokenMeter` is the host's fold and the only one comparable with the
+   * compaction engine's own threshold. `incremental` is this plugin's fold over
+   * the live log, which consumes only newly appended events. `usage` is real
+   * provider data read from a full snapshot (detached session). `estimate` is a
+   * character-count guess. Logging the source is what makes "why did it migrate
+   * at 60%?" answerable after the fact.
+   */
+  source: 'tokenMeter' | 'incremental' | 'usage' | 'estimate'
 }

@@ -92,9 +92,29 @@ test('v142: the summary names the missing symbols, not just the first sample', (
 
   const missing = report.diagnostics.filter((d) => d.code === 2304)
   const names = new Set(missing.map((d) => /Cannot find name '([^']+)'/u.exec(d.message)?.[1]).filter(Boolean))
-  assert.ok(names.size > 1, `expected several distinct missing names, found ${names.size}`)
 
+  /**
+   * ── THIS ASSERTION USED TO DEPEND ON THE BUG STILL EXISTING ───────────────────────────────────
+   *
+   * It read `names.size > 1` against the REAL tree, which made it a test of the repository's health
+   * rather than of the summary. When the missing imports were repaired (code 2304 went 115 rows /
+   * 20 names → 1 row), the sample vanished and this went red — the test broke because the code got
+   * BETTER. A signal test must survive its subject being fixed.
+   *
+   * The shape is now asserted unconditionally: the summary always has a by-code section, and it
+   * separates "how many" from "which" whenever one code covers several names. The repo-wide check
+   * below runs only while that condition actually holds, and is skipped (not faked) otherwise —
+   * with the reason printed, so "skipped" cannot be mistaken for "passed".
+   */
   const out = execFileSync(process.execPath, [TYPE_CHECK], { cwd: ROOT, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
+  assert.match(out, /by code:/u, 'the summary must always have a by-code section')
+
+  if (names.size <= 1) {
+    t.diagnostic(`code 2304 no longer covers several names (${names.size}) — the multi-name listing is ` +
+      'asserted by test/v142 on a synthetic probe instead of on this tree')
+    return
+  }
+
   assert.match(out, new RegExp(`${names.size} distinct names`, 'u'),
     'the by-code section must report how many distinct names one code covers')
 

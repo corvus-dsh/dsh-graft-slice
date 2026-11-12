@@ -14,6 +14,7 @@
  */
 
 /** One stored event, as the pipeline reads it. */
+import { SessionEventLike } from './watermark.js'
 export interface GatewayEvent {
   readonly seq: number
   readonly type: string

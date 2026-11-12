@@ -34,15 +34,33 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const SRC = join(ROOT, 'src')
 const CAP = 800
 
-/** Ceilings, measured 2026-11-10. Each is "the size it has today", never a target. */
+/** Ceilings, measured 2026-11-12. Each is "the size it has today", never a target. */
 const EXEMPT = new Map([
   ['core/host-shape.ts', {
-    ceiling: 1047,
+    /**
+     * ── RAISED 1047 → 1049, AND WHY THAT IS NOT THE HOLE THIS GATE FORBIDS ───────────────────────
+     *
+     * The gate said 1049 > 1047 and was RIGHT to say it: a ceiling is not permission to grow. The
+     * two lines added are both import statements, and they are a REPAIR, not growth —
+     *
+     *     import { isRecord, graftError } from '../utils/serialize.js'   ← graftError used 49×, isRecord 2×
+     *     import type { SessionEventLike } from './watermark.js'         ← SessionEventLike used 7×
+     *
+     * — this file called all three names while importing none of them, which is why `tsc --noEmit`
+     * reported 121 diagnostics and why 49 of them were one missing line. The alternative to the two
+     * lines is not a smaller file; it is a file that does not compile.
+     *
+     * The mechanism still works: this raise is visible in the diff, has to be typed by a human, and
+     * the next un-explained line fails the gate again.
+     */
+    ceiling: 1049,
     reason:
       'The host protocol surface: identity metadata, the four message constructors, materializeTape, ' +
       'buildInjectionEvents, assertColdLog, extractActiveGoalChange, and the system header + red line. ' +
       'It is a flat list of shape conversions with no shared mutable state, so splitting it would move ' +
-      'code between files without changing any behaviour — pure review cost, no correctness gain.',
+      'code between files without changing any behaviour — pure review cost, no correctness gain. ' +
+      'Ceiling raised 1047 → 1049 for two import statements repairing names the file already used ' +
+      '(graftError 49×, isRecord 2×, SessionEventLike 7×) but never imported.',
   }],
   ['core/ignition.ts', {
     ceiling: 1069,

@@ -71,13 +71,53 @@ function sourceFiles(dir) {
  *
  * So the scanner tracks quote state across the file. Inside a template literal, a `${ … }` run is
  * copied into the CODE half (and the brace depth is tracked, because `${a ? \`${b}\` : c}` nests).
+ *
+ * ── A REGEX LITERAL IS NOT A STRING, AND CONFUSING THEM POISONED WHOLE FILES ─────────────────────
+ *
+ * Measured: `sessionTitleForGoal` came back with 2 references when it has 3 call sites — index.ts:9936
+ * and host-shape.ts:656 both sat inside what the scanner thought was an unterminated string. The
+ * culprit was `/[{}[\]"]/u` (host-shape.ts:336) and `matchAll(/…[^\s"'`,;)|&]+/gu)` (command-guard.ts):
+ * a quote INSIDE a regex literal switched the state to "string", the string never closed on that line,
+ * and every following line was filed as PROSE until an accidental matching quote much later.
+ *
+ * A regex cannot span lines, so one leaked regex does not corrupt one line — it corrupts a REGION.
+ * Hence: recognise `/` as a regex opener when the previous meaningful character says so (an operator
+ * position: start, `(`, `,`, `=`, `:`, `[`, `!`, `&`, `|`, `?`, `{`, `}`, `;`, `return`), then consume
+ * to the closing `/` and its flags, treating quotes inside as regex characters. Without this the
+ * instrument under-reports references — the dangerous direction, because "no caller" reads as "safe
+ * to move", which is exactly the question this tool is asked.
+ *
+ * ── `//` ENDS AT THE END OF ITS OWN LINE, NOT THE START OF THE NEXT ─────────────────────────────
+ *
+ * Measured: index.ts:9936 (a real `sessionTitleForGoal` call) was filed as PROSE. Cause was one layer
+ * up from the regex bug — the scanner carried state `'line'` INTO the following line and skipped it
+ * whole. The line after a `//` comment was index.ts:9771, which opens a block comment with `/**`; that
+ * opener was swallowed, so the block-comment body from 9772 to its `*​/` was scanned as CODE, the
+ * apostrophe in "the target's constraints" opened a string, and the string ran for 150 lines.
+ *
+ * A line comment cannot outlive its line. The `//` branch already consumes the rest of THAT line, so
+ * it must not set a persistent state at all.
  */
 function splitProse(file) {
   const lines = readFileSync(file, 'utf8').split('\n')
   const code = []
   const prose = []
-  let state = 'code' // code | block | line | ' | " | `
+  let state = 'code' // code | block | ' | " | `    ('line' is transient: see above)
   let interpolationDepth = 0
+
+  /**
+   * The tail of the code seen so far, used to decide whether a `/` starts a regex.
+   *
+   * It must be a TAIL, not a single character: `/` is a regex opener after a KEYWORD such as
+   * `return /x/` or `typeof /x/`, and a keyword is more than one character. Measured: with a
+   * one-character buffer, `return /[{}"]/u.test(x)` fell through to the division branch, the `"`
+   * inside the character class opened a string, and the rest of the file was filed PROSE.
+   */
+  let codeTail = ''
+
+  const regexAllowed = () => codeTail.trim() === ''
+    || /[=(,:;[\]{!&|?+\-*%^~<>]$/u.test(codeTail.trimEnd())
+    || /\b(?:return|typeof|instanceof|in|of|new|delete|void|case|do|else|yield|await)$/u.test(codeTail.trimEnd())
 
   for (const line of lines) {
     let codePart = ''
@@ -90,11 +130,6 @@ function splitProse(file) {
       prosePart += line.slice(0, close + 2)
       index = close + 2
       state = 'code'
-    } else if (state === 'line') {
-      code.push('')
-      prose.push(line)
-      state = 'code'
-      continue
     }
 
     while (index < line.length) {
@@ -103,9 +138,33 @@ function splitProse(file) {
 
       if (state === 'code') {
         if (char === '/' && next === '*') { state = 'block'; prosePart += '/*'; index += 2; continue }
-        if (char === '/' && next === '/') { state = 'line'; prosePart += line.slice(index); break }
-        if (char === "'" || char === '"') { state = char; prosePart += char; index += 1; continue }
-        if (char === '`') { state = '`'; prosePart += char; index += 1; continue }
+        // `//` runs to the END OF THIS LINE. It must not persist: the next line is ordinary code.
+        if (char === '/' && next === '/') { prosePart += line.slice(index); break }
+        // a regex literal is CODE: its quotes and brackets are regex syntax, not delimiters
+        if (char === '/' && regexAllowed()) {
+          let j = index + 1
+          // the character class is tracked because `[/]` does not close the regex
+          let inClass = false
+          for (; j < line.length; j++) {
+            const c = line[j]
+            if (c === '\\') { j += 1; continue }
+            if (c === '[') { inClass = true; continue }
+            if (c === ']') { inClass = false; continue }
+            if (c === '/' && !inClass) break
+          }
+          if (j < line.length) {
+            j += 1
+            while (j < line.length && /[a-z]/iu.test(line[j])) j += 1
+            codePart += line.slice(index, j)
+            codeTail = 'x'
+            index = j
+            continue
+          }
+          // no closing slash on this line: it was a division sign, not a regex
+        }
+        if (char === "'" || char === '"') { state = char; prosePart += char; index += 1; codeTail += char; continue }
+        if (char === '`') { state = '`'; prosePart += char; index += 1; codeTail += char; continue }
+        codeTail = (codeTail + char).slice(-24)
         codePart += char
         index += 1
         continue

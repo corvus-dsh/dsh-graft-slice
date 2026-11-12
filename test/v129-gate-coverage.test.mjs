@@ -68,6 +68,7 @@ const ciText = readFileSync(CI, 'utf8')
 const KINDS = new Map([
   // ── GATE: asserts, fails the push ──
   ['check-artifact-fresh.mjs', 'GATE'],
+  ['check-cycles.mjs', 'GATE'],
   ['check-docs.mjs', 'GATE'],
   ['check-readme-counts.mjs', 'GATE'],
   ['check-readme-tally.mjs', 'GATE'],

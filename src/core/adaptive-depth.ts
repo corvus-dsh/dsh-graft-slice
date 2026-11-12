@@ -1,4 +1,5 @@
 import type { SessionEventLike } from './watermark.js'
+import { textOfMessage } from './watermark.js'
 
 /**
  * v6.3 module 3: adaptive slice depth.
