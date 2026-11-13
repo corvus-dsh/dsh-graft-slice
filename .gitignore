@@ -30,3 +30,6 @@ Thumbs.db
 
 # Local experiment/measurement records (measure-efficiency --out, probes). Never source.
 _scratch/
+
+# 打包产物：本地产物，不进版本控制
+*.tgz
