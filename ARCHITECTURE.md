@@ -307,7 +307,7 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 | 缩进（列 0） | 作用域 | 什么也不说明 | `appendTransitionCard` 在列 0 却在 `apply()` 体内 |
 | 变异 `src/` + 不重建 | 判据能否红 | 旧产物的行为 | v131 两次「未红」，补重建后 `2/2` |
 | `stripTypeScriptTypes`（`mode:'strip'`） | 删除类型声明 | **用空白替换它们** | P0 搬 7 个 interface：产物 **871,072 → 869,965**（−1,107 字节），「逐字节不变」物理不可行；token 行 16,372 = 16,372 |
-| 测试里的绝对路径 | 一条能在本机跑通的测试 | 只在**作者磁盘**上成立 | v132 第一版写死 `D:/持久层能力架构/…/store-layer.ts`，CI 报 `ENOENT`（checkout 在 `/home/runner/work/…`）；改 `fileURLToPath(new URL(...))` 即通过 |
+| 测试里的绝对路径 | 一条能在本机跑通的测试 | 只在**作者磁盘**上成立 | v132 第一版写死 `<repo>/src/core/store-layer.ts`，CI 报 `ENOENT`（checkout 在 `/home/runner/work/…`）；改 `fileURLToPath(new URL(...))` 即通过 |
 
 **⑧ 性能判据的口径（第三次改准，2026-11-10 裁定；前两版都不成立）**：
 
@@ -384,6 +384,48 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 **表内行数的口径**：每个分量的数字是**声明跨度和**（`families.mjs` 自身的 `spanOf`），既不是「切除区间」，也不是「`index.ts` 实测净变化」。一次搬移的尺寸必须三个数齐报，由 `scripts/measure-move.mjs` 输出。
 
 | 进度 | ✅ `core/host-shape.ts`（v7.6：身份元数据 / 四个消息构造器 / materializeTape / buildInjectionEvents / assertColdLog / extractActiveGoalChange / 系统头与红线）<br>✅ `core/ignition.ts`（v7.6 → v7.7：点火通道 + 每目标准入 + 持久队列 + 重试 + 回滚）<br>✅ `core/paradise-write.ts`（v7.7：彼岸层桥接 —— 懒加载、按 ctx 缓存、具名拒绝）<br>✅ `core/task-state.ts`（G5：`extractTaskState` + `checkTaskBoundary` + `checkSafeHarbor` + 它们共用的 `splitSentences` / `orderedBySeq` / todo 与 report 的解析助手；**纯搬运，导出面 180 不变，测试 598 不变**）<br>✅ `core/command-guard.ts`（N1：命令风险扫描器 —— 7 个正则常量 + `escapesWorkspace` / `verbInCommandPosition` / `expandKnownRoots` / `pathTokensOf` / `isInsideWorkspace` + `CommandRisk` / `CommandAssessment` / `classifyAgentCommand`；**纯搬运，`verify-pure-move` IDENTICAL（19098 = 19098），导出面 182 不变，测试 708 不变**）<br>✅ `core/command-policy.ts`（N2：命令策略层 —— `CommandVerdict` / `CommandPolicyVerdict` / `SafetyMode` / `PolicyDecision` / `policyDecision` / `scanAgentCommand` / `evaluateCommandPolicy`；**纯搬运，`verify-pure-move` IDENTICAL（19098 = 19098），导出面 182 不变，测试 708 不变，端到端（假 harness）已跑**）<br>✅ `core/host-noise.ts`（N3：宿主噪音过滤 —— `HOST_NOISE_MARKER` / `HOST_PATH_MARKER` / `FOLDED_OUTPUT_MARKER` / `HOST_PATH_PATTERN` / `GLOBAL_SEARCH_PATTERN` / `isProjectPath` / `stripHostNoise`；**纯搬运，`verify-pure-move` IDENTICAL（19098 = 19098），导出面 182 不变，测试 714 不变，新模块零 import**）<br>✅ `core/adaptive-depth.ts`（N4：自适应深度 —— `AdaptiveDepthResult` / `calculateAdaptiveDepth`；**纯搬运，`verify-pure-move` IDENTICAL（19098 = 19098），导出面 182 不变，测试 714 不变；唯一外部依赖是 `SessionEventLike` 类型，已在 `core/watermark.ts` 导出，不成环**）<br>✅ `core/task-board.ts`（N5：任务看板渲染 —— `BOARD_COLUMNS` / `BOARD_TRAILER` / `BoardVerification` / `INSTRUCTION_CARD_MAX_CHARS` / `SemanticOutcomeKind` / `SemanticOutcome` / `SemanticDiscard` / `TaskBoardInput` / `renderTaskBoard` / `sameTextHead` / `truncateForDisplay` / `wrapTruncated`；**纯搬运，`verify-pure-move` IDENTICAL（19098 = 19098），导出面 182 不变，测试 714 不变**；窗口 L1242..L4444 内夹着 **117 个非成员**，全靠字符偏移逐个剪切；唯一 import 是 `truncateEnd`，`utils/serialize.ts` 已导出）<br>✅ `core/instruction-card.ts`（N6：指令卡渲染 —— `InstructionCardInput` / `SemanticNextAction` / `SemanticState` / `renderInstructionCard`；**纯搬运，`verify-pure-move` IDENTICAL（19098 = 19098），导出面 182 不变，测试 719 不变**；窗口 L3729..L4083 内夹 6 个非成员；import 只来自 `core/task-board.ts`，不回指 index.ts）<br>✅ `core/pending-state.ts`（N7：待裁定状态构建 —— 19 个声明（`buildPendingState` + 9 个正则/常量 + `LastStepScene` 等）；**纯搬运，`verify-pure-move` IDENTICAL（19098 = 19098），导出面 182 不变，测试 720 不变**；窗口 L1268..L3727 内夹 **87 个非成员**（历次最多）；import 只有 `join` / `splitSentences` / `truncateEnd`）<br>⏳ 存储/账本层（约 1,517 行，但 `recoverGraftTransactions` 闭包含 7 个 `let`，按本表判据**当前不可搬**）<br>⏳ 工具注册层（约 4,119 行） |
+
+### TD-1a `src/core` 模块登记表（机器核对）
+
+这张表由 `test/v145-module-registry.test.mjs` **双向核对**：磁盘上的每个 `src/core/*.ts` 必须有一行，
+每一行必须指向一个真实存在的文件，依赖列指向的每个模块也必须存在，且从表本身读出的依赖关系不得成环。
+
+**为什么双向都要查**：只查「表里的文件是否存在」，新模块可以悄悄不进表（代码在长、图不动，这就是屎山的形状）；
+只查「磁盘上的文件是否进表」，表里可以留着已删除模块的行，读者按表找文件找不到。
+
+| 模块 | 职责（一句话） | 导出 | 依赖（本地模块） |
+|---|---|---|---|
+| `core/adaptive-depth.ts` | 按用量、错误率与代码占比决定回放深度 | `calculateAdaptiveDepth` | `core/watermark.ts` |
+| `core/codeblock-pointer.ts` | 把超长代码块截成可回读的指针 | `pointerizeCodeBlocks` | — |
+| `core/command-guard.ts` | 扫描命令文本并判定风险类别 | `classifyAgentCommand` | — |
+| `core/command-policy.ts` | 把风险类别折成放行、复核或拒绝 | `evaluateCommandPolicy` | `core/command-guard.ts` |
+| `core/constraint-anchor.ts` | 指出继承来的硬约束出自哪个 seq 与哪一代 | `inheritedConstraintAnchor` | `core/message-source.ts`, `core/watermark.ts` |
+| `core/constraint-shape.ts` | 按结构判一条文本是不是完整的约束句 | `shapeOfConstraint` | — |
+| `core/gateway-types.ts` | 宿主网关与存储层的类型面 | `PluginContextLike` 等类型 | `core/watermark.ts` |
+| `core/goal-extraction.ts` | 从日志里抽出目标与当前 DAG 节点 | `extractGoal` | `core/host-shape.ts`, `core/message-source.ts`, `core/text-normalize.ts`, `core/tape-shape.ts`, `core/watermark.ts`, `utils/serialize.ts` |
+| `core/graft-config.ts` | 插件的配置形状 | `GraftConfig` | `core/command-policy.ts` |
+| `core/host-gateway.ts` | 宿主网关的注册与解析 | `hostGatewayFromContext` | `core/gateway-types.ts` |
+| `core/host-noise.ts` | 过滤宿主注入的噪音路径与折叠输出 | `stripHostNoise` | — |
+| `core/host-shape.ts` | 身份元数据、消息构造器与冷日志断言 | `materializeTape` 等 | `core/constraint-shape.ts`, `core/watermark.ts`, `utils/serialize.ts` |
+| `core/ignition.ts` | 点火通道、每目标准入与失败回滚 | `igniteTargetSession` 等 | `core/txn.ts`, `core/ledger.ts`, `core/paradise-write.ts`, `utils/serialize.ts` |
+| `core/instruction-card.ts` | 渲染指令卡 | `renderInstructionCard` | `core/task-board.ts` |
+| `core/layout.ts` | 读写布局清单并断言版本受支持 | `readLayoutManifest`, `assertLayoutSupported` | — |
+| `core/ledger.ts` | 原子读写台账与 epoch | `readLedger`, `writeLedgerAtomic` | `utils/serialize.ts` |
+| `core/message-source.ts` | 判定消息是插件生成还是人写的 | `isGraftAuthored`, `isHumanAuthored` | `core/host-shape.ts`, `utils/serialize.ts` |
+| `core/paradise-write.ts` | 彼岸层写通道的懒加载与具名拒绝 | `ensureParadiseWrite` | — |
+| `core/pending-state.ts` | 构建交接看板的待裁定状态 | `buildPendingState` | `core/task-state.ts`, `utils/serialize.ts` |
+| `core/semantic-state.ts` | 从工具调用与结果读出本轮语义状态 | `extractSemanticState` | `core/watermark.ts`, `core/task-board.ts`, `core/instruction-card.ts`, `utils/serialize.ts` |
+| `core/state.ts` | 插件全部运行时可变状态 | `graftTargets`, `preparedSlices` 等 | `core/ignition.ts` |
+| `core/store-layer.ts` | 解析存储目录并创建存储层 | `createStoreLayer`, `resolveStoreDir` | `core/gateway-types.ts`, `utils/serialize.ts` |
+| `core/tape-shape.ts` | 磁带与边界的类型面 | `GraftTape`, `GraftBoundary` | `core/instruction-card.ts` |
+| `core/task-board.ts` | 渲染交接任务看板 | `renderTaskBoard` | `utils/serialize.ts` |
+| `core/task-state.ts` | 抽取任务状态、边界与安全港 | `extractTaskState`, `checkTaskBoundary` | `core/watermark.ts`, `contracts/model-wording.ts`, `utils/serialize.ts` |
+| `core/text-normalize.ts` | 文本归一与近似重复判定 | `normalizeText`, `nearDuplicate` | — |
+| `core/txn.ts` | 文件锁与审计通道 | `withFileLock` | `utils/serialize.ts`, `utils/logger.ts` |
+| `core/watermark.ts` | 水位与 token 估算 | `textOfMessage`, `calculateSafeWatermark` | `utils/serialize.ts` |
+
+**依赖方向**：表里读出的箭头一律指向更底层（`utils` → `contracts` → `core` 内的下层模块），
+`v145` 的第三条断言就是「光凭这张表也不成环」。
 
 ### TD-7 存储层与工具层「未搬移」（P2，v7.6 登记）
 

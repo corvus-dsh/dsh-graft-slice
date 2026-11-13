@@ -40,6 +40,18 @@ const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
 const CORPUS = resolve(REPO, '..', '_scratch', 'real-texts.json')
 const CONTRACTS = ALL_CONTRACTS
 
+/**
+ * ── 脱敏后的样本仍必须可溯源 ────────────────────────────────────────────────────────────────────
+ *
+ * 2026-11-13：契约样本里的作者磁盘路径被泛化成 `<workspace>` 占位（脱敏要求），
+ * 但「样本能在真实语料里逐字找到」这条**出处**约束不能因此取消 —— 取消了，样本就重新变成
+ * 「我编的句子」。
+ *
+ * 所以比较前对**两侧**做同一个归一：把 `<盘符>:\第一段` 掩成 `<workspace>`。
+ * 这样被掩掉的只有「谁的磁盘」这一信息，句子的其余部分仍必须逐字相同。
+ */
+const maskDrivePrefix = (text) => text.replace(/\b[A-Za-z]:\\[^\\\s]+/gu, '<workspace>')
+
 const corpus = existsSync(CORPUS)
   ? JSON.parse(readFileSync(CORPUS, 'utf8')).map((entry) => entry.text)
   : undefined
@@ -105,14 +117,14 @@ test('every sample can be found in the real corpus (when the corpus is present)'
     t.skip(`corpus absent at ${CORPUS} — provenance unverified in this checkout (not a pass)`)
     return
   }
-  const haystack = corpus.join('\n')
+  const haystack = maskDrivePrefix(corpus.join('\n'))
   for (const contract of CONTRACTS) {
     for (const sample of contract.samples) {
       // Compare on a distinctive slice: the corpus stores raw blocks, the contract stores excerpts.
-      const needle = sample.text.slice(0, 40).replace(/\s+/gu, ' ').trim()
+      const needle = maskDrivePrefix(sample.text.slice(0, 40).replace(/\s+/gu, ' ').trim())
       const found =
         haystack.includes(needle) ||
-        corpus.some((block) => block.replace(/\s+/gu, ' ').includes(needle))
+        corpus.some((block) => maskDrivePrefix(block.replace(/\s+/gu, ' ')).includes(needle))
       assert.equal(
         found,
         true,
@@ -127,10 +139,10 @@ test('every real-misfire can be found in the real corpus too', (t) => {
     t.skip(`corpus absent at ${CORPUS} — misfire provenance unverified in this checkout (not a pass)`)
     return
   }
-  const haystack = corpus.join('\n').replace(/\s+/gu, ' ')
+  const haystack = maskDrivePrefix(corpus.join('\n').replace(/\s+/gu, ' '))
   for (const contract of CONTRACTS) {
     for (const near of contract.nearMisses) {
-      const needle = near.text.slice(0, 40).replace(/\s+/gu, ' ').trim()
+      const needle = maskDrivePrefix(near.text.slice(0, 40).replace(/\s+/gu, ' ').trim())
       assert.equal(
         haystack.includes(needle),
         true,

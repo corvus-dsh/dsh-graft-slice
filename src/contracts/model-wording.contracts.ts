@@ -62,7 +62,7 @@ export const WIDE_CONSTRAINT: WordingPattern = {
   intent: '这句话像不像一条持久的约束（**召回用**，宽；单独使用会误命中，见 caveat）',
   samples: [
     {
-      text: '操作约束: Documents 读可写不可 → 第一步必须复制进 D:\\插件开发与安装\\dsh-lab\\ 并建 PATCHES.md 索引',
+      text: '操作约束: Documents 读可写不可 → 第一步必须复制进 <workspace>\\dsh-lab\\ 并建 PATCHES.md 索引',
       source: 'session-64345616-2ef5-44ec-8152-c08696d498d2/session.v4.jsonl.zstd',
       seq: 376,
     },
@@ -94,7 +94,7 @@ export const EMPHATIC_CONTRACT: WordingPattern = {
   ],
   nearMisses: [
     {
-      text: 'task-3 done. Deliverable: D:\\插件开发与安装\\dsh-sidecar\\docs\\RECOVERY-TESTS.md (UTF-8, 5 sections). Only that file + .tmp\\recon-tests written',
+      text: 'task-3 done. Deliverable: <workspace>\\dsh-sidecar\\docs\\RECOVERY-TESTS.md (UTF-8, 5 sections). Only that file + .tmp\\recon-tests written',
       kind: 'real-misfire',
       why: '完成汇报：`Only that file … written` 是在限定「只写了这一个文件」，是对已发生事实的描述，不是禁令。',
     },

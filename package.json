@@ -5,7 +5,6 @@
   "description": "星火 OS 切片层 (graft-slice): physical handoff for long sessions: slice a closed log at its last turn/end into a zero-inheritance, cold-resumable session. No fork, no lossy compaction, crash-safe transaction journal. Can carry memory context into the new session.",
   "type": "module",
   "main": "index.js",
-  "types": "src/index.ts",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -18,14 +17,12 @@
     "client.js",
     "manifest.json",
     "cordis.patch.yml",
-    "src/index.ts",
     "locale/*.json",
     "icon.svg",
     "README.md",
     "README.en.md",
     "LICENSE",
     "RELEASE_NOTES.md",
-    "ANALYSIS-BRIEF.md",
     "ARCHITECTURE.md"
   ],
   "scripts": {
