@@ -176,8 +176,34 @@ COMPILER ARTIFACT: 1  ← strict:false 的假阳性
 **3/3 结论一致**（脚本 `_scratch/backtest-efficiency.mjs`，delta 由 before/after 直接算，不再手抄）。
 所以换统计量没有改变任何一个历史结论。
 
+**跨会话聚合（不是单次判决）** —— 把四个会话各自的 primary 读数放在一起：
+
+| 会话 | primary delta |
+|---|---|
+| 1 | +3.61% |
+| 2 | +0.46% |
+| 3 | −1.74% |
+| 4 | −3.54% |
+| **均值** | **−0.30%** |
+| **95% CI** | **±4.9%** |
+
+**这张表是跨会话聚合，不是单次判决。** 单次判决要求同一对 bundle、多次独立运行、符号一致、
+差值超出跨轮离散度；跨会话聚合把四次**不同**测量放在一起看，回答的是另一个问题
+——「这几轮整体的漂移有多大」。均值 −0.30% 而 95% CI ±4.9%：**置信区间比它要分辨的
+10% 阈值宽了一半以上**，所以它同样只能支撑「没有可检测的漂移」，不能支撑任何方向的结论。
+
+**落盘**：`measure-efficiency --out`（默认 `_scratch/efficiency-runs.jsonl`，每次运行追加一行）。
+每行含每轮原始读数（`runs[]` 的 beforeBest/afterBest/delta/control）、`primary`、
+`quality`、`verdict` 与两个 bundle 的 sha256。**字段足以独立复算 primary delta 与 spread** ——
+`test/v129` 有一条断言就是拿文件里的 per-run 数字重算并与记录值比对（1e-12 内一致）。
+
 **尚未做**：单轮自比（control）与跨轮极差是两个不同的量，当前只在 `worst control > 10%` 时拒绝运行；
-`spread` 大到什么程度该整体拒绝，还没有阈值。
+**`spread` 大到什么程度该整体拒绝，仍然没有阈值**。
+
+**但这不影响结论的可复核性（契约）**：即使不设 spread 阈值，主统计量也必须在
+`INSTRUMENT_UNFIT` 与符号翻转这些「结论不成立」的形态里**照常打印**（min before / min after /
+delta / spread 四个读数一个不少）—— 否则读者只看到「测不了」，拿不到任何可复核的数字。
+这条契约由 `measure-efficiency --self-test` 对**每一种**判决形态断言，并由 `test/v129` 钉住。
 
 ---
 

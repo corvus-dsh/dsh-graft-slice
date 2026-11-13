@@ -27,3 +27,6 @@ Thumbs.db
 # It was TRACKED until 2026-11-10 (found by a stray git add -A) — runtime state must not be shipped.
 # Untracking changes nothing except what git sees: an absent file reads as an empty queue.
 .pending-constraints.json
+
+# Local experiment/measurement records (measure-efficiency --out, probes). Never source.
+_scratch/

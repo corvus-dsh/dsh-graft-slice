@@ -32,8 +32,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -265,6 +266,68 @@ test('meta: measure-efficiency self-test covers the verdict shapes, including sa
   assert.match(out, /REGRESSION（方向一致 5\/5，幅度 [\d.]+% ± [\d.]+%）/u,
     'a REGRESSION with spread > 10% must disclose direction consistency and ± spread')
   assert.equal((out.match(/^FAIL/mu) ?? []).length, 0, `no case may fail:\n${out.slice(0, 600)}`)
+})
+
+test('meta: measure-efficiency writes a recomputable JSONL record (fields complete, delta/spread reproducible)', () => {
+  /**
+   * 用户裁定（2026-11-13）：判决必须落盘，且落盘的字段要足以**独立复算** primary delta 与 spread。
+   *
+   * 判据三条：
+   *   ① 跑完必须生成文件；
+   *   ② 字段齐全（每轮原始读数 + primary + quality + verdict + 两个 bundle 的 sha256）；
+   *   ③ 用文件里的 per-run 数据**重新算** delta 与 spread，必须与文件里记的一致 —— 这才是「可复核」。
+   *
+   * 退出码不断言：同一份 bundle 自比也可能被判 UNFIT（这台机器噪声大），那不影响落盘。
+   */
+  const tmp = mkdtempSync(join(tmpdir(), 'v129-eff-'))
+  const outFile = join(tmp, 'runs.jsonl')
+  try {
+    try {
+      execFileSync(process.execPath, [
+        join(ROOT, 'scripts', 'measure-efficiency.mjs'),
+        '--before', join(ROOT, 'index.js'), '--after', join(ROOT, 'index.js'),
+        '--export', 'buildTape', '--rounds', '3', '--calls', '20', '--repeat', '5', '--out', outFile,
+      ], { cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
+    } catch {
+      // a verdict of UNFIT/REGRESSION exits non-zero; the record must exist regardless
+    }
+
+    assert.ok(existsSync(outFile), 'the run must write the record file')
+    const lines = readFileSync(outFile, 'utf8').trim().split('\n').filter((l) => l.trim() !== '')
+    assert.equal(lines.length, 1, 'one run appends exactly one JSONL line')
+    const record = JSON.parse(lines[0])
+
+    for (const key of ['tool', 'recordedAt', 'subject', 'sampling', 'bundles', 'runs', 'primary', 'quality', 'verdict']) {
+      assert.ok(key in record, `the record must carry "${key}"`)
+    }
+    assert.equal(record.runs.length, 5, 'every independent run must be recorded, not just the aggregate')
+    for (const run of record.runs) {
+      for (const key of ['beforeBest', 'afterBest', 'delta', 'control']) {
+        assert.equal(typeof run[key], 'number', `each run needs a numeric ${key}`)
+      }
+    }
+    for (const side of ['before', 'after']) {
+      assert.match(record.bundles[side].sha256, /^[0-9A-F]{64}$/u, `${side} bundle must be identified by sha256`)
+    }
+
+    // ③ 独立复算：只用文件里的 per-run 原始数字
+    const beforeBests = record.runs.map((r) => r.beforeBest)
+    const afterBests = record.runs.map((r) => r.afterBest)
+    const deltas = record.runs.map((r) => r.delta)
+    const minBefore = Math.min(...beforeBests)
+    const minAfter = Math.min(...afterBests)
+    const recomputedDelta = (minAfter - minBefore) / minBefore
+    const recomputedSpread = Math.max(...deltas) - Math.min(...deltas)
+
+    assert.ok(Math.abs(recomputedDelta - record.primary.delta) < 1e-12,
+      `primary delta must be recomputable from the file: ${recomputedDelta} vs ${record.primary.delta}`)
+    assert.ok(Math.abs(recomputedSpread - record.quality.spread) < 1e-12,
+      `spread must be recomputable from the file: ${recomputedSpread} vs ${record.quality.spread}`)
+    assert.equal(record.primary.minBefore, minBefore, 'minBefore is recorded, not re-derived differently')
+    assert.equal(record.primary.minAfter, minAfter, 'minAfter is recorded')
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
 })
 
 test('meta: every exemption names a real file and states a reason long enough to argue with', () => {

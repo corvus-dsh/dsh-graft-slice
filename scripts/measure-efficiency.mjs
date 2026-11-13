@@ -19,9 +19,11 @@
  *
  * 退出码：0 = 有数据（无论正负，结论看输出）；2 = 无法测量（缺文件/函数不在导出面）
  */
-import { existsSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
-import { dirname, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -36,6 +38,15 @@ const afterPath = argOf('--after', resolve(REPO, 'index.js'))
 const rounds = Number(argOf('--rounds', '9'))
 const calls = Number(argOf('--calls', '40'))
 const subject = argOf('--export', 'buildTape')
+
+/**
+ * `--out <file>`：把这一轮的完整字段追加成一行 JSONL。默认 `_scratch/efficiency-runs.jsonl`。
+ *
+ * 为什么要落盘而不是只印在终端：终端输出会被截断、会被复制走样，而**判决的下游复核**需要原始数字。
+ * 落盘的字段必须足以**独立复算** primary delta 与 spread —— 所以每轮的 beforeBest/afterBest
+ * 与逐轮 delta 都要写进去，不能只写结论。
+ */
+const outPath = resolve(argOf('--out', join(REPO, '_scratch', 'efficiency-runs.jsonl')))
 
 const median = (xs) => {
   const s = [...xs].sort((p, q) => p - q)
@@ -79,6 +90,7 @@ export function efficiencyStats ({ beforeBests, afterBests, deltas, controls, th
   if (worstControl > threshold) {
     return {
       kind: 'INSTRUMENT_UNFIT',
+      stats: { minBefore, minAfter, delta, spread, median: med, signs, worstControl, consistent },
       code: 2,
       lines: [...lines, '',
         `VERDICT: INSTRUMENT UNFIT — worst control ${(worstControl * 100).toFixed(2)}% > ${threshold * 100}%, spread ±${(spread * 100).toFixed(2)}%.`,
@@ -88,6 +100,7 @@ export function efficiencyStats ({ beforeBests, afterBests, deltas, controls, th
   if (signFlip) {
     return {
       kind: 'NOT_RESOLVABLE_SIGN_FLIP',
+      stats: { minBefore, minAfter, delta, spread, median: med, signs, worstControl, consistent },
       code: 0,
       lines: [...lines, '',
         `VERDICT: NOT RESOLVABLE — the sign flips across independent runs (${signs.join(' ')}), spread ±${(spread * 100).toFixed(2)}%.`,
@@ -101,6 +114,7 @@ export function efficiencyStats ({ beforeBests, afterBests, deltas, controls, th
       : `REGRESSION — ${(delta * 100).toFixed(2)}% > ${threshold * 100}%, spread ±${(spread * 100).toFixed(2)}%`
     return {
       kind: 'REGRESSION',
+      stats: { minBefore, minAfter, delta, spread, median: med, signs, worstControl, consistent },
       code: 1,
       lines: [...lines, '', `VERDICT: ${qualified}`],
     }
@@ -108,6 +122,7 @@ export function efficiencyStats ({ beforeBests, afterBests, deltas, controls, th
   if (Math.abs(delta) <= spread) {
     return {
       kind: 'NOT_RESOLVABLE_INSIDE_SPREAD',
+      stats: { minBefore, minAfter, delta, spread, median: med, signs, worstControl, consistent },
       code: 0,
       lines: [...lines, '',
         `VERDICT: NOT RESOLVABLE — |${(delta * 100).toFixed(2)}%| is inside the cross-run spread ±${(spread * 100).toFixed(2)}%.`,
@@ -116,6 +131,7 @@ export function efficiencyStats ({ beforeBests, afterBests, deltas, controls, th
   }
   return {
     kind: 'UNDER_BAND_WITH_SPREAD',
+    stats: { minBefore, minAfter, delta, spread, median: med, signs, worstControl, consistent },
     code: 0,
     lines: [...lines, '',
       `VERDICT: outside the cross-run spread (±${(spread * 100).toFixed(2)}%) but inside the ${threshold * 100}% band.`,
@@ -188,9 +204,15 @@ function selfTest () {
     const ok = result.kind === c.expect
     const text = result.lines.join('\n')
     const printsSpread = /spread/.test(text)
-    if (!ok || !printsSpread) failures += 1
-    console.log(`${ok && printsSpread ? 'PASS' : 'FAIL'}  ${c.name} -> ${result.kind} (expected ${c.expect})`)
-    if (!ok) console.log(result.lines.map((l) => `        ${l}`).join('\n'))
+    /**
+     * 契约（用户 2026-11-13 裁定）：**即使不设 spread 阈值**，主统计量也必须在
+     * UNFIT / FLIP 这些「结论不成立」的形态里照常打印 —— 否则读者只看到「测不了」，
+     * 拿不到任何可复核的数字。这里对**每一种**形态都断言四个主读数在场。
+     */
+    const printsPrimary = ['min before', 'min after', 'delta', 'spread'].every((label) => text.includes(label))
+    if (!ok || !printsSpread || !printsPrimary) failures += 1
+    console.log(`${ok && printsSpread && printsPrimary ? 'PASS' : 'FAIL'}  ${c.name} -> ${result.kind} (expected ${c.expect})`)
+    if (!ok || !printsPrimary) console.log(result.lines.map((l) => `        ${l}`).join('\n'))
   }
 
   // 形态断言：spread > 10% 的 REGRESSION 必须自曝方向一致性与 ± spread
@@ -200,6 +222,14 @@ function selfTest () {
   if (!hasShape) failures += 1
   console.log(`${hasShape ? 'PASS' : 'FAIL'}  spread > 10% REGRESSION discloses direction consistency and spread`)
   console.log(`      ${line}`)
+
+  // 契约：UNFIT 与 FLIP 这两类「结论不成立」的形态也必须打印四个主读数
+  for (const [name, input] of [['INSTRUMENT_UNFIT', noisy], ['NOT_RESOLVABLE_SIGN_FLIP', flipped]]) {
+    const text = efficiencyStats(input).lines.join('\n')
+    const printsPrimary = ['min before', 'min after', 'delta', 'spread'].every((label) => text.includes(label))
+    if (!printsPrimary) failures += 1
+    console.log(`${printsPrimary ? 'PASS' : 'FAIL'}  ${name} still prints the primary readings (no spread threshold needed)`)
+  }
 
   console.log(failures === 0 ? '\nSELF-TEST PASS' : `\nSELF-TEST FAIL (${failures})`)
   return failures === 0
@@ -385,6 +415,40 @@ async function main () {
     controls: observed.map((o) => o.control),
   })
   for (const line of verdict.lines) console.log(line)
+
+  const sha256Of = (path) => createHash('sha256').update(readFileSync(path)).digest('hex').toUpperCase()
+  const record = {
+    tool: 'measure-efficiency',
+    recordedAt: new Date().toISOString(),
+    subject,
+    fixtureEvents: log.events.length,
+    sampling: { rounds, calls, repeats },
+    bundles: {
+      before: { path: beforePath, sha256: sha256Of(beforePath) },
+      after: { path: afterPath, sha256: sha256Of(afterPath) },
+    },
+    // 每轮的原始读数 —— 只有它们能让下游独立复算；结论本身不构成证据
+    runs: observed.map((o) => ({ beforeBest: o.beforeBest, afterBest: o.afterBest, delta: o.delta, control: o.control })),
+    primary: {
+      statistic: 'min(beforeBest) vs min(afterBest)',
+      minBefore: verdict.stats.minBefore,
+      minAfter: verdict.stats.minAfter,
+      delta: verdict.stats.delta,
+    },
+    quality: {
+      spread: verdict.stats.spread,
+      medianDelta: verdict.stats.median,
+      worstControl: verdict.stats.worstControl,
+      signs: verdict.stats.signs,
+      consistent: verdict.stats.consistent,
+    },
+    verdict: { kind: verdict.kind, code: verdict.code },
+  }
+  mkdirSync(dirname(outPath), { recursive: true })
+  appendFileSync(outPath, `${JSON.stringify(record)}\n`, 'utf8')
+  console.log('')
+  console.log(`recorded       : ${outPath}  (one JSONL line, recomputable)`)
+
   process.exitCode = verdict.code
 
 }
