@@ -36,7 +36,21 @@ const run = (script, args) => {
 }
 
 const report = run('closure.mjs', [TARGET])
-const members = [...report.matchAll(/^\s+index\.ts:(\w+) \[(\w+)\]/gmu)].map((m) => ({ name: m[1], kind: m[2] }))
+/**
+ * ── 成员正则的 `(\w+)` 会漏掉 `let/var` —— 同一个缺陷在 observer 上已经咬过一次 ────────────────
+ *
+ * `closure.mjs` 打印的 kind 里有 `[let/var]`，而这里原来写 `\[(\w+)\]`：`/` **不是** `\w`，
+ * 于是模块级 `let` 被**整条丢弃** —— 既不进成员表，也不进跨度求和。
+ *
+ * **本仓（graft-slice）当前没暴露**：`buildTape` 的闭包里 `mutable` 是空（实测），
+ * 一个模块级 `let` 都没有，所以正则匹配不到任何东西也没有代价。
+ * 但这不是"修好了"，是"恰好没有输入"。observer 那边同时有 `FollowTransferResult` 多算 1 行，
+ * 两个方向相反的缺陷相抵成「差 1」，于是它伪装成了「一点空行」——查了很久才拆开。
+ *
+ * 修法：kind 允许 `let/var`（`[\w/]+`），并由 `spanOf` 认出这个 kind（见下）。
+ * 这不是为了本仓的今天，是为了本仓**将来出现模块级 `let` 时**不再重现同一个差 1。
+ */
+const members = [...report.matchAll(/^\s+index\.ts:(\w+) \[([\w/]+)\]/gmu)].map((m) => ({ name: m[1], kind: m[2] }))
 console.log(`${TARGET}: ${members.length} declaration(s), ${/lines\s*:\s*(\d+)/u.exec(report)?.[1]} lines`)
 
 /**
@@ -84,7 +98,15 @@ const spanOf = (name, kind) => {
   const kw = kind === 'InterfaceDeclaration' ? 'interface'
     : kind === 'TypeAliasDeclaration' ? 'type'
       : kind === 'FunctionDeclaration' ? 'function'
-        : 'const'
+        /**
+         * ── `let/var` 这一支与上面成员正则的 `[\w/]+` 是一对 ─────────────────────────────────────
+         *
+         * 只改正则不加这一支，会得到「名字进了成员表但 `spanOf` 返回 undefined」——
+         * 调用方的 `sizeOf()` 会退回默认 1 行，于是差额从「少 2 行」变成「少 0 行但仍不对」。
+         * 两处必须同时改，否则修完看着像修好了，实际只是把同一个错换了位置。
+         */
+        : kind === 'let/var' ? '(?:let|var)'
+          : 'const'
   const re = new RegExp(`^(?:export\\s+)?${kw}\\s+${name}\\b`, 'u')
   const start = lines.findIndex((l) => re.test(l))
   if (start < 0) return undefined
@@ -216,8 +238,18 @@ console.log(`\n${components.length} connected component(s), ${inTable} lines in 
 console.log('行的口径：每个分量的数字是**声明跨度和**（`families.mjs` 自身的 spanOf），')
 console.log('          既不是「切除区间」，也不是「`index.ts` 实测净变化」；只用于排序与族大小比较。\n')
 if (spanTotal !== closureLineTotal) {
-  console.log(`WARNING: declaration spans total ${spanTotal} != closure total ${closureLineTotal}`)
-  console.log('         spanOf disagreed with closure.mjs — treat these numbers as unreliable until it is fixed.\n')
+  console.log(`WARNING: declaration spans total ${spanTotal} != closure total ${closureLineTotal} (difference ${spanTotal - closureLineTotal})`)
+  console.log('         spanOf and closure DISAGREE — one of them is counting a line the other is not.')
+  console.log('         Do not trust these numbers until the difference is 0. Audit per-member, do not hand-wave "blank lines".\n')
+} else {
+  /**
+   * ── 相等时也要**说出来**，不是静默 ──────────────────────────────────────────────────────────
+   *
+   * observer 那份同源脚本在这里会打印「跨度之和 == 闭包总行数（N == N）」。
+   * 本仓原来差值为 0 时一句不吭 —— 于是「自校验跑过了」和「自校验根本没跑」在输出上一样。
+   * 静默的通过不是证据。
+   */
+  console.log(`跨度之和 == 闭包总行数（${spanTotal} == ${closureLineTotal}），逐成员与编译器 0 差。\n`)
 }
 let idx = 0
 for (const comp of components) {
