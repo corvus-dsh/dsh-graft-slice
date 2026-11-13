@@ -240,6 +240,33 @@ test('meta: measure-efficiency REFUSES fewer than 5 independent runs (exit 2, no
   assert.match(out, />= 5/u, 'the refusal must say the minimum')
 })
 
+test('meta: measure-efficiency self-test covers the verdict shapes, including same-sign with spread > 10%', () => {
+  /**
+   * 用户裁定（2026-11-13）：判决用构造数据覆盖，不靠「跑一次真实测量看它像不像话」。
+   *
+   * 本断言同时钉住两件事：
+   *   ① self-test 必须存在且通过（构造数据覆盖五种判决形态）；
+   *   ② **spread > 10% 时的 REGRESSION 必须自曝「方向一致 N/N」与「± spread」** —— 这是用户点名的形态，
+   *      所以它在真实输出里出现过一次还不够，必须由测试钉住。
+   */
+  let code = 0
+  let out = ''
+  try {
+    out = execFileSync(process.execPath, [join(ROOT, 'scripts', 'measure-efficiency.mjs'), '--self-test'], {
+      cwd: ROOT, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
+    })
+  } catch (error) {
+    code = error.status ?? 1
+    out = `${error.stdout ?? ''}${error.stderr ?? ''}`
+  }
+  assert.equal(code, 0, `measure-efficiency --self-test must pass:\n${out.slice(0, 600)}`)
+  assert.match(out, /SELF-TEST PASS/u, 'the self-test must announce its own result')
+  assert.match(out, /5 runs same sign, spread > 10%/u, 'the case the user named must be one of the covered shapes')
+  assert.match(out, /REGRESSION（方向一致 5\/5，幅度 [\d.]+% ± [\d.]+%）/u,
+    'a REGRESSION with spread > 10% must disclose direction consistency and ± spread')
+  assert.equal((out.match(/^FAIL/mu) ?? []).length, 0, `no case may fail:\n${out.slice(0, 600)}`)
+})
+
 test('meta: every exemption names a real file and states a reason long enough to argue with', () => {
   for (const [name, reason] of EXEMPT) {
     assert.ok(existsSync(join(ROOT, 'scripts', name)), `EXEMPT lists ${name}, which does not exist`)
