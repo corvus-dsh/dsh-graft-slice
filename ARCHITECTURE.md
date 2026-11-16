@@ -580,7 +580,7 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 | 记一条实测事实（供将来拆分时用） | `appendTransitionCard`（L11774..11840，67 行）在 `apply()` 内，7 个调用点全在 apply 内，**可达但不可搬**（不是模块级声明）。它是 `apply()` 体积里最小的一块，搬它只减 2.9%。 |
 | 退出条件 | ① 先产出一份 `apply()` 的 handler 清单（每个 `ctx.on(...)` 的名称、行数、依赖集），作为独立提案的输入；② 拆分的验收必须是「行为面等价」而不是「纯位移」——即 `verify-pure-move` **不适用**，改用「注册的事件名集合 + 每个 handler 的输入输出不变」；③ 在完成 ① 之前，本条目不动手。 |
 
-## TD-22 命令护栏的 `GLOBAL_SEARCH` 分支有真实误报面：`|` 模式串与 `/` 分隔符（P2，2026-11-10 登记）
+## TD-22 命令护栏的 `GLOBAL_SEARCH` 分支有真实误报面：`|` 模式串与 `/` 分隔符（P2，2026-11-10 登记；**2026-11-16 实测已修复**）
 
 | 项 | 内容 |
 |---|---|
@@ -589,9 +589,30 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 | 触发样例 ②：带 `\|` 的模式串 | `Get-ChildItem -Filter '*.md' \| Select-Object Name; Select-String -Path *.md -Pattern 'C2\|backlog'` —— 管道符被当作命令分段，搜索动词 + 分段后的内容被判成全局搜索。改用 glob / grep 工具即通过。 |
 | 触发样例 ③：带 `\|` 的 `Select-String` 模式（2026-11-10 第三次） | `Select-String -Pattern 'a\|b'` 一类写法在本会话被拦；同一构造在用户侧也出现过。两个独立会话、同一分支、同一后果 —— 说明这不是偶发，而是**在参数位出现分隔符**时的稳定误判。 |
 | 为什么不是 bug-free 的边界问题 | 两次都**不是**在扫根目录：一次是在写提交说明，一次是在读本仓自己的 md。护栏把「词/符号出现在参数位」当成了动作 —— 这正是 v112/v123 守住的那一类（`Format-Table` 不是 `format`；`rg "diskpart"` 不是 `diskpart`），只是这次发生在 `/` 与 `\|` 上。 |
-| 修法方向（未实施） | `ESCAPING_ROOT` 的斜杠分支应要求**路径上下文**（如出现在 `rg `/`ls `/`Get-ChildItem ` 之后，或后面紧跟路径分隔或结尾），而不是任意空格包裹的单个 `/`。分段逻辑应只在**命令位**判断搜索动词，与 v112 的 `verbInCommandPosition` 同一条思路。 |
-| 为什么本轮不改 | 改它要动**行为面**（会改变真实命令的判定），属于「改函数签名/判定逻辑」范畴，须单独立项与裁定；而本轮的任务是纯位移搬运。**登记在此，不顺手改。** |
+| 修法方向（**2026-11-16 已实施**） | `ESCAPING_ROOT` 的斜杠分支应要求**路径上下文**（如出现在 `rg `/`ls `/`Get-ChildItem ` 之后，或后面紧跟路径分隔或结尾），而不是任意空格包裹的单个 `/`。分段逻辑应只在**命令位**判断搜索动词，与 v112 的 `verbInCommandPosition` 同一条思路。 |
+| 为什么当时不改 | 改它要动**行为面**（会改变真实命令的判定），属于「改函数签名/判定逻辑」范畴，须单独立项与裁定；而当时那轮的任务是纯位移搬运。**当初登记在此，不顺手改。** |
 | 退出条件 | ① 先写能红证明：上面两个样例必须从 `destructive` 变为 `safe`；② 真正的根扫描（`rg `/`、`Get-ChildItem -Recurse C:\`）必须仍然是 `destructive`（v112/v123 的 D4 已钉住这两条）；③ 两条一起过，才可合并。 |
+| **修复的实现位置** | `src/core/command-guard.ts:85-98`：`SEGMENT_START`（`/(?:^\|[;&]\s*\|\()\s*(?:(?:sudo\|doas\|env\|command\|exec\|&)\s+)*(?<verb>[A-Za-z][\w.-]*)/gu`）+ `verbInCommandPosition()`。动词只在**命令位**才算动词，参数位的同一个词是数据。使用点：L166（`UNCONFINABLE_VERB`）、L182（`DESTRUCTIVE_VERB`）。 |
+| **退出条件达成证据（2026-11-16 实测）** | 三条登记样例实测**全部 `safe`**：① `git commit -m "… / … / …"` → `safe`；② `Get-ChildItem -Filter '*.md' \| … Select-String -Pattern 'C2\|backlog'` → `safe`；③ `Select-String -Pattern 'a\|b'` → `safe`。两条真根扫描实测**仍 `destructive`**：`rg /`、`Get-ChildItem -Recurse C:\`。 |
+| **钉住它的测试** | `test/v216-td22-known-misfire.test.mjs`（4 条）：① 三样例 safe（防误报回归）；② 两真根 destructive（防**漏报**回归，单独成条因为安全退化比可用性退化严重）；③ can-red：把判据换成恒 `destructive` 的桩 ⇒ ①④ 必须红；④ 「同词不同位」机制对照（命令位 `rg /` vs 参数位 `"a / b"`）。 |
+| **一条教训（给下一个人）** | 本 TD 的标题停留在「登记时」，而代码已经修好了。**2026-11-16 有人按标题派工「断言当前仍是 destructive」，差点写出一个一写就红的测试。** 那条任务是在验证代码后才纠正的。**标题是记录，不是事实；判据必须来自实测。** |
+
+## TD-23 `within()` 与 `isWithinRoots()` 是同一防护的两个版本，强度不同（P1，2026-11-16 登记）
+
+> **登记位置说明**：本条属于 **dsh-paradise** 的沙箱代码（`adapters/raw/sandbox.ts`），
+> 但 paradise 仓没有 `ARCHITECTURE.md`，而本仓是四仓的 TD 登记册，所以记在这里，
+> 并在条目首行注明归属。paradise 的 README 第 4 条已有指向本条的说明。
+
+| 项 | 内容 |
+|---|---|
+| 归属 | dsh-paradise · `src/adapters/raw/sandbox.ts` |
+| 现状 | worker 内的 `within()`（`sandbox.ts:230`）走 `realish()` → `fs.realpathSync`，**会解析 junction，不可绕过**；导出的 `isWithinRoots()`（`sandbox.ts:432`，`readWithin`/`listWithin` 用它）只做 `resolve()` + `startsWith`，**纯词法，可绕过**。 |
+| 实测 | 真实 junction 指向沙箱外 ⇒ `isWithinRoots()` 判为在根内，且**实际读出了根外的秘密文件**（payload `SECRET-OUTSIDE-SANDBOX`）。对照：不经 junction 直读根外路径**被正确拒绝** —— 所以不是「什么都没拦」，是「这条路弱」。 |
+| 为什么是 P1 | 「同一防护有两个版本，对外的是弱版本」不是设计选择，是**判据分裂**。README 第 4 条让读者以为「只有一种 within，且它不解析链接」——那句话对一半，漏掉的那半是「有一份会解析，但用户拿到的不是它」。一个开着 fail-open 的导出件比一个明确声明的边界更危险：读文档的人会按文档做安全假设。 |
+| 修法方向（未实施） | 二选一：① 让 `isWithinRoots()` 也走 `realpathSync`（改变行为，可能影响性能与现有测试）；② 保持两份但**明确命名区分**（`isWithinRootsLexical` vs `isWithinRootsResolved`）并让对外导出名反映强度。**倾向 ②**：两份判据各有正当用途 —— worker 内要安全，调用方预检可能只需要词法快速判定 —— 但名字必须说出自己是哪一个。 |
+| 退出条件 | ① `test/security-known-limit.test.mjs` 的两条断言（worker 不可绕过 / 导出可绕过）必须继续绿，且**若有人统一两份判据导致 worker 被降级，必须红**（该测试 ③ 读源码钉住 `realpathSync`，已实现）；② README 第 4 条措辞订正，说清有两份；③ 决定选 ① 还是 ②。 |
+| 钉住它的测试 | `test/security-known-limit.test.mjs`（paradise 仓，3 条）：① 真实 junction 绕过 `isWithinRoots` + 真读出根外内容 + 直读对照被拒；② can-red：`isWithinRoots` 恒 `true` ⇒ ① 的对照必须失效（实测把 ①② 都打红）；③ 读源码钉住 worker 的 `realish()` 必须继续用 `fs.realpathSync`。 |
+| 与 TD-22 的关系 | 同一天、同一批发现的同一类问题：**判据存在多个版本，其中一个失效**。TD-22 是「同一个词在命令位与参数位」，本条是「同一个路径在真实路径与词法路径」。这不是巧合，是本项目需要的一条通则 —— 见 B5 的判据分裂巡检。 |
 
 ## TD-14 `hard` 与 `strong` 是两份强调词表，并集更合理但会改变加权（P2，2026-11-09 登记）
 

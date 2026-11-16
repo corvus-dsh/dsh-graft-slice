@@ -208,27 +208,58 @@ test('v143: the CI step exists, and when it cannot measure the LOG SAYS SO', () 
    *   ② 缺编译器时静默 `exit 0` → 没跑的东西看起来像通过了。
    *
    * 正确：报告 RESOURCE 并 exit 0，**但日志必须说这次没检查**。
+   *
+   * ── 2026-11-16：判据的**主语**变了，所以这条测试也变了 ────────────────────────────────────────
+   *
+   * 上一版把「RESOURCE 翻译」钉在 ci.yml 的**内联 shell** 上（`-eq 2` / `exit "$code"` …）。
+   * 那是四份实现之一：observer 与 paradise 用 `scripts/run-gate.mjs`，memory 什么都没接，
+   * 只有本仓把翻译写成 11 行 shell。**同一规则四份实现，分叉那天红的是别人。**
+   *
+   * 现在翻译只有一份，在 `scripts/run-gate.mjs` 里（四仓逐字节相同，且互相哈希自校验）。
+   *
+   * 所以这条测试的主语跟着搬：它断言的三件事没变，只是被断言的**文件**从 `ci.yml` 换成了
+   * `run-gate.mjs` —— 而「CI 真的调它」这件事单独由下面第一条断言保证。
+   * 判据没有变松：它仍然要求 ① 不装编译器 ② RESOURCE 必须出声 ③ 真失败必须传播。
    */
   const ci = readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8')
+  const wrapper = readFileSync(join(ROOT, 'scripts', 'run-gate.mjs'), 'utf8')
 
-  assert.match(ci, /node scripts\/type-budget\.mjs/u,
-    'ci.yml must actually run the budget — a gate nobody runs is a comment')
+  // ① the gate is genuinely wired: the step invokes the wrapper, and the wrapper invokes the budget
+  assert.match(ci, /node scripts\/run-gate\.mjs scripts\/type-budget\.mjs/u,
+    'ci.yml must run the budget through run-gate — a gate nobody runs is a comment')
+  assert.match(wrapper, /const script = existsSync\(scriptArg\) \? scriptArg : join\(REPO, scriptArg\)/u,
+    'the wrapper must resolve the gate path it is given (otherwise it wraps nothing)')
 
   const step = /- name: Incremental type budget[\s\S]*?(?=\n {6}- name:|\n {2}[\w-]+:|\s*$)/u.exec(ci)?.[0] ?? ''
   assert.ok(step.length > 0, 'the budget step must be findable in ci.yml')
 
-  // ① must NOT install the compiler just to make the gate绿
+  // ② must NOT install the compiler just to make the gate green
+  //
+  // ⚠️ Checked in BOTH places, and the second one is the load-bearing one now. Since the step is a
+  // single `run: node scripts/run-gate.mjs …` line, `doesNotMatch(step, …)` became nearly vacuous —
+  // it could not match anything simply because there is no `npm install` left in that line to match.
+  // An assertion that cannot fail is the same disease as a skip that reads as a pass. So the same
+  // ban is asserted against the wrapper too, which is where a `npm install typescript` rescue would
+  // actually be written.
   assert.doesNotMatch(step, /npm (?:install|i) .*typescript/u,
     'the step must not install typescript — that turns the gate into an always-red build')
+  assert.doesNotMatch(wrapper, /npm (?:install|i) .*typescript|typescript.*npm (?:install|i)/u,
+    'the wrapper must not install typescript either — the RESOURCE branch is the answer, not a rescue')
+  assert.doesNotMatch(wrapper, /spawnSync\(\s*['"]npm['"]/u,
+    'the wrapper must not shell out to npm: a gate that installs its own dependency is not a gate')
 
-  // ② the RESOURCE branch must be honest, not silent
-  assert.match(step, /-eq 2/u, 'the step must branch on exit 2 (the RESOURCE condition)')
-  assert.match(step, /NOT CHECKED/u, 'the log must say the check did NOT happen')
-  assert.match(step, /not a pass/u, 'the log must say this is not a pass')
-  assert.match(step, /was NOT verified/u, 'the log must name the consequence: the baseline was not verified')
+  // ③ the RESOURCE branch must be honest, not silent — and it lives in the ONE implementation
+  assert.match(wrapper, /run\.status === 2/u, 'the wrapper must branch on exit 2 (the RESOURCE condition)')
+  assert.match(wrapper, /NOT CHECKED/u, 'the log must say the check did NOT happen')
+  assert.match(wrapper, /not a pass/u, 'the log must say this is not a pass')
+  assert.match(wrapper, /nothing was verified by this gate/u,
+    'the log must name the consequence: nothing was verified')
 
-  // ③ a real failure must still propagate (not be swallowed by the RESOURCE branch)
-  assert.match(step, /exit "\$code"/u, 'a non-zero, non-2 exit must propagate so CI can fail')
+  // ④ a real failure must still propagate (not be swallowed by the RESOURCE branch)
+  assert.match(wrapper, /process\.exit\(1\)/u,
+    'a non-zero, non-2 exit must propagate so CI can fail')
+  assert.match(wrapper, /FAILED \(exit \$\{run\.status \?\? 'unknown'\}\)/u,
+    'the failure line must name the exit code that caused it')
 })
 
 test('v143: the baseline number declares its SCOPE — 15 is not "type health"', (t) => {

@@ -207,26 +207,23 @@ jobs:
       # The rule (user ruling 2026-11-12): report RESOURCE and exit 0, but the LOG MUST SAY the
       # check did not happen. Same shape as `t.skip('RESOURCE: …')` in test/v143.
       #
-      # This is also the answer to "a gate nobody runs is a comment" — the reason `check-cycles`
-      # shipped a hard-coded `D:/` path that passed locally and failed here (#118) is that nobody
-      # was running it. Now the step runs on every push, and when it cannot measure, the log says so.
+      # ── CHANGED 2026-11-16: THE TRANSLATION MOVED INTO `scripts/run-gate.mjs` ─────────────────
+      #
+      # This step used to carry the translation INLINE, as 11 lines of shell. Measured across the
+      # workspace, the SAME rule then had four implementations: this shell block, a node script in
+      # observer, the same node script in paradise, and in memory nothing at all (`npm run check`
+      # called `type-budget` bare, so it would go red on any machine without a compiler — a condition
+      # invisible here, because `typescript` resolves from the workspace root).
+      #
+      # All of them were correct on the day, which is why nothing was red. That is the failure mode:
+      # a rule with four implementations fails the day one of them is edited, and shell cannot be
+      # diffed against a node script.
+      #
+      # `scripts/run-gate.mjs` is now byte-identical in all four repositories and CHECKS THAT ITSELF
+      # on every invocation (it hashes its siblings and compares — no frozen hash, because a frozen
+      # hash turns the first legitimate edit into a "fix the hash" reflex). The inline shell is gone.
       - name: Incremental type budget (needs a compiler the runner does not have)
-        run: |
-          set +e
-          node scripts/type-budget.mjs
-          code=$?
-          set -e
-          if [ "$code" -eq 2 ]; then
-            echo "::warning::TYPE BUDGET NOT CHECKED THIS RUN — no typescript on the runner."
-            echo "  This is a RESOURCE condition, not a pass: the 15-defect baseline was NOT verified."
-            echo "  It is enforced on any machine that has a compiler (and by test/v143 there)."
-            exit 0
-          fi
-          if [ "$code" -ne 0 ]; then
-            echo "::error::type-budget FAILED — a touched file gained type errors."
-            exit "$code"
-          fi
-          echo "type-budget: enforced and green."
+        run: node scripts/run-gate.mjs scripts/type-budget.mjs
 
       # ── exact identifier references, never substring matches ──────────────────────────────────
       #

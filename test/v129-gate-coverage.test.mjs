@@ -75,9 +75,11 @@ const KINDS = new Map([
   ['check-readme-counts.mjs', 'GATE'],
   ['check-readme-tally.mjs', 'GATE'],
   ['verify-bundle.mjs', 'GATE'],
+  ['run-gate.mjs', 'GATE'],
   ['v140-audit', 'GATE'],
 
   // ── INSTRUMENT: measures ──
+  ['bench-smoke.mjs', 'INSTRUMENT'],
   ['audit-line-numbers.mjs', 'INSTRUMENT'],
   ['closure.mjs', 'INSTRUMENT'],
   ['move-gate.mjs', 'INSTRUMENT'],
@@ -127,6 +129,7 @@ const NOT_A_CI_STEP = new Map([
   ['scan-real-logs.mjs', 'development smoke test over every persisted log on this machine — a RESOURCE condition'],
   ['validate-real-format.mjs', 'optional deep check against the real v4 validator; the committed corpus sample is the CI-safe subset'],
   ['closure.mjs', 'needs the TypeScript compiler, which this package deliberately does not depend on; it exits 2 by design in CI'],
+  ['bench-smoke.mjs', 'a MEASURING instrument for the B0.5 performance baseline: it records one pure function\'s median over 100k calls and ALWAYS exits 0, so it can assert nothing. Its numbers are quoted in docs/PERF-BASELINE-2026-11-16.md. Deliberately no threshold: a threshold needs a known normal range, and that range does not exist yet'],
   ['verify-pure-move.mjs', 'compares the working tree to a git ref, which is IDENTICAL by construction in CI; its --self-test is run locally'],
   ['verify-bundle-purity.mjs', 'compares two COMMITS (--before/--after <ref>), so there is nothing to compare on a tree with no pending move; run once per move and quoted in that commit'],
   ['measure-efficiency.mjs', 'a timing instrument needing two built bundles (pre/post move); timing is machine-dependent by construction, so its verdict is quoted in each move commit instead of asserted here'],

@@ -27,7 +27,7 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "node --check index.js",
+    "check": "node scripts/build.mjs && node scripts/check-cycles.mjs && node scripts/run-gate.mjs scripts/type-budget.mjs && node scripts/check-readme-counts.mjs && node scripts/check-docs.mjs && node --test test/*.test.mjs",
     "check:docs": "node scripts/check-docs.mjs",
     "test": "node --test test/*.test.mjs",
     "demo": "node scripts/demo.mjs",
