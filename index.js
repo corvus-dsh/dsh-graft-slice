@@ -741,7 +741,17 @@ function addPresetRows(out                   , rows         , where        )    
 function readCompactionMounts(ctxLike     )                    {
   const out                    = []
   try {
-    const loader = ctxLike?.loader
+    /**
+     * `stableCtx` is `{ ...ctx, get(...) }` — spreading a cordis context does NOT copy
+     * service properties such as `loader`. So the loader must be resolved the same way
+     * every other late-bound service is: property first, then `ctx.get('loader')`.
+     */
+    const direct = ctxLike?.loader
+    const loader = direct !== undefined
+      ? direct
+      : typeof ctxLike?.get === 'function'
+        ? ctxLike.get('loader')
+        : undefined
     if (loader === undefined || typeof loader.entries !== 'function') return out
     for (const entry of loader.entries()) {
       const name = entry?.options?.name

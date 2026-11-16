@@ -171,3 +171,18 @@ test('v221 ⑦: 用户水位已经更低时不抬高；没有后端时原样返�
   assert.equal(none.compaction.present, false)
   assert.equal(none.hardAt, 0.75)
 })
+
+test('v221 ⑧: stableCtx 形状（无 .loader 属性、只有 get("loader")）也必须读到挂载点', () => {
+  /**
+   * `stableCtx` is `{ ...ctx, get(...) }`. Spreading a cordis context does NOT copy
+   * service properties, so `.loader` is undefined there while `get('loader')` works.
+   * Reading only the property silently produced "no backend" — the exact failure this
+   * test pins: without this, the ceiling never applies on the hot path.
+   */
+  const mounts = readCompactionMounts({
+    get: (name) => (name === 'loader' ? loaderOf([presetOf('cordis', undefined)]) : undefined),
+  })
+  assert.equal(mounts.length, 1)
+  assert.equal(mounts[0].where, 'preset:cordis')
+  assert.equal(mounts[0].auto, true)
+})
