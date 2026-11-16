@@ -401,6 +401,7 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 | `core/command-policy.ts` | 把风险类别折成放行、复核或拒绝 | `evaluateCommandPolicy` | `core/command-guard.ts` |
 | `core/constraint-anchor.ts` | 指出继承来的硬约束出自哪个 seq 与哪一代 | `inheritedConstraintAnchor` | `core/message-source.ts`, `core/watermark.ts` |
 | `core/constraint-shape.ts` | 按结构判一条文本是不是完整的约束句 | `shapeOfConstraint` | — |
+| `core/content-classifier.ts` | 按 `source.kind` 分类 user/message；未登记 kind 显形为 unclassified（内容分类器，未接线） | `classifyBySource`, `classifyHumanText`, `summarizeUnclassified` | — |
 | `core/gateway-types.ts` | 宿主网关与存储层的类型面 | `PluginContextLike` 等类型 | `core/watermark.ts` |
 | `core/goal-extraction.ts` | 从日志里抽出目标与当前 DAG 节点 | `extractGoal` | `core/host-shape.ts`, `core/message-source.ts`, `core/text-normalize.ts`, `core/tape-shape.ts`, `core/watermark.ts`, `utils/serialize.ts` |
 | `core/graft-config.ts` | 插件的配置形状 | `GraftConfig` | `core/command-policy.ts` |
