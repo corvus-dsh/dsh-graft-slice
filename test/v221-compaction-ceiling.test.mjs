@@ -1,0 +1,173 @@
+/**
+ * ── v221: 压缩上限 —— 切片必须先于宿主自动压缩 ───────────────────────────────────────────────
+ *
+ * 缺陷（2026-11-16，DSH 0.2.2-rc.1）：`dsh-compaction-basic` 默认 `auto: true`，其阈值
+ *   `floor(min(W × 0.8, W − O − 65536))`
+ * 在本 profile（W=1,048,576、O=256,000）等于 **69.34%** —— 低于 graft 的 70% 提示与 75% 切点。
+ * 于是压缩在 graft 连预警都没发之前就压完了。修复不是调参，而是把 graft 的水位**几何地**
+ * 压到宿主阈值之下（见 `src/core/compaction-guard.ts`）。
+ *
+ * 本文件把三条纪律钉死（前三条同时就是 can-red）：
+ *   ① 假 loader 报 auto:true ⇒ effectiveHardAt 必须 < 压缩阈值，且 `logger.error` 被调用；
+ *   ② 假 loader 报 auto:false ⇒ effectiveHardAt 保持用户配置（0.75），无 error；
+ *   ③ O 不可读 ⇒ `source: 'conservative'`、hardAt = min(hardAt, 0.55)，且 reason **说出来**
+ *      （RESOURCE / not a pass）—— 不许静默降级。
+ *
+ * 另加：loader 扫描（host/preset/group/disabled）、多后端取最早阈值、用户水位已更低时不抬高。
+ */
+
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import {
+  COMPACTION_CONSERVATIVE_HARD_AT,
+  alertCompactionMounts,
+  applyCompactionCeiling,
+  readCompactionMounts,
+} from '../src/core/compaction-guard.ts'
+
+const W = 1_048_576
+const O = 256_000
+/** min(0.8, 1 − 256000/1048576 − 65536/1048576) = 0.693359… → 0.6934 */
+const HOST_RATIO = 0.6934
+
+const loaderOf = (entries) => ({ entries: () => entries })
+
+/** One `@deepseek-ai/dsh-agent-preset` row containing a compaction group with children. */
+const presetOf = (id, compactionConfig) => ({
+  id: `preset-${id}`,
+  options: {
+    name: '@deepseek-ai/dsh-agent-preset',
+    config: {
+      id,
+      order: 1,
+      plugins: [
+        { id: 'persona', name: '@deepseek-ai/dsh-persona' },
+        {
+          id: 'compaction',
+          name: 'cordis:group',
+          group: true,
+          isolate: { compaction: true, toolResultPruner: true },
+          config: [
+            {
+              id: 'compaction-basic',
+              name: '@deepseek-ai/dsh-compaction-basic',
+              ...(compactionConfig === undefined ? {} : { config: compactionConfig }),
+            },
+            { id: 'command-compact', name: '@deepseek-ai/dsh-command-compact' },
+          ],
+        },
+      ],
+    },
+  },
+})
+
+const mountOfPreset = (compactionConfig) => readCompactionMounts({ loader: loaderOf([presetOf('cordis', compactionConfig)]) })
+
+test('v221 ①: loader 扫描 —— host 与 preset 都看、disabled 跳过、config 被读出来', () => {
+  const mounts = readCompactionMounts({
+    loader: loaderOf([
+      // the Web surface disables the host row: it must NOT count
+      { id: 'compaction-basic', options: { name: '@deepseek-ai/dsh-compaction-basic' }, disabled: true },
+      presetOf('cordis', { thresholdRatio: 0.7, headroomTokens: 1234 }),
+    ]),
+  })
+  assert.deepEqual(mounts, [
+    { where: 'preset:cordis', auto: true, thresholdRatio: 0.7, headroomTokens: 1234 },
+  ])
+  // a mounted (enabled) host row also counts — TUI / headless has no presets
+  const host = readCompactionMounts({
+    loader: loaderOf([{ id: 'compaction-basic', options: { name: '@deepseek-ai/dsh-compaction-basic' } }]),
+  })
+  assert.equal(host.length, 1)
+  assert.equal(host[0].where, 'host')
+  assert.equal(host[0].auto, true)
+  assert.equal(host[0].thresholdRatio, 0.8) // the backend's own default
+  assert.equal(host[0].headroomTokens, 65536)
+  // unreadable loader is "unknown", not "absent": no mounts, caller keeps its watermarks
+  assert.deepEqual(readCompactionMounts({}), [])
+})
+
+test('v221 ② can-red: auto:true ⇒ 有效 hardAt 必须低于压缩阈值，logger.error 被点名', () => {
+  const mounts = mountOfPreset(undefined)
+  const errors = []
+  const alerted = alertCompactionMounts(mounts, { error: (message) => errors.push(message) })
+  assert.equal(alerted, true, 'auto:true 必须报警')
+  assert.equal(errors.length, 1)
+  assert.match(errors[0], /AUTO-COMPACTION IS ON/u)
+  assert.match(errors[0], /preset:cordis/u)
+
+  const out = applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, mounts, W, O)
+  assert.equal(out.compaction.source, 'computed')
+  assert.equal(out.compaction.auto, true)
+  assert.equal(out.compaction.thresholdRatio, HOST_RATIO)
+  assert.equal(out.hardAt, 0.6734, 'hardAt 必须是阈值 − 0.02')
+  assert.equal(out.warnAt, 0.6434, 'warnAt 必须再低 0.03')
+  assert.ok(out.hardAt < out.compaction.thresholdRatio, '切片必须严格早于压缩')
+  // the old, broken pair would have lost the race — assert that this is what changed
+  assert.ok(0.75 >= out.compaction.thresholdRatio, '0.75 本来就在压缩阈值之上')
+})
+
+test('v221 ③ can-red: auto:false ⇒ 水位保持用户配置，且不报警', () => {
+  const mounts = mountOfPreset({ auto: false })
+  const errors = []
+  const alerted = alertCompactionMounts(mounts, { error: (message) => errors.push(message) })
+  assert.equal(alerted, false)
+  assert.equal(errors.length, 0)
+
+  const out = applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, mounts, W, O)
+  assert.equal(out.compaction.source, 'off')
+  assert.equal(out.compaction.auto, false)
+  assert.equal(out.hardAt, 0.75)
+  assert.equal(out.warnAt, 0.7)
+  assert.equal(out.compaction.thresholdRatio, undefined)
+})
+
+test('v221 ④ can-red: O 不可读 ⇒ conservative 0.55，且 reason 必须说出来（不许静默降级）', () => {
+  const mounts = mountOfPreset(undefined)
+  const out = applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, mounts, W, undefined)
+  assert.equal(out.compaction.source, 'conservative')
+  assert.equal(out.compaction.thresholdRatio, undefined, '算不出来时不能报一个假阈值')
+  assert.equal(out.hardAt, COMPACTION_CONSERVATIVE_HARD_AT)
+  assert.equal(out.warnAt, 0.52)
+  assert.match(out.compaction.reason, /RESOURCE/u)
+  assert.match(out.compaction.reason, /not a pass/u)
+  assert.match(out.compaction.reason, /O=unreadable/u)
+})
+
+test('v221 ⑤: W 也不可读时同样落到 conservative（不是「W=0 所以安全」）', () => {
+  const mounts = mountOfPreset(undefined)
+  const out = applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, mounts, 0, O)
+  assert.equal(out.compaction.source, 'conservative')
+  assert.equal(out.hardAt, 0.55)
+  assert.match(out.compaction.reason, /W=unknown/u)
+})
+
+test('v221 ⑥: 多个后端取最早的那个阈值（config 是 per-mount 的，不硬编码）', () => {
+  // first backend is default (0.8/65536) → 0.6934; second reserves 200k:
+  // 1 − 256000/1048576 − 200000/1048576 = 0.5651. The slice must respect the
+  // EARLIEST compression, so 0.5651 wins (and hardAt = 0.5651 − 0.02 = 0.5451).
+  const mounts = readCompactionMounts({
+    loader: loaderOf([
+      presetOf('cordis', undefined),
+      presetOf('ptc', { headroomTokens: 200_000 }),
+    ]),
+  })
+  assert.equal(mounts.length, 2)
+  const out = applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, mounts, W, O)
+  assert.equal(out.compaction.source, 'computed')
+  assert.equal(out.compaction.thresholdRatio, 0.5651)
+  assert.equal(out.hardAt, 0.5451)
+})
+
+test('v221 ⑦: 用户水位已经更低时不抬高；没有后端时原样返回', () => {
+  const mounts = mountOfPreset(undefined)
+  const low = applyCompactionCeiling({ warnAt: 0.4, hardAt: 0.5 }, mounts, W, O)
+  assert.equal(low.hardAt, 0.5, 'min() 不能把用户更低的切点抬高')
+  assert.equal(low.warnAt, 0.4)
+
+  const none = applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, [], W, O)
+  assert.equal(none.compaction.source, 'off')
+  assert.equal(none.compaction.present, false)
+  assert.equal(none.hardAt, 0.75)
+})

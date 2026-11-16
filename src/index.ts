@@ -68,6 +68,14 @@ import {
   watermarkCache,
 } from './core/watermark.js'
 import type { GraftCostEstimate, GraftCostInput, SessionEventLike, TokenWatermark, WatermarkOptions, WatermarkThresholds } from './core/watermark.js'
+/**
+ * v0.37: the compaction ceiling. Host `dsh-compaction-basic` is mounted with `auto: true`
+ * by default and its effective threshold here is 69.34% — BELOW graft's warning line.
+ * `core/compaction-guard.ts` computes the host threshold and lowers graft's cutoffs under
+ * it, so "slice before compaction" becomes geometry instead of configuration good faith.
+ */
+import { alertCompactionMounts, applyCompactionCeiling, readCompactionMounts } from './core/compaction-guard.js'
+import type { CompactionCeiling } from './core/compaction-guard.js'
 export {
   calculateSafeWatermark,
   deriveAutoTapeBudget,
@@ -8067,7 +8075,11 @@ async function autoGraftIfNeeded(
     // v0.18: the cutoff is DERIVED from the window and the estimated cost of the
     // handoff itself (see `calculateSafeWatermark`), not read from a constant.
     // `watermarkMode: 'fixed'` restores the historical ratios exactly.
-    const thresholds = effectiveWatermarks(settings, watermark)
+    //
+    // v0.37: and it is CAPPED below the host's auto-compaction threshold. This is the
+    // gate that actually force-grafts, so it must use the governed pair — reading the
+    // uncapped `effectiveWatermarks` here is exactly how compaction won the last time.
+    const thresholds = await governedWatermarks(ctx, settings, sourceSessionId, watermark)
     if (watermark.ratio < thresholds.hardAt) return undefined
 
     // v6.3 module 1: never cut a half-finished step.
@@ -8520,11 +8532,79 @@ function resolveMemoryPaths(settings: Required<GraftConfig>): { memoryDir: strin
   return { memoryDir, skillsDir }
 }
 
+/**
+ * ── v0.37: the output reservation (O) the next request charges to the same window ──────────────
+ *
+ * The compaction threshold is `min(W × ratio, W − O − headroom)`. `W` comes from the meter;
+ * `O` is the routed request's own `maxTokens` — the adapter materializes its default into the
+ * prepared envelope, which the session records in `requestHeader()`. Falling back to
+ * `llm.resolveModelInfo` covers the pre-first-request window. When neither is readable we
+ * return `undefined` on purpose: the caller must then land on the CONSERVATIVE ceiling
+ * instead of pretending the 0.75 watermark is safe (RESOURCE is not a pass).
+ */
+async function readReservedOutputTokens(ctx: PluginContextLike, sessionId: string): Promise<number | undefined> {
+  try {
+    const live = ctx.get?.('sessions')?.get?.(sessionId) as any
+    const header = live !== undefined && typeof live.requestHeader === 'function' ? live.requestHeader() : undefined
+    const config = isRecord(header?.config) ? header.config : {}
+    if (typeof config.maxTokens === 'number' && Number.isFinite(config.maxTokens) && config.maxTokens > 0) {
+      return config.maxTokens
+    }
+    const provider = typeof config.provider === 'string' && config.provider.length > 0 ? config.provider : undefined
+    const model = typeof config.model === 'string' && config.model.length > 0 ? config.model : undefined
+    const llm = ctx.get?.('llm') as any
+    if (provider !== undefined && model !== undefined && typeof llm?.resolveModelInfo === 'function') {
+      const info = await llm.resolveModelInfo(provider, model)
+      const fallback = Number(info?.defaultMaxTokens)
+      if (Number.isFinite(fallback) && fallback > 0) return fallback
+    }
+  } catch {
+    // Unreadable stays unreadable; the conservative ceiling states that out loud.
+  }
+  return undefined
+}
+
+/** Sessions already told their ceiling is conservative (one line per session, not per step). */
+const conservativeCeilingWarned = new Set<string>()
+
+/**
+ * The thresholds a session is ACTUALLY governed by, after the compaction ceiling.
+ *
+ * Every automatic decision (nudge, force cut, turn-stopping) goes through this; reading the
+ * raw `effectiveWatermarks` directly is how the slice used to lose the race to compaction.
+ */
+async function governedWatermarks(
+  ctx: PluginContextLike,
+  settings: Required<GraftConfig>,
+  sessionId: string,
+  watermark: { contextWindow?: number } | undefined,
+  logger?: { warn?: (message: string) => void },
+): Promise<WatermarkThresholds & { compaction?: CompactionCeiling }> {
+  const base = effectiveWatermarks(settings, watermark)
+  if (watermark === undefined) return base
+  const mounts = readCompactionMounts(ctx)
+  if (!mounts.some((mount) => mount.auto)) return base
+  const reserved = await readReservedOutputTokens(ctx, sessionId)
+  const { warnAt, hardAt, compaction } = applyCompactionCeiling(
+    base,
+    mounts,
+    Number(watermark.contextWindow ?? 0),
+    reserved,
+  )
+  if (compaction.source === 'conservative' && !conservativeCeilingWarned.has(sessionId)) {
+    conservativeCeilingWarned.add(sessionId)
+    logger?.warn?.(`[dsh-graft-slice] compaction ceiling is CONSERVATIVE for ${sessionId}: ${compaction.reason}`)
+  }
+  return { ...base, warnAt, hardAt, compaction }
+}
+
 export interface DebugStatusInput {
   sessionId?: string
   workspace?: string
   section?: 'all' | 'watermark' | 'locks' | 'memory'
   watermark?: TokenWatermark
+  /** v0.37: the compaction ceiling that actually governs the watermark panel. */
+  compaction?: CompactionCeiling
   settings: Required<GraftConfig>
   generation?: number
   graceTurnsRemaining?: number
@@ -8573,7 +8653,14 @@ export function collectDebugStatus(input: DebugStatusInput): Record<string, unkn
     const watermark = input.watermark
     // v0.18: the two ratios are DERIVED, so the panel reports the derivation as
     // well as the numbers — "why did the cutoff move to 0.61?" is answered here.
-    const thresholds = effectiveWatermarks(settings, watermark)
+    //
+    // v0.37: and they are CAPPED by the host's compaction threshold when a backend is
+    // mounted with auto on. The live caller passes that ceiling in; the pure function
+    // must not pretend the uncapped 0.75 pair governs the session when it does not.
+    const base = effectiveWatermarks(settings, watermark)
+    const thresholds = input.compaction === undefined
+      ? base
+      : { ...base, warnAt: input.compaction.effectiveWarnAt, hardAt: input.compaction.effectiveHardAt }
     const warnAt = thresholds.warnAt
     const hardAt = thresholds.hardAt
     out.watermark = watermark === undefined
@@ -8616,6 +8703,7 @@ export function collectDebugStatus(input: DebugStatusInput): Record<string, unkn
       graceTurnsRemaining: input.graceTurnsRemaining ?? 0,
       reGraftBlocked: (input.graceTurnsRemaining ?? 0) > 0,
     }
+    if (input.compaction !== undefined) out.compaction = { ...input.compaction }
   }
 
   if (section === 'all' || section === 'locks') {
@@ -9033,6 +9121,21 @@ export function apply(ctx: PluginContextLike, config: GraftConfig = {}): void {
     }
   } catch (error) {
     ctx.logger?.warn?.(`[dsh-graft-slice] lock sweep failed: ${String((error as any)?.message ?? error)}`)
+  }
+  /**
+   * ── v0.37: 压缩上限的激活报警 ────────────────────────────────────────────────────────────────
+   *
+   * Host `dsh-compaction-basic` 默认 `auto: true`（实测 DSH 0.2.2-rc.1：本 profile 的有效阈值
+   * 69.34%，低于 graft 的 70% 提示 / 75% 切点）。下面的 ceiling 让切片按几何先发生，但想「彻底
+   * 不压缩」的操作者必须在 profile 的 preset config 里关掉它。这里用 `error` 不用 `warn`：
+   * 一个会静默输给压缩的配置是缺陷，不是提示。
+   */
+  try {
+    alertCompactionMounts(readCompactionMounts(ctx), ctx.logger)
+  } catch (error) {
+    ctx.logger?.warn?.(
+      `[dsh-graft-slice] compaction guard probe failed: ${String((error as any)?.message ?? error)}`,
+    )
   }
   // v7.0: the chain guard must survive a restart, so its marks are durable.
   loadGraftTargetStore(ctx)
@@ -9763,7 +9866,11 @@ async function appendTransitionCard(
       if (chainProtected && (autoGraftStates.get(agentId) ?? 'idle') === 'idle') {
         const watermark = await readTokenWatermark(stableCtx, agentId, settings)
         watermarkForNudge = watermark
-        if (watermark !== undefined && watermark.ratio >= effectiveWatermarks(settings, watermark).warnAt) {
+        const thresholds =
+          watermark === undefined
+            ? undefined
+            : await governedWatermarks(stableCtx, settings, agentId, watermark, ctx.logger)
+        if (watermark !== undefined && thresholds !== undefined && watermark.ratio >= thresholds.warnAt) {
           appendGraftAudit({
             at: new Date().toISOString(),
             kind: 'chain-guard',
@@ -9781,7 +9888,10 @@ async function appendTransitionCard(
       if (autoGraftApplies && state === 'idle') {
         const watermark = await readTokenWatermark(stableCtx, agentId, settings)
         watermarkForNudge = watermark
-        const thresholds = watermark === undefined ? undefined : effectiveWatermarks(settings, watermark)
+        const thresholds =
+          watermark === undefined
+            ? undefined
+            : await governedWatermarks(stableCtx, settings, agentId, watermark, ctx.logger)
         if (watermark !== undefined && thresholds !== undefined && watermark.ratio >= thresholds.hardAt) {
           // v6.3 module 4: confirm mode asks here; the answer arrives next step.
           if (settings.graftMode === 'confirm' && !pendingConfirms.has(agentId)) {
@@ -9890,7 +10000,9 @@ async function appendTransitionCard(
         watermarkForNudge = await readTokenWatermark(stableCtx, agentId, settings)
       }
       const nudgeThresholds =
-        watermarkForNudge === undefined ? undefined : effectiveWatermarks(settings, watermarkForNudge)
+        watermarkForNudge === undefined
+          ? undefined
+          : await governedWatermarks(stableCtx, settings, agentId, watermarkForNudge, ctx.logger)
       const modelExtra =
         !chainProtected && settings.modelDrivenGraft
           ? takeModelDrivenNudge(
@@ -10123,7 +10235,12 @@ async function appendTransitionCard(
    * occupies. So a section is structurally immune: no retention budget, no
    * `retainTokens`, no `/compact`, and no overflow path can drop it.
    *
-   * Why this matters even though `compaction-basic` runs with `auto: false`:
+   * Why this matters even though the DEFAULT assumption was that `compaction-basic`
+   * runs with `auto: false` — which was FALSE (measured 2026-11-16: auto defaults to
+   * true and its effective threshold is 69.34%, BELOW our 70%/75%. See the compaction
+   * ceiling in watermark/compaction-guard). The section is still the right place for
+   * constraints, because it is structurally immune to compaction regardless of whether
+   * auto is on:
    *   - `/compact` (command-compact) still calls the manual path on demand;
    *   - another profile or a future bundle may mount a compaction backend;
    *   - `compactionRegion` can be invoked by any plugin.
@@ -10378,7 +10495,7 @@ async function appendTransitionCard(
         })
         // Only a measurable session gets a ROW; every session gets an ENTRY above.
         if (watermark === undefined) continue
-        const rowThresholds = effectiveWatermarks(settings, watermark)
+        const rowThresholds = await governedWatermarks(stableCtx, settings, sessionId, watermark, ctx.logger)
         const mark = graftTargets.get(sessionId)
         const completed = (() => {
           const live = (stableCtx as any).sessions?.get?.(sessionId) as any
@@ -10419,12 +10536,12 @@ async function appendTransitionCard(
     // that governs the HIGHEST session and the cost model behind it, rather than
     // two constants the operator cannot reconcile with what the rows say.
     const representative = rows[0]
-    const thresholds = effectiveWatermarks(
-      settings,
+    const thresholds =
       representative === undefined
-        ? undefined
-        : { contextWindow: representative.contextWindow },
-    )
+        ? effectiveWatermarks(settings, undefined)
+        : await governedWatermarks(stableCtx, settings, representative.sessionId, {
+            contextWindow: representative.contextWindow,
+          }, ctx.logger)
     const cost = estimateGraftCost(thresholds.windowLimit, {
       growthPerTurnTokens: settings.growthTokensPerTurn,
       reserveTurns: settings.growthReserveTurns,
@@ -11289,6 +11406,18 @@ async function appendTransitionCard(
       const explicitWorkspace = isRecord(args) && typeof args.workspace === 'string' ? args.workspace.trim() : ''
 
       const watermark = sessionId.length > 0 ? await readTokenWatermark(stableCtx, sessionId, settings) : undefined
+      /**
+       * v0.37: report the compaction ceiling the session is actually governed by.
+       * `applyCompactionCeiling` is pure; `readReservedOutputTokens` is where the
+       * RESOURCE downgrade becomes visible, so the panel can never show a confident
+       * 0.75 pair while the slice is really running at the conservative 0.55.
+       */
+      const compactionCeiling = applyCompactionCeiling(
+        effectiveWatermarks(settings, watermark),
+        readCompactionMounts(stableCtx),
+        Number(watermark?.contextWindow ?? 0),
+        sessionId.length > 0 ? await readReservedOutputTokens(stableCtx, sessionId) : undefined,
+      ).compaction
       const generation = sessionId.length > 0 ? graftGenerationOf(sessionId) : 0
       const graceRemaining = (() => {
         if (sessionId.length === 0) return 0
@@ -11342,6 +11471,7 @@ async function appendTransitionCard(
             : {}
           : { workspace: explicitWorkspace }),
         ...(watermark === undefined ? {} : { watermark }),
+        compaction: compactionCeiling,
         settings,
         generation,
         graceTurnsRemaining: graceRemaining,
