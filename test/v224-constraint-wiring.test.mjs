@@ -132,7 +132,13 @@ test('③ 工具接线：add 进 prompt（不经正则打分），promote/demote
     const ctx = makeCtx({ sourceLog: log, paths: { data: dir } })
     apply(ctx, { dataDir: dir })
     const tool = ctx._tools.get('graft_constraint')
-    const declared = '每次提交前都要跑一遍 npm run check'
+    /**
+     * 这条文本必须同时满足两个门：形状门（是一句独立的话）与 add 的额外门槛（读起来像规则）。
+     * 第一版是 `每次提交前都要跑一遍 npm run check` —— 形状合格但**没有规则词、也不是祈使开头**，
+     * 所以被 add 的严格判据拒绝了。那是判据在正常工作，不是测试该绕过去的东西：
+     * 想让它别再被抽上来，用 reject；想主动声明它，就得说成一条规则。
+     */
+    const declared = '必须每次提交前都跑一遍 npm run check'
 
     // promote 在没有否决记录时必须拒绝 —— 否则回执会声称一次没发生的撤销。
     const early = await call(tool, { action: 'promote', text: declared, workspace: WS }, log.session.id)
@@ -234,6 +240,70 @@ test('⑥ 旧记录（无 workspace）：生产路径上不参与过滤，且 WA
     assert.ok(plan.constraintIntegrity.candidateCount >= 1, '旧记录不许过滤任何东西')
     assert.equal(plan.warnings.filter((w) => /workspace/u.test(w)).length, 1,
       `必须恰好一条点名 workspace 的 WARN，实测 ${JSON.stringify(plan.warnings)}`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('⑧ 两个方向用不同的门槛：reject 接受「不像规则」，add 拒绝它（放宽朝安全侧）', async () => {
+  /**
+   * ── THE TWO DIRECTIONS DO NOT FAIL THE SAME WAY, SO THEY MUST NOT BE JUDGED THE SAME WAY ────────
+   *
+   * Measured before this assertion existed: one judge for all four actions, and the STRICT part of it
+   * (`isConstraintSentence` / `IMPERATIVE_START`) was not applied to `add` at all — only the shape gate
+   * was. So the model could `add` any well-formed-but-not-a-rule sentence and have it injected into
+   * the prompt on every later turn without ever being re-judged.
+   *
+   * The correct asymmetry:
+   *
+   *   reject / demote — the text LEAVES the pool. The user is pointing at a specific string, often one
+   *                     extraction produced by splitting a paragraph. Demanding it read like an
+   *                     imperative refuses the user's own words at the moment they are being precise,
+   *                     and a loose record cannot inject anything.
+   *
+   *   add / promote   — the text ENTERS the pool and is re-injected forever. A non-rule stored here is
+   *                     permanent prompt content ⇒ it must also read like a rule.
+   *
+   * Relaxing the SAFE side is the whole point: if the relaxation were on `add`, this test would have to
+   * assert that a non-rule got into the prompt, which is the failure TD-11 exists to prevent.
+   */
+  const dir = mkdtempSync(join(tmpdir(), 'graft-wiring-two-modes-'))
+  try {
+    const log = logWithRule('session-wiring-modes')
+    const ctx = makeCtx({ sourceLog: log, paths: { data: dir } })
+    apply(ctx, { dataDir: dir })
+    const tool = ctx._tools.get('graft_constraint')
+
+    /**
+     * A sentence that is a perfectly good standalone sentence, contains no rule vocabulary, and does
+     * not open with an imperative. `shapeOfConstraint` is happy with it — that is exactly the gap.
+     */
+    const notARule = '那个文件在星期二之后就不需要了。'
+
+    const rejected = await call(tool, { action: 'reject', text: notARule, workspace: WS }, log.session.id)
+    assert.equal(rejected.ok, true,
+      `reject 必须接受「不像规则但形状合格」的文本：用户就是指着这一句说别再用。实测：${JSON.stringify(rejected)}`)
+    assert.equal(rejected.effect, 'rejected')
+
+    let error
+    try {
+      await call(tool, { action: 'add', text: notARule, workspace: WS }, log.session.id)
+    } catch (caught) {
+      error = caught
+    }
+    assert.ok(error !== undefined,
+      'add 必须拒绝「不像规则」的文本 —— 它会进 prompt 且不再被重判形状，放它进来就是 TD-11 的破口')
+    assert.match(String(error?.message ?? error), /add\/promote 只接受/u, '拒绝消息要说明门槛与替代动作')
+    // 它还必须是可执行的建议：告诉用户该用哪个 action。
+    assert.match(String(error?.message ?? error), /reject/u)
+
+    /**
+     * And the strictness is not accidental: a real rule still passes, so the gate is a filter rather
+     * than a wall. Without this half, the test would be satisfied by refusing everything.
+     */
+    const realRule = '绝对禁止在没有备份的情况下删除任何脚本'
+    const added = await call(tool, { action: 'add', text: realRule, workspace: WS }, log.session.id)
+    assert.equal(added.ok, true, `真正的规则必须能 add。实测：${JSON.stringify(added)}`)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

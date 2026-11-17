@@ -11931,6 +11931,32 @@ async function appendTransitionCard(
        * later reader allowed to trust the store: after this check, "it is in the store" implies "it is
        * a standalone sentence". A fragment stored now would be re-injected without ever being
        * re-judged, which is the five-fragment failure of generation 8 with a new door.
+       *
+       * ── BUT THE TWO DIRECTIONS DO NOT FAIL THE SAME WAY (measured 2026-11-17) ────────────────────
+       *
+       * One judge for all four actions was the first version. It was wrong, and the probe showed why:
+       *
+       *     `那个文件在星期二之后就不需要了。`   reject ⇒ ok, add ⇒ ok      (shape gate says fine)
+       *     `在没有备份的情况下删除`             reject ⇒ ok                 (half a sentence)
+       *     `| 必须 | 禁止 | 绝对 |`             reject ⇒ S2_TABLE refused
+       *
+       * So `shapeOfConstraint` was never the thing demanding a rule-like sentence — it only refuses
+       * fragments that cannot identify anything. The stricter "does this read as a rule" test
+       * (`isConstraintSentence` / `ACTION_PATTERN`) lived in the EXTRACTION path and was never called
+       * here. That is the gap this branch closes, and it closes it in ONE direction:
+       *
+       *   add / promote  put the text INTO the pool, where it is re-injected on every later turn
+       *                  without being judged again. A non-rule stored here is permanent prompt
+       *                  content ⇒ it must ALSO pass the rule vocabulary test.
+       *
+       *   reject / demote take the text OUT. The text the user points at is whatever extraction
+       *                  produced, and demanding it read like a command would refuse the user's own
+       *                  words back to them at exactly the moment they are being precise. A loose
+       *                  record cannot inject anything; the worst case is a rule the user wanted gone
+       *                  stays gone ⇒ the shape gate alone is the right bar.
+       *
+       * The shape gate still applies to ALL FOUR: a record keyed on a table row would match nothing no
+       * matter which direction wrote it.
        */
       const shape = shapeOfConstraint(text)
       if (shape.broken) {
@@ -11941,6 +11967,18 @@ async function appendTransitionCard(
         )
       }
       if (text.length > 800) throw graftError('INVALID_ARGUMENT', `text is too long (${text.length} > 800 characters)`)
+      /**
+       * The strict half, for the two actions that ADD. `action` is validated above, so the else-branch
+       * is exactly reject/demote — no third case can slip through this test.
+       */
+      const addsToPool = action === 'add' || action === 'promote'
+      if (addsToPool && !isConstraintSentence(text) && !IMPERATIVE_START.test(text)) {
+        throw graftError(
+          'INVALID_ARGUMENT',
+          'add/promote 只接受「读起来像一条规则」的句子（规则词或祈使开头），因为主动声明会被无条件注入 '
+            + 'prompt 且不再重判形状。如果只是想让它别再被抽上来，用 reject —— 那条轨道不要求这个形状。',
+        )
+      }
 
       const sessionId = typeof exec?.agent?.id === 'string' ? exec.agent.id : ''
       const requested = String(args.workspace ?? '').trim()
