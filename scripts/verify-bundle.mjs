@@ -17,6 +17,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -243,9 +244,37 @@ if (surface !== undefined && !surface.includes('default')) {
    * The declaration may live in the commit message OR in an env var, because CI checks out with no
    * message in reach (`git log` is shallow there, and a squashed PR has a different one). The env var
    * is what the workflow sets from the head commit's subject.
+   *
+   * ── AND THE LOCAL RUN HAD NO WAY TO DECLARE IT AT ALL (measured 2026-11-17) ────────────────────
+   *
+   * The env var is set by the WORKFLOW. A developer who legitimately adds an export, writes
+   * `[export-change]` in the commit message as the gate instructs, and runs `npm run check` gets:
+   *
+   *     ✖ export surface … 189 -> 197 — add [export-change] to the commit message if intended
+   *
+   * — advice they have already followed, with no environment variable to set and no documented way to
+   * set one. So the ONLY way to make the local chain green was to export a CI variable by hand, which
+   * nobody would discover. The gate became a step developers learn to skip, which is the failure mode
+   * this repository calls "a gate nobody runs is a comment" (⑯).
+   *
+   * `git log -1` is the honest local answer: after `git commit`, the message IS in reach. It is tried
+   * ONLY after the env vars, because in CI the env var is the authoritative copy (a squashed PR's
+   * merge commit is not the message the author wrote). `-1` works in a depth-1 clone too — that
+   * argument would be about `git log` HISTORY, and this reads exactly one commit.
    */
+  const commitMessage = (() => {
+    try {
+      return execFileSync('git', ['--no-pager', 'log', '-1', '--pretty=%B'], {
+        cwd: ROOT,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      })
+    } catch {
+      return ''
+    }
+  })()
   const declared = /\[export-change\]/u.test(
-    `${process.env.GRAFT_COMMIT_MESSAGE ?? ''}\n${process.env.GITHUB_HEAD_COMMIT_MESSAGE ?? ''}`,
+    `${process.env.GRAFT_COMMIT_MESSAGE ?? ''}\n${process.env.GITHUB_HEAD_COMMIT_MESSAGE ?? ''}\n${commitMessage}`,
   )
 
   if (baseline === undefined || !Array.isArray(baseline.exports)) {
