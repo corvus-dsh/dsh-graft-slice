@@ -6664,6 +6664,22 @@ function normalizedEqual(a        , b        )          {
   return a.toLowerCase() === b.toLowerCase()
 }
 
+/**
+ * ── ONE NORMALISATION FOR WORKSPACE PATHS (B1-5) ────────────────────────────────────────────────
+ *
+ * `D:\x`, `d:/x/` and `D:\x\` are the same directory, and a constraint rejected under one spelling
+ * must apply to the others. This exact expression already existed INLINE in three places
+ * (the scope matcher in `index.ts`, `core/command-guard.ts`, `core/host-noise.ts`); adding a fourth
+ * copy is precisely the failure this repository keeps recording (same rule, N implementations —
+ * they agree until one is edited). So it lives here once, and new code calls it.
+ *
+ * It is a KEY, not a display value: lower-cased, forward-slashed, trailing slashes removed. Callers
+ * that need to show a path to a human must keep the original string.
+ */
+function normalizeWorkspace(value        )         {
+  return value.replace(/\\/gu, '/').replace(/\/+$/u, '').toLowerCase()
+}
+
 function objectiveOf(events                             )                                                  {
   const change = extractActiveGoalChange(events)
   if (change === undefined) return undefined
@@ -8466,6 +8482,13 @@ function isAbsolutePath(value        )          {
   return /^[A-Za-z]:[\\/]/u.test(value) || value.startsWith('\\\\') || value.startsWith('/')
 }
 
+/**
+ * Re-exported (not re-implemented): the ONE workspace normaliser lives in `core/text-normalize.ts`
+ * so the existing inline copies elsewhere can be collapsed onto it later without importing THIS file
+ * (which would be a cycle). The public surface has to carry it, because the rejection store's
+ * cross-workspace contract is compared through `normalizeWorkspace` from outside.
+ */
+export { normalizeWorkspace }
 
 /** Strip Markdown enough to make an older-turn first paragraph readable as prose. */
 function stripMarkdown(text        )         {
@@ -8798,6 +8821,179 @@ export function selectConstraints(
     totalChars: total,
     candidateCount: candidates.length,
   }
+}
+
+/**
+ * ── B1-5: THE REJECTION STORE AND THE MANUAL TRACK ──────────────────────────────────────────────
+ *
+ * Until now a constraint travelled ONE road: regex score → shape gate → `selectConstraints`
+ * (PASS1 = prompt, PASS2 = `archived`). There was no notion of a REJECTION. `archived` means
+ * "preserved, not in the prompt this time"; `droppedByShape` means "this is not a standalone
+ * sentence". Neither is "the model looked at this and said no" — so a rejected rule came back on
+ * the next extraction, forever.
+ *
+ * Two things are added here, and both are deliberately PURE: the caller reads the file and passes
+ * the records in, so the filtering decision can be tested without a store, and the store can be
+ * tested without the filter.
+ *
+ *   1. `filterRejectedConstraints` — the REJECTION track. It is applied by the extraction path
+ *      BEFORE `selectConstraints`: candidate text is normalised when it enters the pool, so the
+ *      filter has to sit after that normalisation and before selection — filtering earlier would
+ *      compare a different string than the one that gets selected.
+ *
+ *   2. `applyManualConstraints` — the MANUAL track. A constraint the model declares itself is not
+ *      competing for a score; it is a red line by declaration, so it enters as `tier: 'redline'`
+ *      (which `selectConstraints` already honours) and takes prompt slots through the SAME cap and
+ *      the same character budget as everything else. A manual track that could bypass the cap would
+ *      be a back door into a budget that is spent on every turn — `test/v222` ③ exists for that.
+ *
+ * ── PERSISTENCE: ONE FILE, WITH A `workspace` FIELD (option 2) ──────────────────────────────────
+ *
+ * Not one file per workspace: "which workspaces rejected constraints" then cannot be seen at a
+ * glance, and the set of files is unbounded. Not global semantics either: a constraint is a
+ * PROJECT-level fact — project A rejecting a sentence must not reject it in project B.
+ *
+ * Two hard requirements keep option 2 from degenerating into option 3:
+ *   · the workspace is compared as a NORMALISED key (`normalizeWorkspace`);
+ *   · a record with NO `workspace` field does NOT apply to anything, and the caller is warned ONCE
+ *     (silently treating it as global is the "quietly matches nothing / quietly matches everything"
+ *     family this repository writes down).
+ */
+                                            
+              
+                                             
+                     
+                     
+                                                                                                 
+                    
+                 
+             
+ 
+
+                                       
+                             
+                                 
+ 
+
+export function filterRejectedConstraints(
+  candidates                                ,
+  options   
+                     
+                                                 
+                                                                                      
+                                    
+   ,
+)                       {
+  const wanted = normalizeWorkspace(options.workspace)
+  const rejectedTexts = new Set        ()
+  let legacy = 0
+
+  for (const record of options.records) {
+    const recorded = typeof record.workspace === 'string' ? normalizeWorkspace(record.workspace) : ''
+    if (recorded === '') {
+      legacy += 1
+      continue
+    }
+    if (recorded === wanted) rejectedTexts.add(record.text)
+  }
+
+  if (legacy > 0) {
+    /**
+     * ONCE, not once per record: a warning repeated for every legacy row is a warning nobody reads.
+     * And it says what to do, because "some records were skipped" without a next action is noise.
+     */
+    options.warn?.(
+      `constraint-rejections: ${legacy} 条记录没有 workspace 字段 —— 它们不参与过滤`
+      + '（不当作全局否决）。给这些记录补上 workspace 之后它们才会生效。',
+    )
+  }
+
+  const kept                        = []
+  const rejected                        = []
+  for (const candidate of candidates) {
+    if (rejectedTexts.has(candidate.text)) rejected.push(candidate)
+    else kept.push(candidate)
+  }
+  return { kept, rejected }
+}
+
+export function applyManualConstraints(
+  candidates                                ,
+  texts                   ,
+  options                         = {},
+)                        {
+  const base = Number.isFinite(options.indexBase) ? Math.trunc(options.indexBase          ) : 0
+  const manual                        = []
+  for (const [offset, raw] of texts.entries()) {
+    const text = raw.trim()
+    if (text === '') continue
+    manual.push({ text, index: base + offset, score: Number.MAX_SAFE_INTEGER, tier: 'redline' })
+  }
+  return [...manual, ...candidates]
+}
+
+/** The single global file. Resolved against the store directory the same way the ledger files are. */
+export const CONSTRAINT_REJECTIONS_FILE = 'constraint-rejections.json'
+
+export function constraintRejectionPath(dataDir        )         {
+  return join(dataDir, CONSTRAINT_REJECTIONS_FILE)
+}
+
+/**
+ * Tolerant reader: a missing file is an EMPTY SET, not an error (the first rejection creates it),
+ * and a bare array is accepted as well as `{ version, records }` — a reader that only understands
+ * the shape it writes turns the first format change into data loss.
+ */
+export function readConstraintRejections(file        )                              {
+  let raw        
+  try {
+    raw = readFileSync(file, 'utf8')
+  } catch {
+    return []
+  }
+  let parsed         
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  const candidateRows          = Array.isArray(parsed)
+    ? parsed
+    : (parsed !== null && typeof parsed === 'object' && Array.isArray((parsed                         ).records)
+        ? (parsed                          ).records
+        : [])
+  const rows = Array.isArray(candidateRows) ? candidateRows : []
+  const records                              = []
+  for (const entry of rows) {
+    if (entry === null || typeof entry !== 'object') continue
+    const row = entry                           
+    if (typeof row.text !== 'string' || row.text === '') continue
+    records.push({
+      text: row.text,
+      ...(typeof row.rejectedBy === 'string' ? { rejectedBy: row.rejectedBy } : {}),
+      ...(typeof row.generation === 'number' ? { generation: row.generation } : {}),
+      ...(typeof row.workspace === 'string' ? { workspace: row.workspace } : {}),
+      ...(typeof row.reason === 'string' ? { reason: row.reason } : {}),
+      ...(typeof row.at === 'string' ? { at: row.at } : {}),
+    })
+  }
+  return records
+}
+
+/**
+ * Read-modify-write under the repository's file lock. The same discipline as the ledger files:
+ * two sessions rejecting a constraint at the same moment must not lose one of the two.
+ */
+export function appendConstraintRejection(
+  file        ,
+  record                           ,
+)                              {
+  mkdirSync(dirname(file), { recursive: true })
+  return withFileLock(file, () => {
+    const next = [...readConstraintRejections(file), record]
+    writeFileSync(file, `${JSON.stringify({ version: 1, records: next }, null, 2)}\n`, 'utf8')
+    return next
+  })
 }
 
 export function assertConstraintsPreserved(selection                     , context = '')       {

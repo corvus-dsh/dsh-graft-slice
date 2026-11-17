@@ -20,3 +20,19 @@ export function nearDuplicate(a: string, b: string): boolean {
 export function normalizedEqual(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase()
 }
+
+/**
+ * ── ONE NORMALISATION FOR WORKSPACE PATHS (B1-5) ────────────────────────────────────────────────
+ *
+ * `D:\x`, `d:/x/` and `D:\x\` are the same directory, and a constraint rejected under one spelling
+ * must apply to the others. This exact expression already existed INLINE in three places
+ * (the scope matcher in `index.ts`, `core/command-guard.ts`, `core/host-noise.ts`); adding a fourth
+ * copy is precisely the failure this repository keeps recording (same rule, N implementations —
+ * they agree until one is edited). So it lives here once, and new code calls it.
+ *
+ * It is a KEY, not a display value: lower-cased, forward-slashed, trailing slashes removed. Callers
+ * that need to show a path to a human must keep the original string.
+ */
+export function normalizeWorkspace(value: string): string {
+  return value.replace(/\\/gu, '/').replace(/\/+$/u, '').toLowerCase()
+}
