@@ -11704,28 +11704,81 @@ export function buildInjectionPlan(
   // not here — one implementation, called with two spellings, is how they come to disagree.
   const constraintStoreDir = storeDirOrEmpty()
   const constraintWorkspace = typeof cwd === 'string' ? cwd : ''
-  const constraintSelection                      =
+  /**
+   * ── B1-5 STEP 6b: THE OVERRIDE BRANCH WAS A HOLE IN THE TRACKS (measured 2026-11-17) ──────────
+   *
+   * The first wiring filtered only the EXTRACTION branch:
+   *
+   *     constraintsOverride !== undefined
+   *       ? selectConstraints(override.map(…), budget)          ← straight through, no store
+   *       : extractConstraintsDetailed(events, budget, { workspace, rejections, manual })
+   *
+   * That reads as an optimisation ("the caller already has the rules") and is in fact the DEFAULT
+   * path for the tool this plugin exists to call: `graft_slice_and_inject` computes
+   * `fastConstraints = extractConstraints(raw.events)` at L6862 and passes it as the override, because
+   * v5.2 moved LLM extraction off the critical path. So on the PRIMARY path — the one a real handoff
+   * takes — neither track was ever consulted, and `graft_constraint` was a tool that wrote files
+   * nothing read.
+   *
+   * Measured with `probe-v226`: reject a rule, write it (store has 1 record, `rejectionCount: 1`),
+   * slice again ⇒ `plan.constraints` still contains the rejected sentence.
+   *
+   * The fix keeps the override (it is a legitimate performance decision) and routes it through the
+   * SAME two tracks. Both branches now end in the same place, so a future third branch has an obvious
+   * place to go instead of an obvious place to forget.
+   */
+  const constraintBase                      =
     constraintsOverride !== undefined
       ? selectConstraints(
+          /**
+           * The override is a bare string list, so it carries no `tier`. `score: 100` is what the old
+           * branch used and is kept: an override exists because the caller already ranked these.
+           */
           [...constraintsOverride].map((text, index) => ({ text, score: 100, index })),
           settings.constraintBudgetChars,
         )
-      : extractConstraintsDetailed(log.events, settings.constraintBudgetChars, {
-          workspace: constraintWorkspace,
-          rejections:
-            constraintStoreDir === ''
-              ? []
-              : readConstraintRejections(constraintRejectionPath(constraintStoreDir)),
-          manual:
-            constraintStoreDir === ''
-              ? []
-              : manualTextsForWorkspace(constraintStoreDir, constraintWorkspace),
-          /**
-           * The legacy-record warning goes into `warnings`, which the plan RENDERS — a logger line
-           * scrolls past, and this one asks the reader to fix data.
-           */
-          warn: (message        ) => warnings.push(message),
-        })
+      : extractConstraintsDetailed(log.events, settings.constraintBudgetChars)
+  /**
+   * The two tracks, applied to WHICHEVER pool the branch produced.
+   *
+   * `applyManualConstraints` prepends (manual text is a declaration, not a score), then the rejection
+   * filter removes — in that order, for the reason stated at `extractConstraintsDetailed`: manual
+   * first, so a rejected sentence cannot walk back in through the manual door.
+   *
+   * Re-selecting after the tracks is deliberate. The override branch already selected, and its
+   * selection is a CAPACITY decision taken before the tracks existed; injecting manual text into an
+   * already-packed five would either overflow the cap or silently drop the manual rule. Re-selecting
+   * from the accounted pool makes the cap and the budget apply to the final set, which is what
+   * `test/v226` ③ asserts at the render layer.
+   */
+  const constraintPool = (() => {
+    const pool = constraintBase.constraints.filter((text) => !constraintBase.archived.includes(text))
+    const manual = constraintStoreDir === '' ? [] : manualTextsForWorkspace(constraintStoreDir, constraintWorkspace)
+    const withManual =
+      manual.length === 0 ? pool.map((text, index) => ({ text, score: 100, index })) : applyManualConstraints(pool.map((text, index) => ({ text, score: 100, index })), manual, { indexBase: pool.length })
+    /**
+     * The archived half must keep its place: a rule that did not fit the prompt is still a rule the
+     * handoff carries. They re-enter the pool here so `selectConstraints` can decide again with the
+     * manual and rejected sets in view — and so nothing is lost between two selections.
+     */
+    const archived = constraintBase.archived.map((text, index) => ({ text, score: 1, index: pool.length + withManual.length + index }))
+    return [...withManual, ...archived]
+  })()
+  const constraintSelection                      = (() => {
+    if (constraintPool.length === 0) return constraintBase
+    const filtered =
+      constraintWorkspace === ''
+        ? { kept: constraintPool, rejected: []                          }
+        : filterRejectedConstraints(constraintPool, {
+            workspace: constraintWorkspace,
+            records: constraintStoreDir === '' ? [] : readConstraintRejections(constraintRejectionPath(constraintStoreDir)),
+            warn: (message        ) => warnings.push(message),
+          })
+    const selection = selectConstraints(filtered.kept, settings.constraintBudgetChars)
+    return filtered.rejected.length === 0
+      ? selection
+      : { ...selection, rejectedByRecord: filtered.rejected.map((candidate) => candidate.text) }
+  })()
   assertConstraintsPreserved(constraintSelection, `source=${String(log.session?.id ?? '?')}`)
   const constraints = constraintSelection.constraints
   const taskState = extractTaskState(log.events)
