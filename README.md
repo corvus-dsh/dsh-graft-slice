@@ -413,7 +413,7 @@ UI 与命令共用一份实现，而且在客户端 bundle 尚未加载时，命
 
 | 项 | 结果 | 证据 |
 |---|---|---|
-| 全量测试 | graft **861 / 863**（**2 条 skipped，不是 failed**：`v112 D2 control`（TD-17 已裁定保留该行为）/ `v113 C1`（goal 语义待裁定））、memory **546 / 546** | `node --test test/*.test.mjs`（两仓库） |
+| 全量测试 | graft **868 / 870**（**2 条 skipped，不是 failed**：`v112 D2 control`（TD-17 已裁定保留该行为）/ `v113 C1`（goal 语义待裁定））、memory **546 / 546** | `node --test test/*.test.mjs`（两仓库） |
 | 文档/打包一致性 | `check-docs` 27 项一致、`verify-bundle` 28/28 | 同上 |
 | 幽灵条目清理 | projcache **574 → 10**（幽灵 564 → 0）、`retired` **5 → 0**、`targets` **8 → 0** | `scripts/prune-ghosts.mjs`（隔离到 `_quarantine-ghost-<ts>/`，含 `MANIFEST.json` + `restore.ps1`，**未删除任何文件**） |
 | 调试面板 | 真机注册表可查到 `graft_debug_status`；CLI 输出与取证报告逐项吻合 | `cordis_inspect_query Tool.listTools`、`scripts/debug-status.mjs` |
@@ -495,6 +495,33 @@ node scripts/debug-status.mjs --data <state-dir> --session <sessionId> --workspa
 
 CLI 的锁扫描是 `dryRun`，只读：诊断永远不改状态。水位来自日志里真实的 provider usage；
 没有 usage 就**如实返回 unavailable**，不编一个和宿主 meter 不一致的数字。
+
+### 约束双轨 `graft_constraint`
+
+约束过去只走一条路：正则打分 → 形状门 → `selectConstraints` 分「进 prompt（≤5 条）」与「`archived`」。
+**`archived` 是「保留但这次不进 prompt」，不是「否决」** —— 所以一条被模型判定不适用的规则，下一次
+抽取仍会回来，永远如此。这个工具补上缺的那条轨道。
+
+| action | 语义 | 落点 |
+|---|---|---|
+| `add` | 模型主动声明的红线 | 进 prompt，**不靠与正则打分竞争**（`tier: 'redline'`） |
+| `reject` | 这条文本不要再被抽上来 | 抽取时被过滤掉：既不进 prompt，也不进 `archived` |
+| `promote` | 撤销一条否决 **并**改为主动声明 | 否决记录被删除 + 声明被写入；**没有否决记录时拒绝**（回 `{ok:false}`） |
+| `demote` | 撤销一条声明 **并**改为否决 | 对称；**没有声明记录时拒绝** |
+
+三条硬约束：
+
+- **项目级事实，不是全局**。记录带 `workspace` 字段并以归一化键比较（`D:\x` = `d:/x/` = `D:\x\`），
+  A 项目否决的文本在 B 项目仍能抽出。没有 `workspace` 字段的旧记录**不参与过滤**，并打印**恰好一次** WARN
+  —— 静默当成全局否决就是「安静地匹配一切」。
+- **主动轨不是后门**。声明进去的约束受同一套 `CONSTRAINT_PROMPT_MAX`（5 条）与字符预算约束，
+  超出的进 `archived`，不是被删。`test/v222` ③ 走的是端到端路径（注入 10 条 → 选择），不是纯函数的独自表演。
+- **唯一的写入口要判形状**。`add`/`promote` 会先过 `shapeOfConstraint`，碎片（表格行、JSON 片段、
+  词表）**当场拒绝、不落盘**。因为存进去的东西下一轮会被无判据地注入 —— TD-11 的边界就在这里。
+
+两个 store 是两个文件、一个含义各一：`constraint-rejections.json`（永不带回）与
+`constraint-manual.json`（永远带回）。**同一文本不会同时在两处** —— 每次写入先删对手那一侧，
+否则结果取决于哪个读取者先看，那就是两种读法。
 
 ## v0.13.0：两道安全护栏（工作目录红线 + 一次性动作过滤）
 
@@ -805,7 +832,7 @@ if (this.config.auto) this._registerAutomaticCompaction()   // 三个监听器�
 | `index.js` | 由 `src/index.ts` 生成、DSH 直接加载的运行时 |
 | `manifest.json` | 插件名称、版本、声明权限、工具/钩子清单 |
 | `cordis.patch.yml` | Loader 插入行与默认配置 |
-| `test/*.test.mjs` | 863 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch、v0.19 语义瘦身/物理点火、v0.20 任务看板、v7.8 回滚通知改走 pre-step messages、v1.0.6 控制台空闲会话寻址（`session/agent-busy`）与 `api-session/added` 载荷守卫、v136 import 边集合（`verify-pure-move` 看不见新增依赖）、v137 skip 逐条证据、v138 四档搬迁门槛（`scripts/move-gate.mjs`）、v139 关闭资源守卫元测试、v140 硬编码行号清单 |
+| `test/*.test.mjs` | 870 个测试：切片、注入、红线、真实日志、profile 隔离、代码块指针、异步约束、草稿捕获、dataDir 隔离、真实 v4 校验器、产物索引、工具可用性降级、v7.0 重放/连锁守卫/约束漂移/结构伪造/代际污染/溢出恢复/预算优先级/压缩免疫/零重放/跨代追溯、v7.6 Model-Driven 水位、v0.13 工作目录红线与一次性动作过滤、v0.14 命令护栏/防连环切片/死锁回收/调试面板、v0.17 宿主噪音过滤、v0.18 风险策略分离/动态水位/硬约束零丢失/台账 epoch、v0.19 语义瘦身/物理点火、v0.20 任务看板、v7.8 回滚通知改走 pre-step messages、v1.0.6 控制台空闲会话寻址（`session/agent-busy`）与 `api-session/added` 载荷守卫、v136 import 边集合（`verify-pure-move` 看不见新增依赖）、v137 skip 逐条证据、v138 四档搬迁门槛（`scripts/move-gate.mjs`）、v139 关闭资源守卫元测试、v140 硬编码行号清单、v222–v224 约束双轨（否决轨/主动轨/持久化往返/生产路径接缝与工具接线） |
 | `tiers.yml` | 真机验收三档配置（A 零重放 / B 单轮 / C 默认对照组） |
 | `test/fixtures/` | 真实日志派生的 v4 fixture（`real-session.v4.jsonl.zstd` + `MANIFEST.json` 记录来源、计数与 sha256） |
 | `scripts/build.mjs` | 用 Node 内建 stripTypeScriptTypes 构建 |
@@ -1472,7 +1499,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 863 个测试
+# 2) 870 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）

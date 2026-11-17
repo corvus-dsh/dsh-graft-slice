@@ -32,6 +32,8 @@ test('package and manifest declare the plugin identity and permissions', () => {
   // v7.4 adds the two-phase pair: prepare (read-only review) + commit (verified write).
   // v0.14 adds the debug panel (watermark / locks / transactions / memory store).
   // v1.0.2 adds goal evolution: the model may rewrite the goal it acts on, with a trail.
+  // v0.39 (B1-5) adds the constraint pair: reject a sentence so it stops being extracted, and
+  // declare one so it enters the prompt without competing for a regex score.
   assert.deepEqual(manifest.tools, [
     'graft_prepare',
     'graft_commit',
@@ -40,6 +42,7 @@ test('package and manifest declare the plugin identity and permissions', () => {
     'graft_read_result',
     'graft_resume_session',
     'graft_update_goal',
+    'graft_constraint',
     'graft_debug_status',
   ])
   assert.deepEqual(manifest.hooks, ['agent/pre-step', 'agent/turn-stopping'])

@@ -8714,6 +8714,17 @@ export const CONSTRAINT_BUDGET_CHARS = 8000
                     
                                                                                           
                       
+     
+                                                                                                      
+                                                                                                        
+                                                        
+    
+                                                                                                       
+                                                                                                        
+                                                                                                      
+                                   
+     
+                             
  
 
 /**
@@ -8840,6 +8851,18 @@ export function selectConstraints(
  *      BEFORE `selectConstraints`: candidate text is normalised when it enters the pool, so the
  *      filter has to sit after that normalisation and before selection — filtering earlier would
  *      compare a different string than the one that gets selected.
+ *
+ *      ── THIS PARAGRAPH CLAIMED A WIRING THAT DID NOT EXIST FOR ONE COMMIT ──────────────────────
+ *
+ *      B1-5 landed the function, the store and eight tests, and did NOT call the function from
+ *      `extractConstraintsDetailed`. Measured review (2026-11-17): searching `src/` for
+ *      `filterRejectedConstraints` returned this comment and the definition, and **no call site** —
+ *      so the tests proved "IF you call it, it filters", never "it is called".
+ *
+ *      That is the exact failure the repository keeps writing down: a green suite guarding a branch
+ *      nobody walks, under a comment that says the branch is walked. The comment made it worse than
+ *      silence, because the next reader stops looking. The wiring is the `pool` step below, and
+ *      `test/v224` ① goes red if it is removed.
  *
  *   2. `applyManualConstraints` — the MANUAL track. A constraint the model declares itself is not
  *      competing for a score; it is a red line by declaration, so it enters as `tier: 'redline'`
@@ -8996,6 +9019,152 @@ export function appendConstraintRejection(
   })
 }
 
+/**
+ * ── THE MANUAL TRACK'S STORE, AND THE TWO REMOVALS (B1-5 step 6) ────────────────────────────────
+ *
+ * WHY THIS IS A SECOND FILE AND NOT A FIELD IN THE FIRST ONE. A rejection and a manual declaration are
+ * the same sentence with OPPOSITE meanings, and a store that keeps both in one list needs a per-row
+ * discriminator that every reader must remember to check — the "one field, two meanings" shape this
+ * repository has already paid for. Two files, one meaning each:
+ *
+ *     constraint-rejections.json   "never bring this back"       (the model said no)
+ *     constraint-manual.json       "always bring this back"      (the model declared it a red line)
+ *
+ * A text may be in NEITHER (ordinary extraction), and it may move between them — which is exactly what
+ * `promote` and `demote` do. It may not be in BOTH: every writer here removes the counterpart first, so
+ * "rejected and manually added at the same time" is not a state the store can represent. That is
+ * deliberate — a state whose meaning depends on the reader's order of checks is a state that will be
+ * read two ways.
+ *
+ * Both files carry the same `workspace` discipline as the rejection store: the key is NORMALISED on the
+ * way in and on the way out, because a constraint is a project-level fact.
+ */
+                                         
+              
+                                                                                   
+                    
+                                             
+                  
+                     
+             
+ 
+
+export const CONSTRAINT_MANUAL_FILE = 'constraint-manual.json'
+
+export function constraintManualPath(dataDir        )         {
+  return join(dataDir, CONSTRAINT_MANUAL_FILE)
+}
+
+/** Tolerant reader, same contract as `readConstraintRejections`: missing/corrupt ⇒ empty set. */
+export function readManualConstraints(file        )                           {
+  let raw        
+  try {
+    raw = readFileSync(file, 'utf8')
+  } catch {
+    return []
+  }
+  let parsed         
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return []
+  }
+  const candidateRows          = Array.isArray(parsed)
+    ? parsed
+    : (parsed !== null && typeof parsed === 'object' && Array.isArray((parsed                         ).records)
+        ? (parsed                          ).records
+        : [])
+  const rows = Array.isArray(candidateRows) ? candidateRows : []
+  const records                           = []
+  for (const entry of rows) {
+    if (entry === null || typeof entry !== 'object') continue
+    const row = entry                           
+    if (typeof row.text !== 'string' || row.text.trim() === '') continue
+    records.push({
+      text: row.text,
+      ...(typeof row.workspace === 'string' ? { workspace: row.workspace } : {}),
+      ...(typeof row.addedBy === 'string' ? { addedBy: row.addedBy } : {}),
+      ...(typeof row.generation === 'number' ? { generation: row.generation } : {}),
+      ...(typeof row.at === 'string' ? { at: row.at } : {}),
+    })
+  }
+  return records
+}
+
+export function writeManualConstraints(file        , records                                   )       {
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, `${JSON.stringify({ version: 1, records }, null, 2)}\n`, 'utf8')
+}
+
+/** Idempotent by (text, workspace): declaring the same red line twice does not queue it twice. */
+export function appendManualConstraint(file        , record                        )                           {
+  const text = record.text.trim()
+  if (text === '') return readManualConstraints(file)
+  const wanted = normalizeWorkspace(record.workspace ?? '')
+  mkdirSync(dirname(file), { recursive: true })
+  return withFileLock(file, () => {
+    const current = readManualConstraints(file)
+    const without = current.filter(
+      (row) => !(row.text === text && normalizeWorkspace(row.workspace ?? '') === wanted),
+    )
+    const next = [...without, { ...record, text }]
+    writeFileSync(file, `${JSON.stringify({ version: 1, records: next }, null, 2)}\n`, 'utf8')
+    return next
+  })
+}
+
+export function removeManualConstraint(
+  file        ,
+  target                                     ,
+)                           {
+  const text = target.text.trim()
+  const wanted = normalizeWorkspace(target.workspace)
+  mkdirSync(dirname(file), { recursive: true })
+  return withFileLock(file, () => {
+    const current = readManualConstraints(file)
+    const next = current.filter(
+      (row) => !(row.text === text && normalizeWorkspace(row.workspace ?? '') === wanted),
+    )
+    writeFileSync(file, `${JSON.stringify({ version: 1, records: next }, null, 2)}\n`, 'utf8')
+    return next
+  })
+}
+
+/**
+ * The undo half of `reject`. Without it `promote` is impossible: a rejection is permanent data, not a
+ * flag, and "make this rule speak again" cannot be a second record that outranks the first — that is
+ * how two records come to contradict each other and the reader has to guess which wins.
+ */
+export function removeConstraintRejection(
+  file        ,
+  target                                     ,
+)                              {
+  const text = target.text.trim()
+  const wanted = normalizeWorkspace(target.workspace)
+  mkdirSync(dirname(file), { recursive: true })
+  return withFileLock(file, () => {
+    const current = readConstraintRejections(file)
+    const next = current.filter(
+      (row) => !(row.text === text && normalizeWorkspace(row.workspace ?? '') === wanted),
+    )
+    writeFileSync(file, `${JSON.stringify({ version: 1, records: next }, null, 2)}\n`, 'utf8')
+    return next
+  })
+}
+
+/**
+ * The texts the extraction path should inject for THIS workspace. A record with no `workspace` field
+ * applies to nothing (same rule as the rejection store) — it is skipped here as well, so the two
+ * stores cannot disagree about what a legacy record means.
+ */
+export function manualTextsForWorkspace(dataDir        , workspace        )           {
+  const wanted = normalizeWorkspace(workspace)
+  if (wanted === '') return []
+  return readManualConstraints(constraintManualPath(dataDir))
+    .filter((record) => typeof record.workspace === 'string' && normalizeWorkspace(record.workspace) === wanted)
+    .map((record) => record.text)
+}
+
 export function assertConstraintsPreserved(selection                     , context = '')       {
   if (selection.dropped.length === 0) return
   const sample = selection.dropped
@@ -9035,9 +9204,35 @@ function assertReadBackAccounted(selection                     , shapeDrops     
   }
 }
 
+/**
+ * What the CALLER knows and this function must not fetch (B1-5 step 6).
+ *
+ * The function stays pure: it does not read the store files itself. The caller reads them and passes
+ * the records in, which is the only reason `test/v222` ①⑤⑦ can test the filter without a store, and
+ * `test/v223` can test the store without the filter.
+ */
+                                            
+     
+                                                                                                   
+                                                                                  
+     
+                    
+                                                                      
+                                                   
+     
+                                                                                
+                                                                                                    
+                                       
+     
+                            
+                                                                        
+                                  
+ 
+
 export function extractConstraintsDetailed(
   events                             ,
   budgetChars         = CONSTRAINT_BUDGET_CHARS,
+  options                            = {},
 )                      {
   const candidates                        = []
   /** Everything the shape gate rejected, with its code. Never silently discarded. */
@@ -9156,7 +9351,41 @@ export function extractConstraintsDetailed(
       candidates.push({ text: normalized, index: index++, score: hard + imperative + actionHits + lengthBonus + scopeBonus })
     }
   }
-  const selection = selectConstraints(candidates, budgetChars)
+  /**
+   * ── THE MANUAL TRACK JOINS THE POOL HERE, AND THE REJECTION TRACK LEAVES IT HERE ──────────────
+   *
+   * The two tracks are applied in this order on purpose, and the order is the whole design:
+   *
+   *   1. MANUAL FIRST. A manually declared red line is a sentence the model wrote itself; if it was
+   *      later rejected, the rejection must still win — so the manual text has to be IN the pool by the
+   *      time the filter runs. Filtering before injection would let a rejected sentence walk back in
+   *      through the manual door, which is the back door this pair of stores exists to close.
+   *
+   *   2. REJECTION SECOND, and BEFORE `selectConstraints`. Candidate text is normalised when it enters
+   *      the pool, so the filter must compare exactly what selection will rank. Filtering after
+   *      selection would produce the worst possible shape: the rule is dropped from `archived` but has
+   *      already spent a prompt slot.
+   *
+   * `manual` is `[]` for every caller that does not read the store, which is why the absence of a store
+   * cannot change the behaviour of a caller that never opts in.
+   */
+  const manualTexts = options.manual ?? []
+  const pooled =
+    manualTexts.length === 0
+      ? candidates
+      : applyManualConstraints(candidates, manualTexts, { indexBase: candidates.length })
+  let pool                                 = pooled
+  let rejectedByRecord                      
+  if (options.workspace !== undefined) {
+    const filtered = filterRejectedConstraints(pooled, {
+      workspace: options.workspace,
+      records: options.rejections ?? [],
+      ...(options.warn === undefined ? {} : { warn: options.warn }),
+    })
+    pool = filtered.kept
+    rejectedByRecord = filtered.rejected.map((candidate) => candidate.text)
+  }
+  const selection = selectConstraints(pool, budgetChars)
   /**
    * Carried on the SELECTION, not thrown away: the caller renders the handoff, and a dropped rule it
    * cannot see is a rule the user cannot argue with.
@@ -9164,6 +9393,7 @@ export function extractConstraintsDetailed(
   const combined                      = {
     ...selection,
     droppedByShape: [...selection.droppedByShape, ...droppedByShape],
+    ...(rejectedByRecord === undefined ? {} : { rejectedByRecord }),
   }
   /**
    * ── B4: THE INVARIANT — readBack ⊆ extracted ∪ droppedByShape ─────────────────────────────────
@@ -11462,13 +11692,40 @@ export function buildInjectionPlan(
   // refuses to continue when a qualified rule does not fit. This is the single
   // choke point every path shares (graft_prepare, graft_commit, the auto path),
   // so there is no builder that can ship a shortened block.
+  //
+  // ── B1-5 STEP 6: THE REJECTION AND MANUAL STORES ARE CONSULTED HERE ─────────────────────────────
+  //
+  // This is the PRODUCTION call site, and until this line existed the two functions above were
+  // unreachable from it — the tests proved "if called, it filters", never "it is called". The store is
+  // read HERE and passed in, so `extractConstraintsDetailed` stays pure and testable without a store.
+  //
+  // `workspace: cwd` is the source session's own directory: a constraint is a project-level fact, and
+  // the project is where the session was working. The normalisation happens inside the filter/store,
+  // not here — one implementation, called with two spellings, is how they come to disagree.
+  const constraintStoreDir = storeDirOrEmpty()
+  const constraintWorkspace = typeof cwd === 'string' ? cwd : ''
   const constraintSelection                      =
     constraintsOverride !== undefined
       ? selectConstraints(
           [...constraintsOverride].map((text, index) => ({ text, score: 100, index })),
           settings.constraintBudgetChars,
         )
-      : extractConstraintsDetailed(log.events, settings.constraintBudgetChars)
+      : extractConstraintsDetailed(log.events, settings.constraintBudgetChars, {
+          workspace: constraintWorkspace,
+          rejections:
+            constraintStoreDir === ''
+              ? []
+              : readConstraintRejections(constraintRejectionPath(constraintStoreDir)),
+          manual:
+            constraintStoreDir === ''
+              ? []
+              : manualTextsForWorkspace(constraintStoreDir, constraintWorkspace),
+          /**
+           * The legacy-record warning goes into `warnings`, which the plan RENDERS — a logger line
+           * scrolls past, and this one asks the reader to fix data.
+           */
+          warn: (message        ) => warnings.push(message),
+        })
   assertConstraintsPreserved(constraintSelection, `source=${String(log.session?.id ?? '?')}`)
   const constraints = constraintSelection.constraints
   const taskState = extractTaskState(log.events)
@@ -12135,6 +12392,25 @@ function storePaths()             {
     throw error
   }
   return storeLayer.paths
+}
+
+/**
+ * The store directory, or `''` when no store layer was assembled.
+ *
+ * ── WHY THIS EXISTS INSTEAD OF A try/catch AROUND `storePaths()` ─────────────────────────────────
+ *
+ * `storePaths()` THROWS when `apply()` has not run, and that refusal is correct for a tool that is
+ * about to WRITE. Reading is a different question: `buildInjectionPlan` is a pure planner that a test
+ * or another package may call with no gateway at all, and turning "there is no store here" into a
+ * thrown `PERSISTENCE_REQUIRED` would make planning impossible outside a running host.
+ *
+ * So the answer is explicit rather than exceptional — `''` means "no store to consult", and the one
+ * caller that uses it then passes `[]` for both record sets. The consequences are visible rather than
+ * silent: with no store, `rejectedByRecord` is absent from the selection, which distinguishes
+ * "nothing was rejected" from "nobody asked".
+ */
+function storeDirOrEmpty()         {
+  return storeLayer === undefined ? '' : storeLayer.paths.dir
 }
 
 /** The context captured at assembly time, or `undefined` when the layer was built without one. */
@@ -19102,6 +19378,184 @@ async function appendTransitionCard(
     },
   })
 
+
+  ctx.tools.register({
+    name: 'graft_constraint',
+    description:
+      'Declare, reject, promote or demote a standing constraint for the WORKSPACE you are working in. ' +
+      '`reject` records "do not bring this back": the extraction path consults the record before selection, ' +
+      'so the sentence stops being carried into the next handoff (it is not archived — it is refused). ' +
+      '`add` declares a red line: it enters the prompt without competing for a regex score. ' +
+      '`promote` undoes one rejection AND declares it (refused when there is no rejection to undo); ' +
+      '`demote` removes a declaration AND rejects it (refused when nothing was declared). ' +
+      'A constraint is a PROJECT-level fact: the same sentence rejected in one workspace still extracts in ' +
+      'another, so `workspace` is never global. `text` must be a standalone sentence — it is passed through ' +
+      'the same shape judge extraction uses, and a fragment (JSON, a table row, a term list) is REFUSED rather ' +
+      'than stored, because a stored fragment would then skip every judge on the way back in.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['add', 'reject', 'promote', 'demote'],
+          description:
+            'add = declare a red line for this workspace; reject = never extract it again; ' +
+            'promote = undo a rejection and declare it; demote = remove a declaration and reject it.',
+        },
+        text: {
+          type: 'string',
+          description: 'The sentence itself. Compared verbatim after trimming; it must already be one sentence.',
+        },
+        workspace: {
+          type: 'string',
+          description:
+            'Absolute path of the project the constraint belongs to. Default: the calling session\'s own ' +
+            'working directory. There is no global default on purpose.',
+        },
+        reason: { type: 'string', description: 'Optional short reason, stored for audit.' },
+      },
+      required: ['action', 'text'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args         , value     ) => [
+        { type: 'text'         , text: JSON.stringify(value, null, 2) },
+      ],
+    },
+    execute: async (args     , exec     ) => {
+      if (!isRecord(args)) throw graftError('INVALID_ARGUMENT', 'arguments must be an object')
+      const action = String(args.action ?? '')
+      if (action !== 'add' && action !== 'reject' && action !== 'promote' && action !== 'demote') {
+        throw graftError('INVALID_ARGUMENT', 'action must be one of add / reject / promote / demote')
+      }
+      const text = String(args.text ?? '').replace(/\s+/gu, ' ').trim()
+      if (text.length === 0) throw graftError('INVALID_ARGUMENT', 'text must be a non-empty string')
+      /**
+       * ── THE SHAPE JUDGE IS NOT OPTIONAL, AND THAT IS WHAT KEEPS TD-11 INTACT ────────────────────
+       *
+       * TD-11 forbids the model authoring a red line *because that would bypass `shapeOfConstraint`*.
+       * The manual track deliberately lets the model name a red line — so the bypass it must not allow
+       * is the SCORE, not the JUDGE. Refusing fragments HERE, at the only writer, is what makes every
+       * later reader allowed to trust the store: after this check, "it is in the store" implies "it is
+       * a standalone sentence". A fragment stored now would be re-injected without ever being
+       * re-judged, which is the five-fragment failure of generation 8 with a new door.
+       */
+      const shape = shapeOfConstraint(text)
+      if (shape.broken) {
+        throw graftError(
+          'INVALID_ARGUMENT',
+          `text is not a standalone sentence (${shape.code ?? 'S1_JSON'}): ${shape.why ?? ''} — ` +
+            'a constraint that is not a sentence cannot be enforced by a reader, so it is refused rather than stored',
+        )
+      }
+      if (text.length > 800) throw graftError('INVALID_ARGUMENT', `text is too long (${text.length} > 800 characters)`)
+
+      const sessionId = typeof exec?.agent?.id === 'string' ? exec.agent.id : ''
+      const requested = String(args.workspace ?? '').trim()
+      const workspace = requested.length > 0 ? requested : workspaceOfAgent(ctx, sessionId)
+      if (workspace.length === 0 || !isAbsolutePath(workspace)) {
+        throw graftError(
+          'INVALID_ARGUMENT',
+          'workspace 缺失且宿主没有提供当前会话的工作目录；约束是项目级事实，没有项目就不能记录。' +
+            '请显式传入 workspace（绝对路径）。',
+        )
+      }
+      const dir = storePaths().dir
+      const generation = sessionId.length === 0 ? undefined : graftGenerationOf(sessionId)
+      const at = new Date().toISOString()
+      const reasonText = String(args.reason ?? '').trim().slice(0, 300)
+      const rejectionFile = constraintRejectionPath(dir)
+      const manualFile = constraintManualPath(dir)
+      const wanted = normalizeWorkspace(workspace)
+      const hadRejection = readConstraintRejections(rejectionFile).some(
+        (row) => row.text === text && normalizeWorkspace(row.workspace ?? '') === wanted,
+      )
+      const hadManual = readManualConstraints(manualFile).some(
+        (row) => row.text === text && normalizeWorkspace(row.workspace ?? '') === wanted,
+      )
+
+      /**
+       * `promote` and `demote` are not aliases for `add` and `reject`: each NAMES the state it undoes and
+       * refuses when that state is not there. Two actions that write the same records would be a second
+       * way to say one thing — and the receipt would then claim an undo that never happened.
+       *
+       * ── WHY THIS IS A RECEIPT AND NOT A THROW (`{ ok: false }`) ─────────────────────────────────
+       *
+       * The distinction is the repo's own, drawn in `graft_update_goal`: a malformed ARGUMENT throws
+       * (`INVALID_ARGUMENT` — the call is wrong), while a well-formed call against the wrong STATE
+       * returns `{ ok: false, error }` with the next action spelled out. "promote a text nobody
+       * rejected" is the second kind: the request is coherent, the world simply is not in that state,
+       * and the useful reply is a correction, not an exception the caller must catch to learn it.
+       */
+      if (action === 'promote' && !hadRejection) {
+        return {
+          ok: false,
+          action,
+          text,
+          workspace,
+          error:
+            'promote 的语义是「撤销一条否决并改为主动声明」，但这个 workspace 下没有该文本的否决记录；'
+            + '如果只是想声明它，请用 add',
+        }
+      }
+      if (action === 'demote' && !hadManual) {
+        return {
+          ok: false,
+          action,
+          text,
+          workspace,
+          error:
+            'demote 的语义是「撤销一条主动声明并改为否决」，但这个 workspace 下没有该文本的声明记录；'
+            + '如果只是想否决它，请用 reject',
+        }
+      }
+
+      if (action === 'add' || action === 'promote') {
+        // Both removals run for `add` too: an explicit declaration outranks an older rejection, and
+        // leaving both records in place would make the outcome depend on which reader looked first.
+        removeConstraintRejection(rejectionFile, { text, workspace })
+        removeManualConstraint(manualFile, { text, workspace })
+        appendManualConstraint(manualFile, {
+          text,
+          workspace,
+          ...(sessionId === '' ? {} : { addedBy: sessionId }),
+          ...(generation === undefined ? {} : { generation }),
+          at,
+        })
+      } else {
+        removeManualConstraint(manualFile, { text, workspace })
+        appendConstraintRejection(rejectionFile, {
+          text,
+          workspace,
+          ...(sessionId === '' ? {} : { rejectedBy: sessionId }),
+          ...(generation === undefined ? {} : { generation }),
+          ...(reasonText.length === 0 ? {} : { reason: reasonText }),
+          at,
+        })
+      }
+
+      const manualCount = manualTextsForWorkspace(dir, workspace).length
+      const rejectionCount = readConstraintRejections(rejectionFile).filter(
+        (row) => typeof row.workspace === 'string' && normalizeWorkspace(row.workspace) === wanted,
+      ).length
+      return {
+        ok: true,
+        action,
+        text,
+        workspace,
+        effect: action === 'add' || action === 'promote' ? 'prompt' : 'rejected',
+        changed: action === 'add' || action === 'promote' ? { hadRejection } : { hadManual },
+        manualCount,
+        rejectionCount,
+        note:
+          action === 'add' || action === 'promote'
+            ? '下一条从本 workspace 切出的看板会把它作为主动声明（tier=redline）带进 prompt；'
+              + '上限与字符预算对它同样有效，超出的部分进 archived。'
+            : '下一条从本 workspace 切出的看板不会再把这条文本抽上来（它不进 prompt，也不进 archived）。',
+      }
+    },
+  })
 
   ctx.tools.register({
     name: 'graft_debug_status',
