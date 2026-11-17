@@ -29,8 +29,9 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
-import { classifySkipLine } from '../scripts/check-readme-tally.mjs'
+import { classifySkipLine, tallyClaims } from '../scripts/check-readme-tally.mjs'
 
 /** TAP lines exactly as the reporter prints them (`ok …` and `not ok …`). */
 const line = (reason) => `ok 700 - some test name # SKIP ${reason}`
@@ -108,4 +109,71 @@ test('tally classifier: an ESCAPED `\\# SKIP` inside a test NAME is not a direct
   )
   // The real directive has no backslash and must still be seen.
   assert.equal(classifySkipLine('ok 437 - something # SKIP a real reason'), 'pending')
+})
+
+/**
+ * ── THE CLAIM PARSER, PINNED AGAINST THE REAL DOCUMENT ──────────────────────────────────────────
+ *
+ * `tallyClaims` had NO test at all — only the skip classifier above did. So when the README's tally
+ * row was re-typeset (`**696/698**（2 条待裁定跳过）` → `**850 / 852**（**2 条 skipped，不是 failed**）`),
+ * the parser silently stopped matching, the gate reported `claims found: 0`, and nothing local noticed
+ * because the gate only ran in CI (measured 2026-11-17, graft CI run 44019243007, step 15).
+ *
+ * The failure mode is ⑰: a parser tested only against samples its author wrote will always agree with
+ * itself. So the FIRST case below reads the actual README row off disk instead of carrying a copy —
+ * a fixture that is not the document proves nothing, and a copy drifts with the document.
+ */
+test('tally claims: the REAL README row parses (read from README.md, not copied into this file)', () => {
+  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  const row = readme.split(/\r?\n/u).find((line) => /全量测试\s*\|/u.test(line) && /\*\*\d+\s*\/\s*\d+\*\*/u.test(line))
+  assert.ok(row !== undefined,
+    'README.md 里找不到「全量测试」表格行 —— 这一行的形状变了，解析器必须跟着改，' +
+    '而不是让门禁在 CI 上报 `claims found: 0`（选择器同时要求 `全量测试 |` 与 `**N/M**`：' +
+    'README 里还有别的行含「全量测试」三个字，只看这三个字会抓到散文行）')
+
+  const claims = tallyClaims(row)
+  const own = claims.find((claim) => claim.repo === 'graft')
+  assert.ok(own !== undefined, `解析器在真实的 README 行上抓不到本仓的声明：\n${row}`)
+  // Parser-level invariants only — the NUMBERS are the gate's business, not this test's.
+  assert.equal(typeof own.passed, 'number')
+  assert.equal(typeof own.total, 'number')
+  assert.ok(own.skipped !== undefined, '这一行声明了 skipped 段，解析器必须把它读出来')
+  assert.equal(own.passed + own.skipped, own.total, '读出来的三个数必须自洽')
+  // The same row carries a sibling repo's tally, which must be attributed, not swallowed.
+  assert.ok(claims.some((claim) => claim.repo === 'memory'),
+    `同一行里 memory 的声明必须被识别为「另一个仓」而不是本仓：\n${JSON.stringify(claims)}`)
+})
+
+test('tally claims: four spellings of the same declaration all parse', () => {
+  /**
+   * The variants are not decoration: each one was a real re-typesetting of the row. Relaxing the
+   * parser is allowed to change HOW the claim is found; it must not change WHAT is required of it.
+   */
+  const cases = [
+    ['**850/852**（2 条跳过）', 'no spaces, 中文'],
+    ['**850 / 852**（2 条 跳过）', 'spaces around the slash'],
+    ['graft **850 / 852**（**2 条 skipped，不是 failed**：…）', 'number inside **, English word'],
+    ['graft **850/852**（2 条待裁定跳过）', 'the shape this parser was originally written against'],
+  ]
+  for (const [line, why] of cases) {
+    const [claim] = tallyClaims(line)
+    assert.ok(claim !== undefined, `解析不到：${why} —— ${line}`)
+    assert.deepEqual(
+      { passed: claim.passed, total: claim.total, skipped: claim.skipped },
+      { passed: 850, total: 852, skipped: 2 },
+      `${why} 被解析成了别的三个数：${line}`,
+    )
+  }
+  // A complete run declares no skipped section at all.
+  assert.equal(tallyClaims('memory **546 / 546**')[0].skipped, undefined)
+})
+
+test('tally claims: text with NO declaration yields ZERO claims (the gate turns that into a FAIL)', () => {
+  /**
+   * This is the half that must NOT be relaxed. `check-readme-tally.mjs` treats "no claim found" as a
+   * failure — "a missing claim is a missing check, not a pass" — so the parser must keep returning an
+   * empty array rather than inventing a claim.
+   */
+  assert.deepEqual(tallyClaims('测试全绿；见 README。'), [])
+  assert.deepEqual(tallyClaims('| 全量测试 | 850 of 852 | x |'), [])
 })

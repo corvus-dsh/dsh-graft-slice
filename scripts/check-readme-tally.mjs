@@ -201,7 +201,26 @@ export function tallyClaims(text) {
    * Only claims attributed to THIS package (or to no repo, i.e. bare) are checked; a foreign repo's
    * tally is reported as SKIPPED-FOREIGN rather than silently passed.
    */
-  const pattern = /(\b\w[\w-]*\s+)?\*\*(\d+)\/(\d+)\*\*(?:（(\d+)\s*条[^）]*跳过[^）]*）)?/gu
+  /**
+   * ── THE PATTERN MUST READ THE README'S ACTUAL SHAPE, NOT ONE SPELLING OF IT ─────────────────────
+   *
+   * Measured 2026-11-17 (graft CI run 44019243007, step 15): `claims found: 0` ⇒ this gate failed on a
+   * README that DOES declare the tally. Three mismatches, all of them pure formatting:
+   *
+   *   the pattern wanted              the README said
+   *   **850/852**  (no spaces)        **850 / 852**        (spaces around the slash)
+   *   （2 条 … 跳过 …）                （**2 条 skipped，不是 failed**）  (number inside `**`, English word)
+   *
+   * The old pattern was written against `**696/698**（2 条待裁定跳过）` and the row was later
+   * re-typeset. Nothing caught it because this gate only ran in CI (see `docs/gate-failure-forms.md`
+   * ⑯) and its only test pinned the SKIP CLASSIFIER, never the claim parser (⑰).
+   *
+   * What is relaxed: HOW the claim is found (whitespace, optional `**` around the skipped count,
+   * 跳过 | skipped). What is NOT relaxed: once found, `passed + skipped == total` and the equality
+   * against the measured `pass` / `pending` are asserted exactly as before — and `claims found: 0`
+   * is still a FAIL, because "a missing claim is a missing check, not a pass".
+   */
+  const pattern = /(\b\w[\w-]*\s+)?\*\*(\d+)\s*\/\s*(\d+)\*\*(?:（\*{0,2}(\d+)\s*条[^）]*?(?:跳过|skipped)[^）]*）)?/gu
   for (const match of text.matchAll(pattern)) {
     const lineStart = text.lastIndexOf('\n', match.index) + 1
     const lineEnd = text.indexOf('\n', match.index)

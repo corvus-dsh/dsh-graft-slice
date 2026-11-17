@@ -72,8 +72,10 @@ const KINDS = new Map([
   ['check-artifact-fresh.mjs', 'GATE'],
   ['check-cycles.mjs', 'GATE'],
   ['check-docs.mjs', 'GATE'],
+  ['check-export-baseline.mjs', 'GATE'],
   ['check-readme-counts.mjs', 'GATE'],
   ['check-readme-tally.mjs', 'GATE'],
+  ['check-symbol-lookup.mjs', 'GATE'],
   ['verify-bundle.mjs', 'GATE'],
   ['run-gate.mjs', 'GATE'],
   ['v140-audit', 'GATE'],
@@ -140,6 +142,7 @@ const NOT_A_CI_STEP = new Map([
   ['audit-line-numbers.mjs', 'produces the audit table that test/v140 consumes; v140 is the CI step, this is its instrument'],
   ['inventory-source-guards.mjs', 'inventory/report; test/v126 asserts the coverage it describes'],
   ['verify-import-edges.mjs', 'produces the edge diff that test/v136 consumes; v136 is the CI step, this is its instrument'],
+  ['who-references.mjs', 'an INSTRUMENT (it measures and always exits 0): it is run BY `scripts/check-symbol-lookup.mjs`, which is the CI step — and now also a local `npm run check` step — that asserts its answer. Until 2026-11-17 the assertion was `node -e` inline in ci.yml writing /tmp/refs.json, which is why this file looked like a CI step itself; that shape could not be reproduced on Windows at all'],
   ['calibrate-who-references.mjs', 'a CALIBRATION for who-references.mjs: it asserts a known answer (5 real references across three shapes). It is run by test/v141 as a precondition, which is the point — the classifier must be calibrated BEFORE its answer is trusted, not after it is published'],
   ['families.mjs', 'needs closure.mjs and who-references.mjs, both of which need the TypeScript compiler this package deliberately does not depend on. It also answers a question that only exists DURING a refactor — "which declarations still cluster together" — so there is nothing to assert on a tree with no pending move; the 10-component table it printed is quoted in the step5 commit message instead of pinned here'],
 ])

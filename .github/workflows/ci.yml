@@ -162,13 +162,10 @@ jobs:
       # The baseline is a COMMITTED file, so a declared change that refreshes it must land in the same
       # commit. If CI refreshed it silently, the next clone would inherit a contract nobody reviewed.
       - name: The export baseline must already be committed
-        run: |
-          if [ -n "$(git status --porcelain .export-surface.json)" ]; then
-            echo "::error::verify-bundle.mjs rewrote .export-surface.json. Commit the new baseline: it is part of the export contract."
-            git --no-pager diff -- .export-surface.json
-            exit 1
-          fi
-          echo "ok: .export-surface.json is committed and current"
+        # This rule used to be four lines of inline shell, which meant it could run ONLY here — never
+        # in `npm run check`, i.e. never on the machine where the mistake is made. It is now a script
+        # called by both, with the same arguments (docs/gate-failure-forms.md ⑯).
+        run: node scripts/check-export-baseline.mjs
 
       # ── the committed artifact must be what this source builds ────────────────────────────────
       #
@@ -231,11 +228,6 @@ jobs:
       # which produced "referenced by 5 core/ modules" — a confident, wrong statement. This runs the
       # tool on a symbol whose answer is known, so the classifier is exercised on every push.
       - name: Symbol reference lookup is exact (never a substring)
-        run: |
-          node scripts/who-references.mjs --json buildTape > /tmp/refs.json
-          node -e "
-            const refs = require('/tmp/refs.json');
-            const decl = refs.filter((r) => r.kind === 'DECL');
-            if (decl.length !== 1) { console.error('expected exactly one DECL for buildTape, got ' + decl.length); process.exit(1); }
-            console.log('ok: exact identifier matching, prose reported separately (' + refs.length + ' findings)');
-          "
+        # Was a `node -e` that wrote /tmp/refs.json — which does not exist on Windows, so the step
+        # could not be reproduced locally at all. Now a script, called here and by `npm run check`.
+        run: node scripts/check-symbol-lookup.mjs
