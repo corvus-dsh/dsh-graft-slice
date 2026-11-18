@@ -126,6 +126,18 @@ import {
   readLayoutManifest,
   writeLayoutManifest,
 } from './core/layout.js'
+/**
+ * ── TASK POSITION (v0.38, B2-T3) ────────────────────────────────────────────────────────────────
+ *
+ * Pure data-in / text-out, exactly like `renderMemoryContext`: this module knows nothing about where a
+ * store lives, which is what lets the READER live here and the IO live in one function below. The four
+ * repositories hold zero static imports between them, so the graph arrives as `unknown` and is validated
+ * field by field at runtime.
+ */
+import { TASK_POSITION_MAX_CHARS, renderTaskPosition, toTaskPosition } from './core/task-position.js'
+import type { TaskPositionInput } from './core/task-position.js'
+export { TASK_POSITION_MAX_CHARS, renderTaskPosition, toTaskPosition }
+export type { TaskPositionInput }
 export {
   GRAFT_LEDGER_FILES,
   GRAFT_LEDGER_LAYOUT_VERSION,
@@ -580,6 +592,20 @@ export interface GraftInjectionChunk {
      * Mixing them would make a slice's context budget hide which one it starved.
      */
     | 'memory-context'
+    /**
+     * ── v0.38 (B2-T3): WHERE THE PLAN SAYS THIS SESSION IS ──────────────────────────────────────
+     *
+     * Three chunks already answer "what happened": `phase-roadmap` infers a phase from the LOG,
+     * `task-status` replays the last `todo_write`, and the pending state carries the unfinished
+     * instruction. None of them can answer "which node of the approved plan am I standing in",
+     * because that fact is not in a session log at all — it is in the task graph, the only artefact
+     * that spans generations.
+     *
+     * Authority order is GRAPH > ROADMAP > TODO, and the reason is the same one that makes this a
+     * separate kind: a graph survives the session that wrote it, a roadmap is an inference over one
+     * session's events, and a todo list is a snapshot the model may have stopped refreshing.
+     */
+    | 'task-position'
   text: string
   turn?: number
   truncated: boolean
@@ -3991,6 +4017,19 @@ export function buildInjectionPlan(
      * may not author a red line). `pending` replaces the transcript list; `notes` is appended.
      */
     handover?: ModelHandover
+    /**
+     * ── v0.38 (B2-T3): THE PLAN'S CURRENT POSITION ──────────────────────────────────────────────
+     *
+     * Plain data, same contract as `memoryContext` — but with one difference that is the whole point
+     * of this parameter: it has REAL callers. `memoryContext` shipped with a renderer and no producer
+     * (measured: zero assignment sites, TD-N1); a chunk nobody fills is a chunk that never appears.
+     *
+     * All THREE call sites must pass it — `prepareSlice`, the `commit` rebuild, and the path that
+     * actually writes the target. The first two disagreeing turns every commit into
+     * `SLICE_DIGEST_MISMATCH`; the third disagreeing makes a tape differ from the one the user
+     * approved, which is the v7.4b failure with a new field name.
+     */
+    taskPosition?: TaskPositionInput
   },
 ): GraftPlan {
   const settings = normalizeConfig(config)
@@ -3998,6 +4037,8 @@ export function buildInjectionPlan(
   const boundary = locateBoundary(events)
   /** v1.7.0: memory hits for this handoff, rendered later as its own chunk. */
   const memoryContext = options?.memoryContext
+  /** v0.38: where the plan says this session stands. Absent means "no graph" — and then no chunk. */
+  const taskPosition = options?.taskPosition
   // v6.2: the model's own todo list is the authoritative next-action source.
   const taskStateForPending = extractTaskState(events)
   // v6.3: pick the retained-turn depth from the source's own shape.
@@ -4369,6 +4410,23 @@ export function buildInjectionPlan(
   // answers "where am I and what is in the way". A resumed reader needs the
   // second question first — and when the todo list is stale, the roadmap is the
   // only block that still points at the current phase.
+  /**
+   * ── v0.38 (B2-T3): THE PLAN'S POSITION SITS ABOVE THE ROADMAP ──────────────────────────────────
+   *
+   * The authority order is GRAPH > ROADMAP > TODO, so the graph-derived block goes first. The
+   * roadmap is an INFERENCE over this session's events; the graph is the plan the user approved, and
+   * it is the only one of the three that survives the session entirely.
+   *
+   * `renderTaskPosition` returns `undefined` when there is no honest position to state — no graph, a
+   * malformed one, a finished plan, or one whose every remaining node is blocked. Absent means NO
+   * CHUNK; a heading saying 「当前节点：（无）」 would look like information and be the absence of it.
+   */
+  if (taskPosition !== undefined) {
+    const rendered = renderTaskPosition(taskPosition)
+    if (rendered !== undefined) {
+      chunks.push({ kind: 'task-position', text: rendered, truncated: false })
+    }
+  }
   const roadmap = extractPhaseRoadmap(events, taskState, extractLastStepScene(events))
   if (roadmap !== undefined) {
     chunks.push({
@@ -4625,6 +4683,19 @@ export function buildInjectionPlan(
     const priority: GraftInjectionChunk['kind'][] = [
       'readback-index',
       'recent-turn',
+      /**
+       * ── v0.38 (B2-T3): REBUILDABLE, SO IT YIELDS TO `recent-turn` ─────────────────────────────
+       *
+       * `recent-turn` is the only block that cannot be rebuilt: it is the actual exchange, and once
+       * the budget pass empties it the reader has to open the source session to get it back.
+       * `task-position` CAN be rebuilt — the graph stays in the store, so one more read reproduces
+       * it — which is why it sits below `recent-turn` and above everything else here.
+       *
+       * Above `open-work` because "which node am I in" is the current work, while "which background
+       * jobs have not reported" is supplementary. Above `task-status` because the graph outranks a
+       * todo snapshot the model may have stopped refreshing.
+       */
+      'task-position',
       'open-work',
       'task-status',
       'workspace-files',
@@ -6388,8 +6459,27 @@ export async function prepareSlice(
   if (!hasClosedTurn(raw.events)) {
     throw graftError('NO_CLOSED_TURN', `session "${sourceId}" has no closed turn yet; nothing to review`)
   }
-  const plan = buildInjectionPlan(raw, settings, undefined, 'regex-fallback', undefined,
-    handover === undefined ? undefined : { handover })
+  /**
+   * ── CALL SITE 1 of 3 (v0.38, B2-T3) ────────────────────────────────────────────────────────────
+   *
+   * The user is about to review this tape, so the position block must be IN it — that is what makes
+   * the review honest about where the slice believes it is. `digestOfPlan` hashes every chunk, so this
+   * also puts the position into the digest: a graph that changes between review and commit is a
+   * difference the user is asked about, not one that slips past.
+   */
+  const positionRead = readTaskPosition(settings, sourceId)
+  if (positionRead.warning !== undefined) {
+    /** Report, never throw (rule 1 above). `prepare` succeeds with the position omitted. */
+    try {
+      ctx.logger?.warn?.(`[dsh-graft-slice] task-position skipped: ${positionRead.warning}`)
+    } catch {
+      /** Logging must not change the result. */
+    }
+  }
+  const plan = buildInjectionPlan(raw, settings, undefined, 'regex-fallback', undefined, {
+    ...(handover === undefined ? {} : { handover }),
+    ...(positionRead.position === undefined ? {} : { taskPosition: positionRead.position }),
+  })
   const digest = digestOfPlan(plan, handover)
   const sourceLastSeq = Number(raw.events.at(-1)?.seq ?? 0)
   const boundarySeq = Number(plan?.boundary?.boundarySeq ?? 0)
@@ -6517,7 +6607,27 @@ export async function commitPreparedSlice(
       `the source closed another turn since the review (boundary ${entry.boundarySeq} -> ${boundaryNow}); prepare again`,
     )
   }
-  const rebuilt = buildInjectionPlan(raw, settings)
+  /**
+   * ── CALL SITE 2 of 3 (v0.38, B2-T3) ────────────────────────────────────────────────────────────
+   *
+   * The rebuild MUST see the same graph as `prepareSlice`, or the chunk sets differ and every commit
+   * refuses with `SLICE_DIGEST_MISMATCH`. Two readings of one file, both through `readTaskPosition`:
+   * one store, one resolution, one renderer.
+   *
+   * ── WHY `task-position` IS *NOT* IN `tailKinds` BELOW ───────────────────────────────────────────
+   *
+   * `tailKinds` is "things allowed to move between review and commit", and they are all LOG TAIL —
+   * the open turn, the pending state, the workspace listing. They move because the source session is
+   * still live and the model keeps talking; accepting that is what makes a self-slice possible.
+   *
+   * The graph is a different animal: it is part of the PLAN the user approved. If it moved while the
+   * review was open, the reviewed tape genuinely describes a position the store no longer holds, and
+   * the honest response is `SLICE_DIGEST_MISMATCH` ("prepare again"), not a silent refresh. That is
+   * the same refusal `SOURCE_DRIFT` makes one line above for a moved boundary.
+   */
+  const rebuiltPosition = readTaskPosition(settings, entry.sourceSessionId)
+  const rebuilt = buildInjectionPlan(raw, settings, undefined, 'regex-fallback', undefined,
+    rebuiltPosition.position === undefined ? undefined : { taskPosition: rebuiltPosition.position })
   // The tail may have grown while the user was reading. Name what changed rather
   // than pretending it did not.
   //
@@ -7004,7 +7114,35 @@ async function graftSliceAndInjectUnlocked(
     // `raw` is a union: caller snapshot (`session: any`) or gateway `LogReading`
     // (`session?: Record<string, unknown>`, no promised `id`). buildInjectionPlan wants
     // `SessionLogSnapshotLike` (`session.id: string`), so the narrowing is stated at the call site.
-    const plan = buildInjectionPlan(raw as unknown as SessionLogSnapshotLike, settings, fastConstraints, 'regex-fallback', availableTools)
+    /**
+     * ── CALL SITE 3 of 3: THE ONE THAT ACTUALLY WRITES (v0.38, B2-T3) ─────────────────────────
+     *
+     * The most dangerous of the three, and the reason the other two are not enough. This is where the
+     * tape becomes events on disk. If a position block were rendered at `prepare` but not here, the
+     * user would approve a tape that says where the work stands and receive one that does not — the
+     * exact v7.4b failure ("approved ≠ committed"), which was fixed once already for the tail chunk
+     * and would otherwise return under a new field name.
+     *
+     * Reading the graph a third time — rather than threading it down from `prepare` — is deliberate:
+     * this path is also reachable from `graftSliceAndInject` without a prior prepare (auto-graft), so
+     * there is no prepared entry to read it from. Same function, same resolution, same store.
+     */
+    const writePosition = readTaskPosition(settings, sourceId)
+    if (writePosition.warning !== undefined) {
+      try {
+        ctx.logger?.warn?.(`[dsh-graft-slice] task-position skipped while writing the target: ${writePosition.warning}`)
+      } catch {
+        /** Logging must not change the result. */
+      }
+    }
+    const plan = buildInjectionPlan(
+      raw as unknown as SessionLogSnapshotLike,
+      settings,
+      fastConstraints,
+      'regex-fallback',
+      availableTools,
+      writePosition.position === undefined ? undefined : { taskPosition: writePosition.position },
+    )
     const runtimeIntent = options?.runtimeIntent ?? extractRuntimeIntent(raw.events)
     const events = buildInjectionEvents(plan, settings, newId, sourceId, runtimeIntent, raw.events)
     const types = events.map((event) => event.type)
@@ -9039,6 +9177,92 @@ function resolveMemoryPaths(settings: Required<GraftConfig>): { memoryDir: strin
   const memoryDir = settings.memoryDir.length > 0 ? settings.memoryDir : join(dirname(storePaths().retired), '.dsh-memory')
   const skillsDir = settings.skillsDir.length > 0 ? settings.skillsDir : join(homedir(), '.agents', 'skills')
   return { memoryDir, skillsDir }
+}
+
+/**
+ * ── READ THE TASK GRAPH, AND NEVER LET IT FAIL A SLICE (v0.38, B2-T3) ─────────────────────────────
+ *
+ * THE ONLY IO IN THE WHOLE `task-position` FEATURE. Everything else is pure, so there is exactly one
+ * place that can touch a filesystem and exactly one place to audit.
+ *
+ * It follows the shape `collectMemoryStoreStatus` already established for reading this same store:
+ * the `.layout.json` gate runs FIRST, then a plain `readFileSync`, then `JSON.parse`. It reads the same
+ * directory through the same `resolveMemoryPaths`, and — like that function — it NEVER WRITES. Graft
+ * has read this store and has never written to it; `task-graph.json` must not become the exception,
+ * because the graph's only writer is `dsh-memory` under its own lease.
+ *
+ * ── THREE RULES, EACH WITH A FAILURE IT PREVENTS ───────────────────────────────────────────────
+ *
+ *   1. IT DOES NOT THROW. A slice is the main function; a position block is an enhancement. A
+ *      malformed graph, an unreadable file, an unsupported layout — every one of them returns
+ *      `undefined`, which renders as no chunk. The failure mode of a broken graph must be "the slice
+ *      still happens", never "the slice fails for a reason unrelated to slicing".
+ *
+ *   2. IT DOES NOT GUESS THE DIRECTORY. `resolveMemoryPaths(settings)` is the existing resolution;
+ *      a second derivation is how two plugins end up reading two different stores and neither saying
+ *      so (`layout.ts` documents that failure at length).
+ *
+ *   3. IT DISTINGUISHES "NO GRAPH" FROM "A GRAPH IT COULD NOT READ" — in the WARNING, not in the
+ *      return value. Both must produce no chunk (rule 1), but only one of them is normal: a workspace
+ *      that never used the memory plugin has no graph, and a user must not be told about it. A graph
+ *      that EXISTS and failed to parse is a defect worth naming, so the caller gets a warning string.
+ *
+ * `generation` and `originSessionId` are filled by the CALLER from graft's own ledger: `dsh-memory`'s
+ * graph has neither field (measured: zero occurrences in `src/graph.ts`), and deriving them from a
+ * session id prefix would be a guess wearing the shape of a fact.
+ */
+function readTaskPosition(
+  settings: Required<GraftConfig>,
+  sessionId?: string,
+): { position?: TaskPositionInput; warning?: string } {
+  const { memoryDir } = resolveMemoryPaths(settings)
+  /** Rule 2 (the gate): a layout this build does not speak means the read is not attempted at all. */
+  try {
+    assertLayoutSupported(memoryDir, { version: MEMORY_LAYOUT_VERSION, producer: 'dsh-memory' })
+  } catch (error) {
+    return {
+      warning:
+        `记忆库的布局版本不被本插件支持，已跳过「任务位置」：${String((error as any)?.message ?? error)}。` +
+        '切片本身不受影响 —— 位置块是增强，不是切片的前提。',
+    }
+  }
+  const path = join(memoryDir, 'task-graph.json')
+  let raw: string
+  try {
+    raw = readFileSync(path, 'utf8')
+  } catch {
+    /** Absent is the NORMAL case for a workspace that never used the graph. No warning. */
+    return {}
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    return {
+      warning:
+        `${path} 存在但不是合法 JSON（${String((error as any)?.message ?? error)}），已跳过「任务位置」。` +
+        '这通常意味着另一个进程正在写入，或文件被手工改坏。',
+    }
+  }
+  const base = toTaskPosition(parsed)
+  if (base === undefined) {
+    /** A well-formed file that states no current node is a normal state, not a defect: no warning. */
+    return {}
+  }
+  /**
+   * Generation comes from the graft ledger, not from the graph. `0` from `graftGenerationOf` means
+   * "not a graft target" — writing 「第 0 代」 would be a fabricated fact, so the field is dropped and
+   * `renderTaskPosition` omits the whole sixth section.
+   */
+  const generation = sessionId === undefined ? 0 : graftGenerationOf(sessionId)
+  const chainOrigin = sessionId === undefined ? undefined : graftTargets.get(sessionId)?.sourceSessionId
+  return {
+    position: {
+      ...base,
+      ...(generation > 0 ? { generation } : {}),
+      ...(chainOrigin === undefined || chainOrigin.length === 0 ? {} : { originSessionId: chainOrigin }),
+    },
+  }
 }
 
 /**

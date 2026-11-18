@@ -308,6 +308,8 @@ export function makeCtx({ sourceLog, persistence = new FakePersistence(), paths,
   const scopedOnly = new Set()
   /** v7.3.1: emits recorded for assertions (see the `emit` handle below). */
   const emitted = []
+  /** v0.38: everything the plugin logged, so a degradation is observable instead of silent. */
+  const logged = { info: [], warn: [], error: [] }
   const listeners = new Map()
   const attachedSessions = []
   /**
@@ -510,11 +512,25 @@ export function makeCtx({ sourceLog, persistence = new FakePersistence(), paths,
     emit(name, ...args) {
       emitted.push({ name, args: clone(args) })
     },
-    logger: { info() {}, warn() {}, error() {} },
+    /**
+     * v0.38: the logger RECORDS instead of swallowing.
+     *
+     * `task-position` reports its degradations (an unreadable graph, an unsupported layout) as
+     * warnings rather than as failed slices — which is right, but it means the only evidence a
+     * degradation happened is what the logger received. A no-op logger makes that evidence
+     * unobservable, and a test cannot assert "the warning was raised" against silence.
+     */
+    logger: {
+      info: (...args) => { logged.info.push(args.map(String).join(' ')) },
+      warn: (...args) => { logged.warn.push(args.map(String).join(' ')) },
+      error: (...args) => { logged.error.push(args.map(String).join(' ')) },
+    },
     // test handles
     _tools: tools,
     _listeners: listeners,
     _emitted: emitted,
+    /** v0.38: `{ info: string[], warn: string[], error: string[] }` — what the plugin reported. */
+    _logged: logged,
     _persistence: persistence,
     _workspace: workspace,
     _workspaceRegistry: workspaceRegistry,

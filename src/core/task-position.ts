@@ -1,0 +1,272 @@
+/**
+ * ── TASK POSITION: WHERE THE PLAN SAYS THIS SESSION IS ────────────────────────────────────────────
+ *
+ * A slice replays what the source session DID. Three existing chunks already answer "what happened":
+ * `phase-roadmap` infers a phase from the LOG, `task-status` replays the last `todo_write`, and the
+ * pending state carries the unfinished instruction. None of them can answer "which node of the
+ * approved plan am I standing in", because that fact does not live in a session log at all — it lives
+ * in the task graph, which is the only artefact that spans generations.
+ *
+ * ── WHY THIS MODULE IS PURE, AND WHY THAT IS NOT A STYLE CHOICE ──────────────────────────────────
+ *
+ * `dsh-graft-slice` must never import `dsh-memory`: either plugin has to survive being uninstalled
+ * alone, so the four repositories hold zero static imports between them. That rules out sharing a
+ * `TaskGraph` type, and it has a consequence worth stating: the argument here is `unknown`, because the
+ * file this reads was written by ANOTHER PROCESS with a shape this module cannot verify at compile
+ * time. Every field is checked at runtime, and anything unrecognisable returns `undefined` — degrade to
+ * "there is no graph", never throw. A slice is the main function; the position is an enhancement, and an
+ * enhancement may not fail the thing it decorates.
+ *
+ * ── THE ONE THING THIS MODULE REFUSES TO DO ─────────────────────────────────────────────────────
+ *
+ * Invent a current node. An `active` node, or a `pending` node whose dependencies are all done, is a
+ * fact the graph states. When neither exists — a plan that is entirely done, or one whose every
+ * remaining node is blocked — the honest output is NO CHUNK. A heading reading 「当前节点：（无）」 looks
+ * like information and is actually the absence of it, and a reader who has just been handed a plan will
+ * believe it.
+ */
+
+/** The plan's current position, as plain data. `generation`/`originSessionId` come from graft. */
+export interface TaskPositionInput {
+  goal: string
+  goalLocked: boolean
+  current?: {
+    id: string
+    title: string
+    status: string
+    requirements: string[]
+    progress?: number
+  }
+  done: string[]
+  pending: string[]
+  blockedBy: string[]
+  unlocks: string[]
+  totalNodes: number
+  /**
+   * 第 N 代. Filled by GRAFT from its own ledger, never by the graph: `dsh-memory`'s `TaskGraph` has no
+   * `generation` field and no `originSessionId` (measured: zero occurrences in `src/graph.ts`). A value
+   * derived from a session id's prefix would be a guess wearing the shape of a fact.
+   */
+  generation?: number
+  /** The session the goal chain started from — graft's ledger, same rule as `generation`. */
+  originSessionId?: string
+  /** Set when more than one node claims `active`; the reader must be told rather than silently picking. */
+  multipleActive?: string[]
+}
+
+/** The statuses a node may carry. Anything else is treated as unrecognised and skipped. */
+const STATUSES = new Set(['pending', 'active', 'done', 'abandoned'])
+/** Nodes that exist for structural reasons and never describe work. */
+const STRUCTURAL = new Set(['start', 'goal'])
+/** Every list is capped: an id list is a signpost, not an inventory. */
+const MAX_NODE_LIST = 8
+/** The whole block is capped. Six sections at ~200 characters each. */
+export const TASK_POSITION_MAX_CHARS = 1200
+/** Requirements shown for the current node, most useful first. */
+const MAX_REQUIREMENTS = 3
+
+const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
+
+const stringList = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()) : []
+
+/**
+ * `unknown` graph in, position out. `undefined` means "nothing honest to say" — a malformed document, a
+ * document that is not a graph at all, or a plan with no current node.
+ */
+export function toTaskPosition(graph: unknown): TaskPositionInput | undefined {
+  if (graph === null || typeof graph !== 'object' || Array.isArray(graph)) return undefined
+  const record = graph as Record<string, unknown>
+  const rawNodes = record.nodes
+  if (!Array.isArray(rawNodes)) return undefined
+
+  /**
+   * Keep only nodes this module can describe. A hand-edited file must not make the block unreadable,
+   * and `start` is structural: it is done by definition, and listing it as "completed work" would put
+   * the word 「开始」 at the top of a list of real completed phases.
+   */
+  const nodes = rawNodes
+    .filter((node): node is Record<string, unknown> => node !== null && typeof node === 'object' && !Array.isArray(node))
+    .map((node) => ({
+      id: text(node.id),
+      title: text(node.title),
+      status: text(node.status),
+      dependsOn: stringList(node.dependsOn),
+      requirements: stringList(node.requirements),
+      progress: typeof node.progress === 'number' && Number.isFinite(node.progress) ? node.progress : undefined,
+    }))
+    .filter((node) => node.id.length > 0 && STATUSES.has(node.status))
+
+  if (nodes.length === 0) return undefined
+
+  const doneIds = new Set(nodes.filter((node) => node.status === 'done').map((node) => node.id))
+  const work = nodes.filter((node) => !STRUCTURAL.has(node.id))
+
+  const current = pickCurrent(work, doneIds)
+  /**
+   * ③ of the spec: no current node ⇒ NO CHUNK. This is the refusal described at the top of the file —
+   * a completed plan and a fully blocked one both land here, and both are honest silences.
+   */
+  if (current === undefined) return undefined
+
+  /**
+   * Blockers are the same edge set the runnability test used — otherwise the block would say
+   * 「我被谁阻塞：goal」 for a goal that never completes, which is true of every node in every plan and
+   * therefore tells the reader nothing.
+   */
+  const blockedBy = runnableEdges(current.node.dependsOn, work).filter((parent) => !doneIds.has(parent))
+  /** Reverse edges are computed, never stored: the graph records `dependsOn` only. */
+  const unlocks = work
+    .filter((node) => node.status === 'pending' && node.dependsOn.includes(current.node.id))
+    .map((node) => node.id)
+    .sort()
+
+  return {
+    goal: text(record.goal),
+    goalLocked: text(record.goalLockedAt).length > 0,
+    current: {
+      id: current.node.id,
+      title: current.node.title,
+      status: current.node.status,
+      requirements: current.node.requirements,
+      ...(current.node.progress === undefined ? {} : { progress: current.node.progress }),
+    },
+    done: work.filter((node) => node.status === 'done').map((node) => node.id),
+    pending: work.filter((node) => node.status === 'pending').map((node) => node.id),
+    blockedBy,
+    unlocks,
+    totalNodes: work.length,
+    ...(current.multipleActive === undefined ? {} : { multipleActive: current.multipleActive }),
+  }
+}
+
+/**
+ * ── WHICH NODE IS "CURRENT" (the spec's three cases, in order) ──────────────────────────────────
+ *
+ * ① an `active` node. More than one is a graph that contradicts itself; take the runnable one with the
+ *   smallest id and report the rest, because silently picking one would hide the contradiction.
+ * ② otherwise a `pending` node whose dependencies are ALL done — the next legal step.
+ * ③ otherwise nothing.
+ *
+ * ── `goal` IS NOT A PRECONDITION, AND TREATING IT AS ONE SILENTLY BLOCKS EVERY PLAN ────────────
+ *
+ * Measured against `dsh-memory/src/graph.ts`: `lock-goal` creates the goal node with `status:
+ * 'pending'`, and nothing ever completes it — the goal is the DESTINATION, not a step. So a node that
+ * declares `dependsOn: ['goal']` (which is the normal way to hang the first phase off the objective)
+ * can never have "all dependencies done", and the whole plan renders as "no current node".
+ *
+ * The first version of this function compared against every dependency and returned `undefined` for
+ * exactly that shape. The block disappeared for the most ordinary graph there is: one goal plus a
+ * chain of phases. A silence that looks like "the plan is finished".
+ *
+ * So the runnability test keeps ONLY edges to real work. `start` is excluded for the mirror reason —
+ * it is done from the beginning and constrains nothing.
+ */
+function runnableEdges(
+  dependsOn: readonly string[],
+  work: ReadonlyArray<{ id: string; status: string }>,
+): string[] {
+  const workIds = new Set(work.map((node) => node.id))
+  return dependsOn.filter((parent) => workIds.has(parent))
+}
+
+function pickCurrent(
+  work: ReadonlyArray<{ id: string; title: string; status: string; dependsOn: string[]; requirements: string[]; progress?: number }>,
+  doneIds: ReadonlySet<string>,
+): { node: (typeof work)[number]; multipleActive?: string[] } | undefined {
+  const byId = [...work].sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
+  const isRunnable = (node: (typeof work)[number]): boolean =>
+    runnableEdges(node.dependsOn, work).every((parent) => doneIds.has(parent))
+  const active = byId.filter((node) => node.status === 'active')
+  if (active.length > 0) {
+    const runnable = active.filter(isRunnable)
+    const chosen = runnable[0] ?? active[0]
+    if (chosen === undefined) return undefined
+    return active.length > 1 ? { node: chosen, multipleActive: active.map((node) => node.id) } : { node: chosen }
+  }
+  const next = byId.find((node) => node.status === 'pending' && isRunnable(node))
+  return next === undefined ? undefined : { node: next }
+}
+
+/**
+ * ── INPUT IN, TEXT OUT ──────────────────────────────────────────────────────────────────────────
+ *
+ * Six sections in a FIXED order, because the order is the argument: the goal orients, the current node
+ * locates, and the edges explain why the next step is not available yet. A reader who stops after two
+ * lines still knows what they are doing.
+ *
+ * Nothing here is padded. A missing `progress` prints no line at all rather than `0%` — zero is a
+ * measurement, and "we have not measured this" is not zero.
+ */
+export function renderTaskPosition(input: TaskPositionInput): string | undefined {
+  const current = input.current
+  if (current === undefined) return undefined
+  const lines: string[] = ['[TASK POSITION]']
+
+  /** 1. The goal, and whether it is still allowed to move. */
+  if (input.goal.length > 0) {
+    lines.push(`全局目标：${input.goal}${input.goalLocked ? '（已锁定）' : ''}`)
+  }
+
+  /** 2. The current node: title, requirements, progress — the three things a reader acts on. */
+  lines.push(`当前节点：${current.id}（${current.status}）${current.title}`)
+  const requirements = current.requirements.slice(0, MAX_REQUIREMENTS)
+  if (requirements.length > 0) {
+    lines.push(`  要求：${requirements.join('；')}${current.requirements.length > MAX_REQUIREMENTS ? `（共 ${current.requirements.length} 条）` : ''}`)
+  }
+  if (current.progress !== undefined) lines.push(`  进度：${current.progress}%`)
+
+  /** 3/4. The two halves of the plan, capped: a signpost, not an inventory. */
+  const idList = (ids: readonly string[]): string =>
+    ids.length <= MAX_NODE_LIST ? ids.join(', ') : `${ids.slice(0, MAX_NODE_LIST).join(', ')}…共 ${ids.length} 个`
+  if (input.done.length > 0) lines.push(`已完成：${idList(input.done)}`)
+  if (input.pending.length > 0) lines.push(`未开始：${idList(input.pending)}`)
+
+  /** 5. The edges. Both directions are named, because "why can't I start" and "who am I holding up" are different questions. */
+  if (input.blockedBy.length > 0) lines.push(`我被谁阻塞：${idList(input.blockedBy)}`)
+  if (input.unlocks.length > 0) lines.push(`我解锁谁：${idList(input.unlocks)}`)
+
+  /** 6. Generation, from graft's ledger only — see the interface comment. Omitted entirely when unknown. */
+  if (input.generation !== undefined && input.generation > 0) {
+    const origin = input.originSessionId === undefined || input.originSessionId.length === 0
+      ? ''
+      : `；目标链自 ${input.originSessionId} 起`
+    lines.push(`本代：第 ${input.generation} 代${origin}`)
+  }
+
+  /** A graph that names two current nodes is telling the reader something; say it rather than hide it. */
+  if (input.multipleActive !== undefined && input.multipleActive.length > 1) {
+    lines.push(`⚠ 多个节点同时 active（${input.multipleActive.join(', ')}）—— 图与预期不符，请用 memory_graph_update 修正`)
+  }
+
+  return capText(lines.join('\n'))
+}
+
+/**
+ * ── THE CAP, AND WHAT GIVES WAY FIRST ──────────────────────────────────────────────────────────
+ *
+ * Trimming the middle of a prose block is the usual answer; it is the wrong one here, because every
+ * line of this block is a different kind of statement. What gives way first is the least actionable
+ * repeated material, and the last thing to go is the current node — the one line a reader came for.
+ *
+ * In practice the sections are already bounded (8 ids per list, 3 requirements), so this is a backstop
+ * for pathological input: a single 900-character node title, say. When it does fire, the block says so.
+ */
+function capText(body: string): string {
+  if (body.length <= TASK_POSITION_MAX_CHARS) return body
+  const lines = body.split('\n')
+  /** Keep the heading and the current-node lines; drop list lines from the bottom until it fits. */
+  const keep = lines.slice(0, 4)
+  let rest = lines.slice(4)
+  let out = [...keep, ...rest].join('\n')
+  while (out.length > TASK_POSITION_MAX_CHARS && rest.length > 0) {
+    rest = rest.slice(0, -1)
+    out = [...keep, ...rest].join('\n')
+  }
+  if (out.length <= TASK_POSITION_MAX_CHARS) {
+    return `${out}\n（本块已按 ${TASK_POSITION_MAX_CHARS} 字符上限截断，完整图请用 memory_graph_read 读取）`
+  }
+  /** Even the header plus four lines overflows: cut the middle of the last kept line. */
+  const budget = TASK_POSITION_MAX_CHARS - 40
+  return `${keep.join('\n').slice(0, budget)}…（已截断）`
+}

@@ -53,8 +53,22 @@ export const GRAFT_LEDGER_FILES = ['.retired.json', '.transferred.json'] as cons
 /** The layout version of the MEMORY STORE this build reads. */
 export const MEMORY_LAYOUT_VERSION = 1
 
-/** The files this plugin reads out of the memory store. */
-export const MEMORY_LAYOUT_FILES = ['negatives.jsonl', 'facts.jsonl', 'experiences.jsonl', 'suggestions.jsonl'] as const
+/**
+ * The files this plugin reads out of the memory store.
+ *
+ * `task-graph.json` joined in v0.38 (B2-T3): a slice now carries the plan's CURRENT POSITION, read
+ * from that file. Without it in the list, a rename on memory's side would degrade this read to "no
+ * graph" — the slice would lose its own position and say nothing, which is the exact silent zero this
+ * module exists to convert into a named refusal. The test literal in `test/v102-layout-contract.test.mjs`
+ * must move in the same commit, on both sides.
+ */
+export const MEMORY_LAYOUT_FILES = [
+  'negatives.jsonl',
+  'facts.jsonl',
+  'experiences.jsonl',
+  'suggestions.jsonl',
+  'task-graph.json',
+] as const
 
 export interface LayoutManifest {
   layout: number

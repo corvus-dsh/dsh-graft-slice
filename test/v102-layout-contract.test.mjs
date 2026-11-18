@@ -48,7 +48,13 @@ const GRAFT_MANIFEST_LITERAL = {
 const MEMORY_MANIFEST_LITERAL = {
   layout: 1,
   producer: 'dsh-memory',
-  files: ['negatives.jsonl', 'facts.jsonl', 'experiences.jsonl', 'suggestions.jsonl'],
+  /**
+   * `task-graph.json` joined in v0.38 (B2-T3). T3 reads it to render the plan's current position into
+   * a slice. This literal and `dsh-memory/test/v102-layout-contract.test.mjs` carry the SAME list, on
+   * purpose: a one-sided change has to turn one of the two red, because the window between them is
+   * when a slice silently loses its position.
+   */
+  files: ['negatives.jsonl', 'facts.jsonl', 'experiences.jsonl', 'suggestions.jsonl', 'task-graph.json'],
 }
 
 const temp = (prefix) => mkdtempSync(join(tmpdir(), prefix))
@@ -74,11 +80,13 @@ test('P1-2: this reader must be able to parse the very manifest memory publishes
   writeFileSync(join(dir, LAYOUT_MANIFEST_FILE), `${JSON.stringify(MEMORY_MANIFEST_LITERAL, null, 2)}\n`, 'utf8')
   const read = assertLayoutSupported(dir, { version: MEMORY_LAYOUT_VERSION, producer: 'dsh-memory' })
   assert.equal(read.state, 'present')
+  /** Same list as `MEMORY_MANIFEST_LITERAL` above — v0.38 added `task-graph.json` (B2-T3). */
   assert.deepEqual(read.manifest.files, [
     'negatives.jsonl',
     'facts.jsonl',
     'experiences.jsonl',
     'suggestions.jsonl',
+    'task-graph.json',
   ])
 })
 
