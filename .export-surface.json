@@ -39,6 +39,7 @@
     "PRE_STEP_EVENT",
     "ROLLBACK_NOTICE",
     "ROLLBACK_NOTICE_MARKER",
+    "TASK_POSITION_MAX_CHARS",
     "TURN_STOPPING_EVENT",
     "WATERMARK_HARD_CEILING",
     "WATERMARK_HARD_FLOOR",
@@ -170,6 +171,7 @@
     "renderPhaseRoadmap",
     "renderPointerLines",
     "renderTaskBoard",
+    "renderTaskPosition",
     "renderWorkspaceState",
     "resetParadiseWriteCache",
     "resetRetiredSessions",
@@ -189,6 +191,7 @@
     "stripHostNoise",
     "takeRollbackNotice",
     "textOfMessage",
+    "toTaskPosition",
     "unavailableWriteBinding",
     "verifyHardConstraints",
     "verifyWorkspace",
@@ -198,6 +201,6 @@
     "writeLayoutManifest",
     "writeManualConstraints"
   ],
-  "count": 197,
+  "count": 200,
   "note": "baseline updated by a declared [export-change]"
 }
