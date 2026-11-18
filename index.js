@@ -1878,6 +1878,20 @@ function writeLayoutManifest(dir        , manifest                )          {
 
 /** The plan's current position, as plain data. `generation`/`originSessionId` come from graft. */
                                     
+     
+                                                                                                 
+    
+                                                                                                    
+                                                                                                  
+                                                                                               
+                                                                                             
+    
+                                                                                                  
+                                                                                                     
+                                                                                               
+                                                
+     
+                       
               
                      
              
@@ -1914,6 +1928,27 @@ const MAX_NODE_LIST = 8
 const TASK_POSITION_MAX_CHARS = 1200
 /** Requirements shown for the current node, most useful first. */
 const MAX_REQUIREMENTS = 3
+
+/**
+ * ── "THE PLAN WAS NEVER STARTED" ─────────────────────────────────────────────────────────────────
+ *
+ * The factory for the `notEstablished` variant, so the shape and the sentence it renders live in the
+ * same module as every other position body. A caller that builds this object by hand would be a
+ * second definition of what "no graph" looks like, and the first time the two drifted the chunk would
+ * say one thing at review and another at write time.
+ */
+function notEstablishedPosition()                    {
+  return {
+    notEstablished: true,
+    goal: '',
+    goalLocked: false,
+    done: [],
+    pending: [],
+    blockedBy: [],
+    unlocks: [],
+    totalNodes: 0,
+  }
+}
 
 const text = (value         )         => (typeof value === 'string' ? value.trim() : '')
 
@@ -2049,6 +2084,22 @@ function pickCurrent(
  * measurement, and "we have not measured this" is not zero.
  */
 function renderTaskPosition(input                   )                     {
+  /**
+   * The `notEstablished` variant first: it is the ONE case where there is something to say without a
+   * position, and the six sections below would have nothing true to put in any of them.
+   *
+   * The body is ONE cell, not a paragraph: this appears in the review the user reads before every
+   * slice of a graph-less profile, and 「每次切片都提醒一遍」 is how a warning becomes noise. It names
+   * the tool and the op so the reader can act without going to look anything up.
+   */
+  if (input.notEstablished === true) {
+    return [
+      '[TASK POSITION]',
+      '任务图：尚未建立',
+      '多步任务建议先调用 memory_graph_update 建图（op:bootstrap 可从零建整张计划），',
+      '之后每完成一个节点更新状态；跨切片的「我在哪」与 observer 的进度判断都依赖它。',
+    ].join('\n')
+  }
   const current = input.current
   if (current === undefined) return undefined
   const lines           = ['[TASK POSITION]']
@@ -8110,7 +8161,7 @@ export { readLedger, readLedgerPayload, readLedgerEpoch, LEDGER_EPOCH }
  * repositories hold zero static imports between them, so the graph arrives as `unknown` and is validated
  * field by field at runtime.
  */
-export { TASK_POSITION_MAX_CHARS, renderTaskPosition, toTaskPosition }
+export { TASK_POSITION_MAX_CHARS, notEstablishedPosition, renderTaskPosition, toTaskPosition }
                                  
 export {
   GRAFT_LEDGER_FILES,
@@ -17078,8 +17129,27 @@ function readTaskPosition(
   try {
     raw = readFileSync(path, 'utf8')
   } catch {
-    /** Absent is the NORMAL case for a workspace that never used the graph. No warning. */
-    return {}
+    /**
+     * ── ABSENT, AND THE TWO ABSENCES ARE NOT THE SAME FACT (v0.39, B2-T4) ────────────────────────
+     *
+     * Until this release both cases returned `{}` — "no chunk". That was right for ONE of them.
+     *
+     *   store dir MISSING   → the memory plugin is not installed here. Telling the model to call
+     *                         `memory_graph_update` would send it after a tool that does not exist.
+     *                         Silent, as before.
+     *   store dir PRESENT   → the plugin HAS run in this profile (it stamps `.layout.json` and its
+     *                         ledgers on activation), and yet no graph exists. That is a fact ABOUT
+     *                         THE PLAN, and it is actionable: the model can build one right now.
+     *
+     * WHY THIS DOES NOT CONTRADICT T3's RULE 1. Rule 1 says a broken or empty graph must not fail a
+     * slice, and a plan with no current node must stay silent — both still hold (see the branches
+     * below). It never said "say nothing when the plan does not exist"; it said silence is better
+     * than an empty shell. Here there IS something to say and somewhere to point.
+     *
+     * The gate is `existsSync(memoryDir)`, i.e. "is the PLUGIN here", not "is the GRAPH here".
+     */
+    if (!existsSync(memoryDir)) return {}
+    return { position: notEstablishedPosition() }
   }
   let parsed         
   try {

@@ -24,7 +24,7 @@
  * Phase mapping follows the spec sections in the comments below.
  */
 
-import { appendFileSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -134,9 +134,9 @@ import {
  * repositories hold zero static imports between them, so the graph arrives as `unknown` and is validated
  * field by field at runtime.
  */
-import { TASK_POSITION_MAX_CHARS, renderTaskPosition, toTaskPosition } from './core/task-position.js'
+import { TASK_POSITION_MAX_CHARS, notEstablishedPosition, renderTaskPosition, toTaskPosition } from './core/task-position.js'
 import type { TaskPositionInput } from './core/task-position.js'
-export { TASK_POSITION_MAX_CHARS, renderTaskPosition, toTaskPosition }
+export { TASK_POSITION_MAX_CHARS, notEstablishedPosition, renderTaskPosition, toTaskPosition }
 export type { TaskPositionInput }
 export {
   GRAFT_LEDGER_FILES,
@@ -9231,8 +9231,27 @@ function readTaskPosition(
   try {
     raw = readFileSync(path, 'utf8')
   } catch {
-    /** Absent is the NORMAL case for a workspace that never used the graph. No warning. */
-    return {}
+    /**
+     * ── ABSENT, AND THE TWO ABSENCES ARE NOT THE SAME FACT (v0.39, B2-T4) ────────────────────────
+     *
+     * Until this release both cases returned `{}` — "no chunk". That was right for ONE of them.
+     *
+     *   store dir MISSING   → the memory plugin is not installed here. Telling the model to call
+     *                         `memory_graph_update` would send it after a tool that does not exist.
+     *                         Silent, as before.
+     *   store dir PRESENT   → the plugin HAS run in this profile (it stamps `.layout.json` and its
+     *                         ledgers on activation), and yet no graph exists. That is a fact ABOUT
+     *                         THE PLAN, and it is actionable: the model can build one right now.
+     *
+     * WHY THIS DOES NOT CONTRADICT T3's RULE 1. Rule 1 says a broken or empty graph must not fail a
+     * slice, and a plan with no current node must stay silent — both still hold (see the branches
+     * below). It never said "say nothing when the plan does not exist"; it said silence is better
+     * than an empty shell. Here there IS something to say and somewhere to point.
+     *
+     * The gate is `existsSync(memoryDir)`, i.e. "is the PLUGIN here", not "is the GRAPH here".
+     */
+    if (!existsSync(memoryDir)) return {}
+    return { position: notEstablishedPosition() }
   }
   let parsed: unknown
   try {

@@ -28,6 +28,20 @@
 
 /** The plan's current position, as plain data. `generation`/`originSessionId` come from graft. */
 export interface TaskPositionInput {
+  /**
+   * ── THE PLAN DOES NOT EXIST YET (v0.39, B2-T4) ──────────────────────────────────────────────
+   *
+   * Set when the memory plugin IS present (its store directory exists) but no `task-graph.json` has
+   * ever been written. That is not "no position" — it is a fact about the plan, and an actionable
+   * one: the model can build a graph right now. Rendering the six sections here would be a lie
+   * (there is no goal, no node, no edge), so this variant carries its own one-sentence body.
+   *
+   * It is a FLAG on the existing kind rather than a new chunk kind on purpose: a new kind must be
+   * registered in four places (the `kind` union, the push site, the `priority` table, the `injected`
+   * count), and a missed registration is ㉛'s "the second door did not inherit the first door's
+   * guard". A body variant touches no registry.
+   */
+  notEstablished?: true
   goal: string
   goalLocked: boolean
   current?: {
@@ -64,6 +78,27 @@ const MAX_NODE_LIST = 8
 export const TASK_POSITION_MAX_CHARS = 1200
 /** Requirements shown for the current node, most useful first. */
 const MAX_REQUIREMENTS = 3
+
+/**
+ * ── "THE PLAN WAS NEVER STARTED" ─────────────────────────────────────────────────────────────────
+ *
+ * The factory for the `notEstablished` variant, so the shape and the sentence it renders live in the
+ * same module as every other position body. A caller that builds this object by hand would be a
+ * second definition of what "no graph" looks like, and the first time the two drifted the chunk would
+ * say one thing at review and another at write time.
+ */
+export function notEstablishedPosition(): TaskPositionInput {
+  return {
+    notEstablished: true,
+    goal: '',
+    goalLocked: false,
+    done: [],
+    pending: [],
+    blockedBy: [],
+    unlocks: [],
+    totalNodes: 0,
+  }
+}
 
 const text = (value: unknown): string => (typeof value === 'string' ? value.trim() : '')
 
@@ -199,6 +234,22 @@ function pickCurrent(
  * measurement, and "we have not measured this" is not zero.
  */
 export function renderTaskPosition(input: TaskPositionInput): string | undefined {
+  /**
+   * The `notEstablished` variant first: it is the ONE case where there is something to say without a
+   * position, and the six sections below would have nothing true to put in any of them.
+   *
+   * The body is ONE cell, not a paragraph: this appears in the review the user reads before every
+   * slice of a graph-less profile, and 「每次切片都提醒一遍」 is how a warning becomes noise. It names
+   * the tool and the op so the reader can act without going to look anything up.
+   */
+  if (input.notEstablished === true) {
+    return [
+      '[TASK POSITION]',
+      '任务图：尚未建立',
+      '多步任务建议先调用 memory_graph_update 建图（op:bootstrap 可从零建整张计划），',
+      '之后每完成一个节点更新状态；跨切片的「我在哪」与 observer 的进度判断都依赖它。',
+    ].join('\n')
+  }
   const current = input.current
   if (current === undefined) return undefined
   const lines: string[] = ['[TASK POSITION]']
