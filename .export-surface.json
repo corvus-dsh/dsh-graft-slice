@@ -39,6 +39,7 @@
     "PRE_STEP_EVENT",
     "ROLLBACK_NOTICE",
     "ROLLBACK_NOTICE_MARKER",
+    "STALE_AFTER_DAYS",
     "TASK_POSITION_MAX_CHARS",
     "TODO_STATUS_MAX_LINES",
     "TURN_STOPPING_EVENT",
@@ -193,6 +194,7 @@
     "sleepSync",
     "sliceLines",
     "slimScene",
+    "staleDays",
     "staleTodoHint",
     "stripHostNoise",
     "takeRollbackNotice",
@@ -208,6 +210,6 @@
     "writeLayoutManifest",
     "writeManualConstraints"
   ],
-  "count": 207,
-  "note": "baseline updated by a declared [export-change] (COMMIT aba0438 \"feat(handoff): 交接七段按 spec 固定顺序 + 后台结果转述（B3-1 F4 / B3-2 F5）[export-change] [bundle-change]\" (tree clean over src, index.js))"
+  "count": 209,
+  "note": "baseline updated by a declared [export-change] (COMMIT 8c28d17 \"feat(graft): task-position 说得出「自 … 起未更新」（TD-M17 ②③）[export-change]\" (tree clean over src, index.js))"
 }
