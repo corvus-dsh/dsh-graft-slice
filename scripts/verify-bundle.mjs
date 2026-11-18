@@ -241,27 +241,90 @@ if (surface !== undefined && !surface.includes('default')) {
   }
 
   /**
-   * The declaration may live in the commit message OR in an env var, because CI checks out with no
-   * message in reach (`git log` is shallow there, and a squashed PR has a different one). The env var
-   * is what the workflow sets from the head commit's subject.
+   * ── v0.39 (B2-T4b): THE DECLARATION MUST BE BOUND TO THE ARTIFACT BEING MEASURED ───────────────
    *
-   * ── AND THE LOCAL RUN HAD NO WAY TO DECLARE IT AT ALL (measured 2026-11-17) ────────────────────
+   * THE VULNERABILITY, REPRODUCED 2026-11-18 with HEAD=a5e9fc9 (which carries `[export-change]`):
    *
-   * The env var is set by the WORKFLOW. A developer who legitimately adds an export, writes
-   * `[export-change]` in the commit message as the gate instructs, and runs `npm run check` gets:
+   *   1. append one export to `src/index.ts`, `node scripts/build.mjs`
+   *   2. `node scripts/verify-bundle.mjs`
+   *      ⇒ "export surface matches the recorded baseline, or is declared — 201 -> 202; added:
+   *         v238UndeclaredProbe [declared]"   ⇒ 28/28, exit 0
+   *      ⇒ and `.export-surface.json` was REWRITTEN to hold that undeclared export.
    *
-   *     ✖ export surface … 189 -> 197 — add [export-change] to the commit message if intended
+   * Nothing was declared for that change. `git log -1` saw `[export-change]` on the PREVIOUS commit
+   * and this script treated it as covering the working tree. The damage here is worse than in
+   * `dsh-observer`: the waived run does not merely pass — it RECORDS the undeclared change as the new
+   * contract, so the next run says "unchanged" and no trace of it remains anywhere.
    *
-   * — advice they have already followed, with no environment variable to set and no documented way to
-   * set one. So the ONLY way to make the local chain green was to export a CI variable by hand, which
-   * nobody would discover. The gate became a step developers learn to skip, which is the failure mode
-   * this repository calls "a gate nobody runs is a comment" (⑯).
+   * ROOT CAUSE. `git log -1` is the declaration on the LATEST COMMIT; `surface` is `Object.keys()` of
+   * the built `index.js` — the WORKING TREE's artifact. After committing and then continuing to edit,
+   * those point at different things:
    *
-   * `git log -1` is the honest local answer: after `git commit`, the message IS in reach. It is tried
-   * ONLY after the env vars, because in CI the env var is the authoritative copy (a squashed PR's
-   * merge commit is not the message the author wrote). `-1` works in a depth-1 clone too — that
-   * argument would be about `git log` HISTORY, and this reads exactly one commit.
+   *   CI (right after a push)   → HEAD == the pushed commit, tree clean → the declaration APPLIES
+   *   local, commit-then-edit   → HEAD == the OLD commit, tree dirty    → it DOES NOT
+   *
+   * THE RULE. Environment variables always count (they are set for THIS run — the only thing a CI
+   * checkout can offer, since no author message is in reach there). A commit-message declaration
+   * counts ONLY when the tree is clean over the paths that PRODUCE the measured artifact.
+   *
+   * WHY NOT BAN COMMIT-MESSAGE DECLARATIONS: committing then running `npm run check` is the ordinary
+   * local path; banning it sends developers back to "export a CI variable by hand" — the dead end
+   * this file's own note at :248-258 records, which produces a gate people learn to skip (⑯).
+   *
+   * WHY NOT "SKIP WHEN `src/` CHANGED": that rule goes mute exactly where it matters, because an
+   * accidental artifact rebuild normally rides along with a `src/` change.
    */
+  const MEASURED_PATHS = ['src', 'index.js']
+  /**
+   * ── WHY THIS FILTERS `git status` INSTEAD OF PASSING A PATHSPEC ──────────────────────────────
+   *
+   * `git status --porcelain -- src index.js` ERRORS (exit 128) when `src` matches nothing, which is
+   * the ordinary shape of a minimal fixture — and possibly of a future layout where the source moved.
+   * A catch that reads "cannot ask ⇒ not clean" would then refuse every commit-message declaration in
+   * such a repository, which is the same dead end this gate was fixed to escape.
+   *
+   * So ask git for the whole status and filter by path HERE. `src` matches the directory and anything
+   * under it; `index.js` matches exactly. Rename lines (`R  old -> new`) are judged by their TARGET,
+   * because that is where the file is.
+   */
+  const isMeasuredPath = (path) => path === 'index.js' || path === 'src' || path.startsWith('src/')
+  const treeCleanOverMeasuredPaths = (() => {
+    try {
+      const out = String(
+        execFileSync('git', ['status', '--porcelain'], {
+          cwd: ROOT,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }),
+      ).trim()
+      if (out.length === 0) return true
+      for (const line of out.split('\n')) {
+        const body = line.slice(3)
+        const target = body.includes(' -> ') ? body.split(' -> ').pop() : body
+        const path = target.replace(/^"|"$/gu, '')
+        if (isMeasuredPath(path)) return false
+      }
+      return true
+    } catch {
+      /** Cannot ask at all (not a git checkout) ⇒ cannot claim clean. Fail closed. */
+      return false
+    }
+  })()
+  const headCommit = (() => {
+    try {
+      const raw = String(
+        execFileSync('git', ['--no-pager', 'log', '-1', '--pretty=%h%x09%s'], {
+          cwd: ROOT,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }),
+      ).trim()
+      const [sha, subject = ''] = raw.split('\t')
+      return { sha, subject }
+    } catch {
+      return { sha: '', subject: '' }
+    }
+  })()
   const commitMessage = (() => {
     try {
       return execFileSync('git', ['--no-pager', 'log', '-1', '--pretty=%B'], {
@@ -273,9 +336,18 @@ if (surface !== undefined && !surface.includes('default')) {
       return ''
     }
   })()
-  const declared = /\[export-change\]/u.test(
-    `${process.env.GRAFT_COMMIT_MESSAGE ?? ''}\n${process.env.GITHUB_HEAD_COMMIT_MESSAGE ?? ''}\n${commitMessage}`,
-  )
+  const envMessage = `${process.env.GRAFT_COMMIT_MESSAGE ?? ''}\n${process.env.GITHUB_HEAD_COMMIT_MESSAGE ?? ''}`
+  const fromEnvironment = /\[export-change\]/u.test(envMessage)
+  /** A commit-message declaration is honoured ONLY when the measured artifact IS that commit's. */
+  const fromCommit = treeCleanOverMeasuredPaths && /\[export-change\]/u.test(String(commitMessage))
+  const declared = fromEnvironment || fromCommit
+
+  /** Where the waiver came from — printed, so a reader can tell it covers the change they see. */
+  const declarationSource = fromEnvironment
+    ? 'ENVIRONMENT VARIABLE (GRAFT_COMMIT_MESSAGE / GITHUB_HEAD_COMMIT_MESSAGE) — set for this run'
+    : fromCommit
+      ? `COMMIT ${headCommit.sha} "${headCommit.subject}" (tree clean over ${MEASURED_PATHS.join(', ')})`
+      : undefined
 
   if (baseline === undefined || !Array.isArray(baseline.exports)) {
     // First run: record, do not judge. Writing a baseline is not a change to the contract.
@@ -315,14 +387,23 @@ if (surface !== undefined && !surface.includes('default')) {
       : `${previous.length} -> ${surface.length}` +
         (added.length > 0 ? `; added: ${added.join(', ')}` : '') +
         (removed.length > 0 ? `; removed: ${removed.join(', ')}` : '') +
-        (declared ? ' [declared]' : ' — add [export-change] to the commit message if intended')
+        (declared
+          ? ` [declared] source: ${declarationSource}`
+          : ' — add [export-change] to the commit message if intended' +
+            (!treeCleanOverMeasuredPaths && /\[export-change\]/u.test(String(commitMessage))
+              ? ` (note: commit ${headCommit.sha} declares [export-change], but the tree is DIRTY over ` +
+                `${MEASURED_PATHS.join(', ')} — that declaration does not cover uncommitted edits)`
+              : ''))
     check('export surface matches the recorded baseline, or is declared', same || declared, detail)
     if (!same && declared) {
-      // Refresh the baseline only when the change was declared: an undeclared change must keep
-      // failing until someone looks at it, not silently become the new normal.
+      /**
+       * Refresh the baseline only when the change was declared — and, since B2-T4b, only when the
+       * declaration actually covers THIS measurement (see `fromCommit`). An undeclared change must
+       * keep failing until someone looks at it, not silently become the new normal.
+       */
       writeFileSync(
         SURFACE_FILE,
-        `${JSON.stringify({ exports: surface, count: surface.length, note: 'baseline updated by a declared [export-change]' }, null, 2)}\n`,
+        `${JSON.stringify({ exports: surface, count: surface.length, note: `baseline updated by a declared [export-change] (${declarationSource})` }, null, 2)}\n`,
         'utf8',
       )
     }
