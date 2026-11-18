@@ -344,7 +344,17 @@ test('v7.0 P1-2: running jobs and subagents are declared as not migrating', () =
   assert.ok(notice, 'the target must be told what did not come across')
   assert.match(notice.text, /后台作业/)
   assert.match(notice.text, /子代理/)
-  assert.match(notice.text, /不会迁移|不会自动回到这里/)
+  /**
+   * ── v0.40 (B3 / F5): THE WORDING CHANGED, AND THE ASSERTION FOLLOWED THE PROMISE ────────────────
+   *
+   * This used to assert 「不会迁移|不会自动回到这里」 — the old, honest, useless sentence. B3 makes the
+   * promise the opposite one (results ARE relayed), so asserting the old text would pin a sentence
+   * that is now a lie. The test's INTENT — "the target is told what did not come across" — is kept,
+   * and the new assertion is stronger: the notice must say what will happen instead.
+   */
+  assert.match(notice.text, /不会被迁移/u, '仍然要说「进程不会被迁移」—— 那是事实')
+  assert.match(notice.text, /结果会转述到这里/u, '并且要说结果会来，否则读者会重跑')
+  assert.doesNotMatch(notice.text, /结果也不会自动回到这里/u, '旧措辞必须消失，它现在是一句假话')
 })
 
 test('v7.0 P1-2: nothing running means no notice at all', () => {

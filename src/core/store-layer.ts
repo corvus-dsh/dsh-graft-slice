@@ -65,6 +65,13 @@ export interface StorePaths {
   readonly pendingIgnition: string
   readonly drafts: string
   readonly prepared: string
+  /**
+   * v0.40 (B3 / F5): `.jsonl`, not `.json` — the ledger APPENDS one row per slice and is never
+   * rewritten as a whole. A single JSON document would have to be read-modify-written on every slice,
+   * which turns a concurrent slice into a lost update; the `deliveredAt` stamp then re-writes one line
+   * by identity. Same reasoning as the memory store's `*.jsonl` ledgers.
+   */
+  readonly pendingTransfers: string
 }
 
 export interface StoreLayer {
@@ -85,6 +92,7 @@ const FILE_NAMES = {
   pendingIgnition: '.graft-pending-ignition.json',
   drafts: '.graft-drafts.json',
   prepared: '.graft-prepared.json',
+  pendingTransfers: 'pending-transfers.jsonl',
 } as const
 
 /**
@@ -167,6 +175,7 @@ export function createStoreLayer(ctx: PluginContextLike | undefined, config: Sto
     pendingIgnition: join(dir, FILE_NAMES.pendingIgnition),
     drafts: join(dir, FILE_NAMES.drafts),
     prepared: join(dir, FILE_NAMES.prepared),
+    pendingTransfers: join(dir, FILE_NAMES.pendingTransfers),
   })
   return Object.freeze({ paths, ctx })
 }

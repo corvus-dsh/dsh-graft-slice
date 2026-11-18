@@ -88,16 +88,35 @@ test('phase 2: keeps an adaptive recent window, indexes older turns, embeds poin
   assert.equal(plan.olderTurnCount, 7 - plan.recentTurnCount)
   // v7.0 P12: +1 for the trailing [可回读索引].
   assert.equal(plan.chunks.length, plan.recentTurnCount + 3)
-  assert.equal(plan.chunks[0].kind, 'old-summary')
+  /**
+   * ── v0.40 (B3 / F4): FOUND BY KIND, NOT BY INDEX ────────────────────────────────────────────────
+   *
+   * This test used to read `plan.chunks[0]` — that is, it asserted the old LAYOUT (the history index
+   * came first). The spec fixes a different order, so the index moved down beside the read-back
+   * index; the CONTENT assertions below are unchanged on purpose: the block itself did not change,
+   * only where it sits.
+   *
+   * Kept as a lookup rather than a new fixed index: a positional assertion here would break again on
+   * the next legitimate reordering, and "the history index exists and says these things" is what this
+   * test is actually about.
+   */
+  const oldSummary = plan.chunks.find((chunk) => chunk.kind === 'old-summary')
+  assert.ok(oldSummary !== undefined, '历史片段索引必须出现')
   // v7.0 A3: a compact index replaces the per-turn prose summary.
-  assert.match(plan.chunks[0].text, /\[历史片段索引\]/)
-  assert.match(plan.chunks[0].text, /\[历史片段: Turn 1-/)
-  assert.match(plan.chunks[0].text, /graft_read_result/)
-  assert.match(plan.chunks[0].text, /涉及工具: read_file/)
-  assert.equal(plan.chunks[0].text.includes('[tool name=read_file seq='), false)
-  assert.equal(plan.chunks[0].text.includes('expand_result('), false)
+  assert.match(oldSummary.text, /\[历史片段索引\]/)
+  assert.match(oldSummary.text, /\[历史片段: Turn 1-/)
+  assert.match(oldSummary.text, /graft_read_result/)
+  assert.match(oldSummary.text, /涉及工具: read_file/)
+  assert.equal(oldSummary.text.includes('[tool name=read_file seq='), false)
+  assert.equal(oldSummary.text.includes('expand_result('), false)
   // The index must not carry the old turn prose it replaced.
-  assert.ok(plan.chunks[0].text.length < 400, `index stays tiny, got ${plan.chunks[0].text.length}`)
+  assert.ok(oldSummary.text.length < 400, `index stays tiny, got ${oldSummary.text.length}`)
+  /** And the new order: the history index sits AFTER the replayed turns (spec ④ before ⑦). */
+  assert.ok(
+    plan.chunks.findIndex((chunk) => chunk.kind === 'old-summary') >
+      plan.chunks.findIndex((chunk) => chunk.kind === 'recent-turn'),
+    '历史片段索引是索引，必须排在复述之后',
+  )
   assert.equal(plan.chunks.at(-1).kind, 'pending-state')
   // v6.2：优先用 todo；无 todo 时回退到经过噪声过滤的散文。
   // v0.20: the card is a task board, so the next action lives in the ⏭️ column

@@ -138,6 +138,16 @@ import { TASK_POSITION_MAX_CHARS, notEstablishedPosition, renderTaskPosition, to
 import type { TaskPositionInput } from './core/task-position.js'
 export { TASK_POSITION_MAX_CHARS, notEstablishedPosition, renderTaskPosition, toTaskPosition }
 export type { TaskPositionInput }
+/**
+ * ── v0.40 (B3 / F5): THE PENDING-TRANSFER LEDGER ────────────────────────────────────────────────
+ *
+ * Pure decision logic in `core/pending-transfers.ts`; the IO lives here, beside the other store
+ * readers, so there is exactly ONE place that opens this file.
+ */
+import { deliveryKey, isOwed, relayText, settledSince, transferRecord } from './core/pending-transfers.js'
+import type { PendingTransfer, SettledResult } from './core/pending-transfers.js'
+export { deliveryKey, relayText, settledSince, transferRecord }
+export type { PendingTransfer, SettledResult }
 export {
   GRAFT_LEDGER_FILES,
   GRAFT_LEDGER_LAYOUT_VERSION,
@@ -1189,6 +1199,18 @@ export interface ConstraintSelection {
  * ones in the slot that is actually read.
  */
 export const CONSTRAINT_PROMPT_MAX = 5
+
+/**
+ * ── v0.40 (B3 / F4): HOW MANY TODO LINES THE TAPE CARRIES ──────────────────────────────────────
+ *
+ * The spec fixes it at three. The reason is the same one that caps the constraints in the goal
+ * message: a block that grows without a limit stops being read. Three lines say what is next; the
+ * seq in the omission notice says where the rest is.
+ *
+ * A NAMED CONSTANT rather than a literal at the call site, because the number is part of the spec
+ * and a test must be able to assert against the same value the code uses.
+ */
+export const TODO_STATUS_MAX_LINES = 3
 
 /** Absolute, unqualified prohibitions: the ones that belong in the prompt. */
 const REDLINE_PATTERN =
@@ -2883,6 +2905,9 @@ function collectReadbackIndex(
 export interface OpenBackgroundWork {
   jobs: string[]
   subagents: string[]
+  /** The same items by ID (the labels above are for display). Added in v0.40 for the transfer ledger. */
+  jobIds: string[]
+  subagentIds: string[]
 }
 
 export function extractOpenBackgroundWork(events: readonly SessionEventLike[]): OpenBackgroundWork {
@@ -2916,7 +2941,22 @@ export function extractOpenBackgroundWork(events: readonly SessionEventLike[]): 
       if (id.length > 0) subagents.delete(id)
     }
   }
-  return { jobs: [...jobs.values()], subagents: [...subagents.values()] }
+  return {
+    jobs: [...jobs.values()],
+    subagents: [...subagents.values()],
+    /**
+     * ── v0.40 (B3 / F5): THE IDS, BECAUSE THE LABELS ARE FOR READING ────────────────────────────
+     *
+     * `jobs`/`subagents` carry the human LABELS — that is what the tape prints, and printing an opaque
+     * id in prose was never useful. The ledger however must watch IDS: a label is display text, and a
+     * `job/settled` event identifies its job by id. Measured while writing v241: keying the ledger on
+     * the label produced a row watching `后台作业 42` and the relay then matched nothing, forever.
+     *
+     * Additive fields, so every existing reader keeps working.
+     */
+    jobIds: [...jobs.keys()],
+    subagentIds: [...subagents.keys()],
+  }
 }
 
 /**
@@ -2926,7 +2966,7 @@ export function extractOpenBackgroundWork(events: readonly SessionEventLike[]): 
  * prevents is the target waiting:
  * "there are 2 jobs still running; their output will not arrive here."
  */
-function renderOpenWorkNotice(open: OpenBackgroundWork): string {
+export function renderOpenWorkNotice(open: OpenBackgroundWork): string {
   const total = open.jobs.length + open.subagents.length
   if (total === 0) return ''
   const parts: string[] = []
@@ -2935,8 +2975,9 @@ function renderOpenWorkNotice(open: OpenBackgroundWork): string {
   const names = [...open.jobs, ...open.subagents].slice(0, 5).join('、')
   const more = total > 5 ? ` 等 ${total} 项` : ''
   return (
-    `源会话里还有 ${parts.join('和')}仍在运行（${names}${more}）；` +
-    '它们不会被迁移，结果也不会自动回到这里。需要那些结果时，回到源会话查看，或重新发起。'
+    `源会话里还有 ${parts.join('和')}仍在运行（${names}${more}）。` +
+    '它们不会被迁移，但**结果会转述到这里** —— 目标会话下一次活动时会收到一条通知；' +
+    '在那之前不要重跑它们，否则同一件事会被做两遍。'
   )
 }
 
@@ -4394,16 +4435,6 @@ export function buildInjectionPlan(
       })
     }
   }
-  // Assistant work with no new instruction is history, not a handoff fact: it
-  // produces no chunk at all. The read-back index already points at every seq it
-  // produced, so nothing becomes unreachable by dropping the prose.
-  if (olderLines.length > 0) {
-    chunks.push({
-      kind: 'old-summary',
-      text: `[历史片段索引]\n${olderLines.join('\n')}`,
-      truncated: olderTruncated,
-    })
-  }
   // v7.5: the node plan sits ABOVE the status snapshot.
   //
   // Order is the whole point. `[Task Status]` answers "what is left"; this block
@@ -4435,6 +4466,16 @@ export function buildInjectionPlan(
       truncated: false,
     })
   }
+  /**
+   * ── v0.40 (B3 / F4): COMPUTE HERE, PUSH IN SPEC ORDER LATER ─────────────────────────────────────
+   *
+   * The spec fixes the order of seven sections, and `Task Status` (⑥) has to come AFTER the replayed
+   * turns (④) and after the background-work notice (⑤). The text however is computed from
+   * `taskState`, which is ready at this point in the function — so the body is built here and pushed
+   * below, in the order the spec names. Splitting "compute" from "place" is what lets one reordering
+   * touch nothing but the push sites.
+   */
+  let todoText: string | undefined
   if (taskState.todos.length > 0) {
     // v7.4: state the snapshot's age instead of implying it is current.
     //
@@ -4452,11 +4493,25 @@ export function buildInjectionPlan(
         (taskState.todoAgeTurns === undefined ? '' : `，约 ${taskState.todoAgeTurns} 轮前`) +
         `，此后又有 ${age} 个事件——可能已过期，按需用 graft_read_result 回读 seq=${taskState.todoSeq} 附近确认）`
       : ''
-    chunks.push({
-      kind: 'task-status',
-      text: `[Task Status]${ageLine}\n${taskState.todos.join('\n')}`,
-      truncated: false,
-    })
+    /**
+     * ── SPEC ⑥: AT MOST THREE, AND SAY WHAT WAS LEFT OUT ────────────────────────────────────────
+     *
+     * A handoff is read by a model resuming work, not by an auditor. Ten todos on this block push
+     * out the replayed turns that actually explain the work, and past a point a "plan" is a
+     * transcript. Three lines answer "what is next"; the seq answers "where are the rest".
+     *
+     * Truncation is DECLARED, never silent: a reader who cannot tell a short list from a cut one
+     * will believe the remaining work is two items when it is eleven — the same false-certainty the
+     * budget rules exist to avoid.
+     */
+    const shown = taskState.todos.slice(0, TODO_STATUS_MAX_LINES)
+    const omitted = taskState.todos.length - shown.length
+    const omittedLine =
+      omitted > 0
+        ? `\n（另有 ${omitted} 条未列出，原因是本节最多 ${TODO_STATUS_MAX_LINES} 条；` +
+          `完整清单用 graft_read_result 回读 seq=${taskState.todoSeq} 附近）`
+        : ''
+    todoText = `[Task Status]${ageLine}\n${shown.join('\n')}${omittedLine}`
   }
   if (taskState.subagentReports.length > 0) {
     // v7.2: in a debug slice, subagent reports are the first thing to go.
@@ -4497,15 +4552,11 @@ export function buildInjectionPlan(
   // correction to the target's implicit assumption that it now sees everything.
   // A target that believes it has the whole picture will wait for a subagent
   // report or a job result that is going to a session nobody is reading.
+  //
+  // v0.40 (B3 / F4): the PLACEMENT changed, not the reason — the spec puts this at ⑤, after the
+  // replayed turns (④) and before the todo list (⑥). It is computed here and pushed below.
   const openWork = extractOpenBackgroundWork(events)
   const openWorkText = renderOpenWorkNotice(openWork)
-  if (openWorkText.length > 0) {
-    chunks.push({
-      kind: 'open-work',
-      text: `[未随迁移带走的后台工作]\n${openWorkText}`,
-      truncated: false,
-    })
-  }
   // v7.0 P1: a turn is kept whole or not at all.
   //
   // v6.x ran each recent turn through `truncateMiddle()` when it exceeded
@@ -4533,6 +4584,58 @@ export function buildInjectionPlan(
       text: turn.replay ?? turn.text,
       turn: turn.turn,
       truncated: false,
+    })
+  }
+  /**
+   * ── v0.40 (B3 / F4): SPEC ORDER ⑤ ⑥, AND THE HISTORY INDEX BESIDE THE READ-BACK INDEX ─────────
+   *
+   * The seven sections the spec fixes, in its own numbering:
+   *
+   *   ① 总目标        — the goal message, which is emitted before any chunk
+   *   ② 你在哪        — `task-position`
+   *   ③ 硬约束（≤5）  — the goal message's constraint block
+   *   ④ 最近 3 轮     — `recent-turn ×N`, pushed immediately above
+   *   ⑤ 未完成的后台  — `open-work`   ← here
+   *   ⑥ 待办（≤3）    — `task-status` ← here
+   *   ⑦ 指针索引      — `readback-index`, pushed below
+   *
+   * WHAT THIS REORDERING DELIBERATELY DID NOT DO: it added no chunk kind, and no section prints a
+   * "①②③" marker. The order is carried by the push sequence and pinned by a test, because numbers
+   * in the tape would be read as content by every future reader.
+   *
+   * `old-summary` moved down here for the same reason: it is an INDEX of older material, and an index
+   * belongs next to the other index, not between "where you are" (②) and the work that explains it.
+   */
+  if (openWorkText.length > 0) {
+    /**
+     * ── v0.40 (B3 / F5): NAME THE OUTSTANDING COUNT, AND PROMISE THE HAND-OFF ───────────────────
+     *
+     * The spec asks for one line that says how many results are still owed and that they will be
+     * relayed. The count is what lets the reader decide whether to wait; the promise is what stops it
+     * re-running work that is already in flight.
+     */
+    const outstanding: string[] = []
+    if (openWork.jobs.length > 0) outstanding.push(`${openWork.jobs.length} 个后台作业`)
+    if (openWork.subagents.length > 0) outstanding.push(`${openWork.subagents.length} 个子代理`)
+    chunks.push({
+      kind: 'open-work',
+      text:
+        `[未随迁移带走的后台工作]\n${openWorkText}` +
+        `\n[未收到的结果：${outstanding.join('、')} —— 收到后会自动转述]`,
+      truncated: false,
+    })
+  }
+  if (todoText !== undefined) {
+    chunks.push({ kind: 'task-status', text: todoText, truncated: false })
+  }
+  // Assistant work with no new instruction is history, not a handoff fact: it
+  // produces no chunk at all. The read-back index already points at every seq it
+  // produced, so nothing becomes unreachable by dropping the prose.
+  if (olderLines.length > 0) {
+    chunks.push({
+      kind: 'old-summary',
+      text: `[历史片段索引]\n${olderLines.join('\n')}`,
+      truncated: olderTruncated,
     })
   }
   // The omission declaration is emitted after BOTH budget passes, so a turn
@@ -4966,6 +5069,168 @@ function storeDirOrEmpty(): string {
 function storeCtxOf(): PluginContextLike | undefined {
   return storeLayer?.ctx
 }
+/**
+ * ── v0.40 (B3 / F5): THE PENDING-TRANSFER LEDGER — THE ONLY READER AND WRITER ───────────────────
+ *
+ * Pure decisions live in `core/pending-transfers.ts`. The file lives here because every path/IO
+ * question in this plugin has exactly one answer, and a second module opening the same file would be
+ * the "second door" failure: two writers, one record, no single truth.
+ *
+ * APPEND, NEVER REWRITE — that is what `.jsonl` is for. A slice adds one row; a delivery stamps
+ * `deliveredAt` on one row by identity. Rewriting the whole file for either would lose concurrent
+ * rows, and a lost row is a promise nobody keeps.
+ */
+function appendPendingTransfer(record: PendingTransfer): void {
+  if (storeLayer === undefined) return
+  try {
+    appendFileSync(storeLayer.paths.pendingTransfers, `${JSON.stringify(record)}\n`, 'utf8')
+  } catch (error) {
+    /** A missed ledger row must not fail a slice that already wrote the target. */
+    try {
+      storeCtxOf()?.logger?.warn?.(`[dsh-graft-slice] pending-transfer ledger append failed: ${String((error as any)?.message ?? error)}`)
+    } catch {
+      /** Reporting must not change the result. */
+    }
+  }
+}
+
+/** Every ledger row for a target. Unreadable rows are SKIPPED, never fatal. */
+function readPendingTransfers(): PendingTransfer[] {
+  if (storeLayer === undefined) return []
+  let text: string
+  try {
+    text = readFileSync(storeLayer.paths.pendingTransfers, 'utf8')
+  } catch {
+    return []
+  }
+  const out: PendingTransfer[] = []
+  for (const line of text.split(/\r?\n/u)) {
+    if (line.trim().length === 0) continue
+    try {
+      const parsed = JSON.parse(line)
+      if (isRecord(parsed) && typeof parsed.targetSessionId === 'string' && typeof parsed.sourceSessionId === 'string') {
+        out.push(parsed as unknown as PendingTransfer)
+      }
+    } catch {
+      /** A torn line is one lost row, not a broken ledger. */
+    }
+  }
+  return out
+}
+
+/**
+ * Stamp `deliveredAt` on the rows that just spoke, by identity, APPENDING a corrected copy.
+ *
+ * "Appending a correction" rather than rewriting: the last row for a key wins when reading, which
+ * keeps the operation append-only (a crash mid-rewrite cannot truncate the file). The reader below
+ * folds rows last-wins, so the stamp is a new fact rather than an edit of an old one.
+ */
+function markTransfersDelivered(targetSessionId: string, deliveredKeys: readonly string[]): void {
+  if (storeLayer === undefined || deliveredKeys.length === 0) return
+  const at = Date.now()
+  for (const entry of readPendingTransfers()) {
+    if (entry.targetSessionId !== targetSessionId) continue
+    /** Only rows whose watched ids actually produced a delivered result are stamped. */
+    const touched = [...entry.watchJobIds.map((id) => `job:${id}`), ...entry.watchSubagentIds.map((id) => `subagent:${id}`)].some(
+      (prefix) => deliveredKeys.some((key) => key.startsWith(`${prefix}:`)),
+    )
+    if (!touched) continue
+    appendPendingTransfer({ ...entry, deliveredAt: at })
+  }
+}
+
+/**
+ * ── THE TARGET'S NEXT PRE-STEP: WHAT CAME BACK? ────────────────────────────────────────────────
+ *
+ * Returns the message to inject, or `undefined` when nothing is owed. It reads ONLY:
+ *   · the ledger (which ids, which watermark, which rows already spoke)
+ *   · the SOURCE session log, cold, through `sessionQuery`
+ *
+ * It never polls a process: `job/settled` is in the durable record, so "did it finish" is a fact the
+ * log already holds. That is what makes this work for a retired source on another host.
+ */
+async function pendingTransferMessage(ctx: PluginContextLike, targetSessionId: string): Promise<string | undefined> {
+  const owed = foldPendingTransfers(readPendingTransfers()).filter(
+    (entry) => entry.targetSessionId === targetSessionId && isOwed(entry),
+  )
+  if (owed.length === 0) return undefined
+
+  const settled: SettledResult[] = []
+  const sources: string[] = []
+  for (const entry of owed) {
+    let raw: any
+    try {
+      raw = await ctx.sessionQuery.readSession(entry.sourceSessionId)
+    } catch {
+      /** Rule ⑥: an unreadable source keeps the row and retries next pre-step. */
+      continue
+    }
+    const events = Array.isArray(raw?.events) ? raw.events : []
+    const found = settledSince(events, { jobs: entry.watchJobIds, subagents: entry.watchSubagentIds }, entry.sinceSeq)
+    if (found.length === 0) continue
+    settled.push(...found)
+    sources.push(entry.sourceSessionId)
+  }
+  if (settled.length === 0) return undefined
+
+  const text = relayText(settled, sources[0] ?? owed[0].sourceSessionId)
+  if (text === undefined) return undefined
+  /**
+   * Stamp BEFORE returning: a delivery that throws later must not be re-announced forever. The cost of
+   * stamping early is one lost relay; the cost of stamping late is a message on every single pre-step.
+   */
+  markTransfersDelivered(targetSessionId, settled.map(deliveryKey))
+  return text
+}
+
+/**
+ * Fold ledger rows LAST-WINS by `(targetSessionId, sourceSessionId)`.
+ *
+ * The file is append-only, so a stamp appears as a later row for the same key. Reading the last one
+ * gives the current truth without ever rewriting the file — and an interrupted append leaves an
+ * earlier, valid row rather than a truncated file.
+ */
+function foldPendingTransfers(rows: readonly PendingTransfer[]): PendingTransfer[] {
+  const byKey = new Map<string, PendingTransfer>()
+  for (const row of rows) {
+    byKey.set(`${row.targetSessionId}\u0000${row.sourceSessionId}`, row)
+  }
+  return [...byKey.values()]
+}
+
+/**
+ * ── THE PRE-STEP SHAPE OF A RELAY ──────────────────────────────────────────────────────────────
+ *
+ * Wrapped exactly like the workspace red line and the standing constraints: `role: 'user'` with an
+ * explicit `[系统提示…]` prefix and `source.kind = GRAFT_REPLAY_SOURCE_KIND`. That combination is the
+ * plugin's own channel — a plugin notice must never be dressed as something the USER said, and the
+ * `[系统提示]` prefix is what lets every later reader tell the two apart.
+ *
+ * Returns `[]` (not `undefined`) so the caller can spread it unconditionally.
+ */
+async function pendingTransferMessagesFor(ctx: PluginContextLike, agentId: string): Promise<any[]> {
+  try {
+    const text = await pendingTransferMessage(ctx, agentId)
+    if (text === undefined) return []
+    return [
+      {
+        id: `graft-pending-transfer-${agentId}` as any,
+        role: 'user',
+        content: [{ type: 'text', text: `[系统提示] ${text}` }],
+        source: { kind: GRAFT_REPLAY_SOURCE_KIND },
+      },
+    ]
+  } catch (error) {
+    /** A relay that throws must not fail the request; the row stays owed for the next pre-step. */
+    try {
+      ctx.logger?.warn?.(`[dsh-graft-slice] pending-transfer relay failed: ${String((error as any)?.message ?? error)}`)
+    } catch {
+      /** Reporting must not change the result. */
+    }
+    return []
+  }
+}
+
 /** Load durable retirement IDs. Missing/corrupt files never block activation. */
 function configureRetiredStore(ctx: PluginContextLike, settings: Required<GraftConfig>): void {
   /**
@@ -7565,6 +7830,39 @@ async function graftSliceAndInjectUnlocked(
     // graft it again merely because its seeded tape already sits above the
     // ratio. Marked before retirement so a crash mid-way still leaves the mark.
     markGraftTarget(newId, sourceId, Array.isArray(snapshot) ? snapshot.length : undefined, plan.goal)
+    /**
+     * ── v0.40 (B3 / F5): REMEMBER WHAT IS STILL OWED TO THE TARGET ────────────────────────────
+     *
+     * The tape has just promised the target that outstanding background results "会转述到这里". This
+     * is the row that makes the promise keepable: which ids to watch, and the boundary seq so a job
+     * that had ALREADY settled before the slice is never announced as news (its result is in the tape).
+     *
+     * Written AFTER the target exists and is marked, so a crash before this point leaves no ledger row
+     * pointing at a session that was rolled back. The cost of losing the row is a missed relay, which
+     * is exactly what the old behaviour did; the cost of a row for a dead target would be a retry loop.
+     */
+    /**
+     * ── WHY `raw.events`, NOT `events` ──────────────────────────────────────────────────────────
+     *
+     * `events` is the REPLAY slice: it stops at the boundary, because that is what the tape carries.
+     * A running background job is by definition in the live tail AFTER it — so filtering the ledger on
+     * the replay list would watch nothing on the most common day, and the promise in the tape would be
+     * unkeepable for exactly the case it was written for.
+     */
+    const sourceEvents = Array.isArray(raw?.events) ? raw.events : events
+    const outstandingWork = extractOpenBackgroundWork(sourceEvents)
+    if (outstandingWork.jobIds.length > 0 || outstandingWork.subagentIds.length > 0) {
+      appendPendingTransfer(
+        transferRecord({
+          targetSessionId: newId,
+          sourceSessionId: sourceId,
+          jobs: outstandingWork.jobIds,
+          subagents: outstandingWork.subagentIds,
+          sinceSeq: Number(plan.boundary?.boundarySeq ?? 0),
+          createdAt: Date.now(),
+        }),
+      )
+    }
     // v7.0 P0-5: register the durable, every-request constraint section for
     // this target. The goal message carries the same list; the section is the
     // copy that compaction cannot reach.
@@ -10772,7 +11070,27 @@ async function appendTransitionCard(
       // Never in the same step as the nudge: the model just received its one
       // chance and has not had the time to act on it.
       const urgentExtra = modelExtra.length > 0 ? [] : takeWatermarkEscalation(stableCtx, agentId, payload)
-      const appended = [...guardMessages, ...extra, ...rollbackMessages, ...planExtra, ...modelExtra, ...urgentExtra]
+      /**
+       * ── v0.40 (B3 / F5): RESULTS FROM THE SESSION THIS ONE REPLACED ─────────────────────────────
+       *
+       * Read the ledger and the retired source's log; if anything watched has settled since the slice,
+       * this is where the target is told. Deliberately in the SAME `appended` array as every other
+       * injection: anything outside it would either skip the fast path or ride along only when some
+       * other feature fired — a notice that arrives at the wrong time or never.
+       *
+       * `await` here is bounded by one cold log read per owed row, and it happens at most until the
+       * rows are stamped. A failed read returns `undefined` and the row is retried next pre-step.
+       */
+      const relayMessages = await pendingTransferMessagesFor(stableCtx, agentId)
+      const appended = [
+        ...guardMessages,
+        ...extra,
+        ...rollbackMessages,
+        ...planExtra,
+        ...modelExtra,
+        ...urgentExtra,
+        ...relayMessages,
+      ]
       /**
        * THE EMPTY CASE MEANS "NOTHING TO SAY", AND THE ROLLBACK NOTICE COUNTS AS SOMETHING.
        *

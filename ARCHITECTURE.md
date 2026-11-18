@@ -341,7 +341,7 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 
 | 项 | 内容 |
 |---|---|
-| 现状 | **`src/index.ts` 12,593 行 / 12,124 非空**（B2-T4 `b2-trigger` 第 1 条 —— 「插件在、图不在」时交接写一格提示，`readTaskPosition` 多一条分支 + `notEstablishedPosition` 的导入与再导出；接线前为 12,574 / 12,105，B2-T3 `task-position` 落地时为 12,350 / 11,882；两支汇池时是 12,312 / 11,844；只接抽取分支时是 12,259 / 11,791；只落函数与 store 时是 11,805 / 11,353；锚点三态文案改为名词短语后；三态化首次落地时为 11,512 / 11,074；语义状态族搬出前为 11,601 / 11,161。**行数口径：`wc -l`** —— `content.split(/\r?\n/)`，且文件以换行结尾时不计末尾空项；非空行 = 该数组中 `trim().length > 0` 的个数。已抽出的模块**不在这里写数字** —— 「已抽出几个」没有唯一口径：按搬移提交数、按 `index.ts` 的 import 数、按 `src/` 下的文件数，三者互不相同，而且**没有任何门禁在检查它**，所以这一行曾长期写着一个早已过时的数字。模块清单与尺寸约束都由 `test/v130-module-size-cap.test.mjs` 的扫描集执行，读那个文件即知当前到底有哪些模块、各自多少行。剩余部分仍含 90+ 导出、约 26 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册。**叶子搬移已尽**（2026-11-12 裁定，停止搬单件）：可搬的叶子族已全部搬出，剩余为 `buildTape` **496 行**（`families.mjs` 当时实测的声明跨度；三态化净增 0 行）；再往下必须切开闭包内部，**退出条件需重新立项** |
+| 现状 | **`src/index.ts` 12,911 行 / 12,433 非空**（B3 F4 七段顺序 + F5 后台转述 —— 前者只挪 push 位置并加一个常量，后者新增台账读写、转述包装与切片时写入；接线前为 12,593 / 12,124，B2-T4 为 12,574 / 12,105，B2-T3 为 12,350 / 11,882；两支汇池时是 12,312 / 11,844；只接抽取分支时是 12,259 / 11,791；只落函数与 store 时是 11,805 / 11,353；锚点三态文案改为名词短语后；三态化首次落地时为 11,512 / 11,074；语义状态族搬出前为 11,601 / 11,161。**行数口径：`wc -l`** —— `content.split(/\r?\n/)`，且文件以换行结尾时不计末尾空项；非空行 = 该数组中 `trim().length > 0` 的个数。已抽出的模块**不在这里写数字** —— 「已抽出几个」没有唯一口径：按搬移提交数、按 `index.ts` 的 import 数、按 `src/` 下的文件数，三者互不相同，而且**没有任何门禁在检查它**，所以这一行曾长期写着一个早已过时的数字。模块清单与尺寸约束都由 `test/v130-module-size-cap.test.mjs` 的扫描集执行，读那个文件即知当前到底有哪些模块、各自多少行。剩余部分仍含 90+ 导出、约 26 个内部模块级函数，覆盖：日志切片、磁带构建、注入计划、台账、锁、控制台命令、调试面板、工具注册。**叶子搬移已尽**（2026-11-12 裁定，停止搬单件）：可搬的叶子族已全部搬出，剩余为 `buildTape` **496 行**（`families.mjs` 当时实测的声明跨度；三态化净增 0 行）；再往下必须切开闭包内部，**退出条件需重新立项** |
 | 影响 | 单文件让「改 A 碰坏 B」的排查成本变高；diff review 困难；IDE 索引与增量构建变慢；新人无法按职责分层阅读 |
 | 为什么现在不动 | 见下方 TD-7：本轮只搬了「与彼岸层真正重叠」的两块。剩下的搬运是纯位移，不减复杂度，且 84 个测试文件直接 import 那些区域的 30 个符号 |
 | 退出条件（可验收） | ① 按职责拆成 `session-slice.ts` / `tape.ts` / `injection.ts` / `ledger.ts` / `guards.ts` / `console.ts` / `tools.ts` 等模块，每个 ≤ 800 行；② `index.ts` 只保留 `apply()` 装配与再导出，≤ 300 行；③ **拆前后测试数不变、全绿**；④ `scripts/build.mjs` 的产物字节差异仅来自模块边界（banner 与 import 语句）；⑤ 每个模块导出面的 `grep` 参考计数与拆前一致（防止顺手删了导出） |
@@ -421,6 +421,7 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 | `core/store-layer.ts` | 解析存储目录并创建存储层 | `createStoreLayer`, `resolveStoreDir` | `core/gateway-types.ts`, `utils/serialize.ts` |
 | `core/tape-shape.ts` | 磁带与边界的类型面 | `GraftTape`, `GraftBoundary` | `core/instruction-card.ts` |
 | `core/task-board.ts` | 渲染交接任务看板 | `renderTaskBoard` | `utils/serialize.ts` |
+| `core/pending-transfers.ts` | 判定「切片时留下的后台作业/子代理哪些已经结账、该转述给谁」（纯函数，零 IO） | `settledSince`, `relayText`, `deliveryKey`, `transferRecord`, `isOwed` | — |
 | `core/task-position.ts` | 把任务图渲染成「计划说我在哪个节点」一段（纯函数，零 IO） | `toTaskPosition`, `renderTaskPosition`, `TASK_POSITION_MAX_CHARS` | — |
 | `core/task-state.ts` | 抽取任务状态、边界与安全港 | `extractTaskState`, `checkTaskBoundary` | `core/watermark.ts`, `contracts/model-wording.ts`, `utils/serialize.ts` |
 | `core/text-normalize.ts` | 文本归一与近似重复判定 | `normalizeText`, `nearDuplicate` | — |
