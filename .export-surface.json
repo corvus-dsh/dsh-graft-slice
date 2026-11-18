@@ -144,6 +144,7 @@
     "name",
     "normalizeConfig",
     "normalizeWorkspace",
+    "notEstablishedPosition",
     "paradiseSpecifiers",
     "parseConsoleSetting",
     "parseIdentityMetadata",
@@ -201,6 +202,6 @@
     "writeLayoutManifest",
     "writeManualConstraints"
   ],
-  "count": 200,
+  "count": 201,
   "note": "baseline updated by a declared [export-change]"
 }
