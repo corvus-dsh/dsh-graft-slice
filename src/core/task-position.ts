@@ -66,6 +66,26 @@ export interface TaskPositionInput {
   originSessionId?: string
   /** Set when more than one node claims `active`; the reader must be told rather than silently picking. */
   multipleActive?: string[]
+  /**
+   * ── TD-M17 ②③: WHEN DID THIS NODE LAST MOVE? ──────────────────────────────────────────────────
+   *
+   * A graph that exists but is stale is MORE dangerous than a missing one: `task-position` renders it
+   * as fact, and a fresh reader (the next generation) acts on it. So the block must be able to say
+   * 「自 X 起未更新」 — and it must say it from data the CALLER supplied, never from a clock read
+   * inside this module. That is the same rule `monitor.ts` follows (zero clock so it can be unit
+   * tested), and here it is also what keeps the render a pure function of its input.
+   *
+   * `now` is injected by `readTaskPosition`. `updatedAt` comes from the graph node — this module
+   * never invents it. Either one absent ⇒ NO claim (unknown is not stale).
+   */
+  freshness?: {
+    /** The current node's `updatedAt`, as written by dsh-memory. */
+    updatedAt?: string
+    /** The caller's clock, as an ISO instant. Absent ⇒ no staleness judgement at all. */
+    now?: string
+    /** Override the threshold (tests, and a future config). Default `STALE_AFTER_DAYS`. */
+    staleAfterDays?: number
+  }
 }
 
 /** The statuses a node may carry. Anything else is treated as unrecognised and skipped. */
@@ -78,6 +98,14 @@ const MAX_NODE_LIST = 8
 export const TASK_POSITION_MAX_CHARS = 1200
 /** Requirements shown for the current node, most useful first. */
 const MAX_REQUIREMENTS = 3
+/**
+ * TD-M17 ②③: how long a node may sit unchanged before the block SAYS SO.
+ *
+ * 14 days, and it is a number this file does not pretend to derive: the real graph's nodes are
+ * updated per work session, so two weeks of silence is "nobody has touched this plan", not "a slow
+ * week". It is a display threshold, not a gate — nothing is hidden or refused because of it.
+ */
+export const STALE_AFTER_DAYS = 14
 
 /**
  * ── "THE PLAN WAS NEVER STARTED" ─────────────────────────────────────────────────────────────────
@@ -109,7 +137,15 @@ const stringList = (value: unknown): string[] =>
  * `unknown` graph in, position out. `undefined` means "nothing honest to say" — a malformed document, a
  * document that is not a graph at all, or a plan with no current node.
  */
-export function toTaskPosition(graph: unknown): TaskPositionInput | undefined {
+export function toTaskPosition(
+  graph: unknown,
+  /**
+   * TD-M17 ②③: `now` is INJECTED so this function stays pure. Omitting it is legal and means "do not
+   * judge freshness" — an offline reader or a test that only cares about the position gets the same
+   * six sections, with no staleness line invented from a clock this module read itself.
+   */
+  options: { now?: string; staleAfterDays?: number } = {},
+): TaskPositionInput | undefined {
   if (graph === null || typeof graph !== 'object' || Array.isArray(graph)) return undefined
   const record = graph as Record<string, unknown>
   const rawNodes = record.nodes
@@ -129,6 +165,8 @@ export function toTaskPosition(graph: unknown): TaskPositionInput | undefined {
       dependsOn: stringList(node.dependsOn),
       requirements: stringList(node.requirements),
       progress: typeof node.progress === 'number' && Number.isFinite(node.progress) ? node.progress : undefined,
+      /** TD-M17: the node's own last-update stamp; absence is unknown, not "just now". */
+      updatedAt: text(node.updatedAt),
     }))
     .filter((node) => node.id.length > 0 && STATUSES.has(node.status))
 
@@ -171,6 +209,19 @@ export function toTaskPosition(graph: unknown): TaskPositionInput | undefined {
     blockedBy,
     unlocks,
     totalNodes: work.length,
+    /**
+     * TD-M17 ②③: the freshness input, filled ONLY with what was actually read. `now` comes from the
+     * caller; when it is absent the renderer makes no judgement (see `renderTaskPosition`).
+     */
+    ...(current.node.updatedAt.length === 0 && options.now === undefined
+      ? {}
+      : {
+          freshness: {
+            ...(current.node.updatedAt.length === 0 ? {} : { updatedAt: current.node.updatedAt }),
+            ...(options.now === undefined ? {} : { now: options.now }),
+            ...(options.staleAfterDays === undefined ? {} : { staleAfterDays: options.staleAfterDays }),
+          },
+        }),
     ...(current.multipleActive === undefined ? {} : { multipleActive: current.multipleActive }),
   }
 }
@@ -206,7 +257,7 @@ function runnableEdges(
 }
 
 function pickCurrent(
-  work: ReadonlyArray<{ id: string; title: string; status: string; dependsOn: string[]; requirements: string[]; progress?: number }>,
+  work: ReadonlyArray<{ id: string; title: string; status: string; dependsOn: string[]; requirements: string[]; progress?: number; updatedAt: string }>,
   doneIds: ReadonlySet<string>,
 ): { node: (typeof work)[number]; multipleActive?: string[] } | undefined {
   const byId = [...work].sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
@@ -267,6 +318,23 @@ export function renderTaskPosition(input: TaskPositionInput): string | undefined
   }
   if (current.progress !== undefined) lines.push(`  进度：${current.progress}%`)
 
+  /**
+   * ── TD-M17 ②③: 「自 … 起未更新」 ──────────────────────────────────────────────────────────────
+   *
+   * The whole point of this line is that a stale graph is read as CURRENT: the next generation gets
+   * 「当前节点：b2-t3（pending）」 and redoes finished work. Saying the date is what turns a claim into
+   * dated evidence, and it costs one line inside the existing cap (the cap itself is untouched).
+   *
+   * The judgement lives in `staleDays` below and is a pure function of two instants. Anything it
+   * cannot parse, or a NEGATIVE age (clock skew between two machines), yields NO line: an unknown
+   * age must not become "recent", and it must not become "stale" either.
+   */
+  const age = staleDays(input.freshness)
+  if (age !== undefined) {
+    const since = input.freshness?.updatedAt?.slice(0, 10) ?? ''
+    lines.push(`  自 ${since} 起未更新（已 ${age} 天）`)
+  }
+
   /** 3/4. The two halves of the plan, capped: a signpost, not an inventory. */
   const idList = (ids: readonly string[]): string =>
     ids.length <= MAX_NODE_LIST ? ids.join(', ') : `${ids.slice(0, MAX_NODE_LIST).join(', ')}…共 ${ids.length} 个`
@@ -291,6 +359,28 @@ export function renderTaskPosition(input: TaskPositionInput): string | undefined
   }
 
   return capText(lines.join('\n'))
+}
+
+/**
+ * ── TD-M17 ②③: HOW STALE IS THIS NODE? (pure, two instants in, one number or `undefined` out) ───
+ *
+ * `undefined` covers three different cases on purpose, because the renderer's behaviour is the same
+ * for all of them and none of them is a measurement:
+ *   · either stamp missing or unparseable — the age is UNKNOWN;
+ *   · `neg` — `now` is before `updatedAt`, i.e. two clocks disagreed. Reporting "0 天" there would be
+ *     a filter for a value this function cannot defend;
+ *   · the age is within the threshold — the node is CURRENT, and saying "已 3 天" on every block
+ *     would train the reader to skip the line that matters.
+ */
+export function staleDays(freshness: TaskPositionInput['freshness'] | undefined): number | undefined {
+  if (freshness === undefined) return undefined
+  const updated = Date.parse(freshness.updatedAt ?? '')
+  const now = Date.parse(freshness.now ?? '')
+  if (!Number.isFinite(updated) || !Number.isFinite(now)) return undefined
+  const days = Math.floor((now - updated) / 86_400_000)
+  if (!Number.isFinite(days) || days < 0) return undefined
+  const threshold = freshness.staleAfterDays ?? STALE_AFTER_DAYS
+  return days > threshold ? days : undefined
 }
 
 /**

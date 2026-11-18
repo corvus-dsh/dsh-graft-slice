@@ -134,9 +134,9 @@ import {
  * repositories hold zero static imports between them, so the graph arrives as `unknown` and is validated
  * field by field at runtime.
  */
-import { TASK_POSITION_MAX_CHARS, notEstablishedPosition, renderTaskPosition, toTaskPosition } from './core/task-position.js'
+import { STALE_AFTER_DAYS, TASK_POSITION_MAX_CHARS, notEstablishedPosition, renderTaskPosition, staleDays, toTaskPosition } from './core/task-position.js'
 import type { TaskPositionInput } from './core/task-position.js'
-export { TASK_POSITION_MAX_CHARS, notEstablishedPosition, renderTaskPosition, toTaskPosition }
+export { STALE_AFTER_DAYS, TASK_POSITION_MAX_CHARS, notEstablishedPosition, renderTaskPosition, staleDays, toTaskPosition }
 export type { TaskPositionInput }
 /**
  * ── v0.40 (B3 / F5): THE PENDING-TRANSFER LEDGER ────────────────────────────────────────────────
@@ -9561,7 +9561,16 @@ function readTaskPosition(
         '这通常意味着另一个进程正在写入，或文件被手工改坏。',
     }
   }
-  const base = toTaskPosition(parsed)
+  const base = toTaskPosition(parsed, {
+    /**
+     * TD-M17 ②③: the clock is READ HERE, at the edge, and passed down.
+     *
+     * `core/task-position.ts` stays pure (zero clock) so the staleness judgement can be unit tested
+     * with two fixed instants. Injected per CALL, not captured once: a long-lived plugin must not
+     * render last week's clock.
+     */
+    now: new Date().toISOString(),
+  })
   if (base === undefined) {
     /** A well-formed file that states no current node is a normal state, not a defect: no warning. */
     return {}
