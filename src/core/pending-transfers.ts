@@ -215,25 +215,93 @@ export function settledSince(
 }
 
 /** The one message the target receives when results have come back. */
-export function relayText(settled: readonly SettledResult[], sourceSessionId: string): string | undefined {
+/**
+ * ── W1-5 (B4-0b-2): A FOREIGN RESULT IS QUOTED DATA, NOT LAYOUT ────────────────────────────────
+ *
+ * `relayText` dropped `summary` in verbatim (400 chars per item, no total cap) and the caller wrapped
+ * the whole thing in `[系统提示] …`. A job whose output contains `## 下一步`, a fenced block or a `---`
+ * therefore injected a HEADING or a FENCE into the target's context — inside a message that claims to
+ * be a plugin notice. `neutralizeStructure` already exists for exactly this (`pending-state.ts`), and
+ * user-typed text already goes through it; tool output did not.
+ *
+ * TWO MECHANISMS, and the second is the one that is easy to miss:
+ *
+ *   1. every `summary` passes through the injected `neutralize` (the caller supplies
+ *      `neutralizeStructure` — this module must not import `pending-state.ts`, which would make a
+ *      cycle, and the plugins' doctrine is "inject the value, keep the leaf ignorant");
+ *   2. the WHOLE relay has a character budget (`RELAY_TOTAL_CHARS`). Thirty settled items at 400 chars
+ *      each is 12,000 characters of somebody else's text in one pre-step message; past the budget each
+ *      remaining item is degraded to `seq + label` — still a usable pointer — and the omission is
+ *      DECLARED with a count, per the "silent truncation is a defect" rule.
+ */
+export const RELAY_TOTAL_CHARS = 2_000
+
+/** Injected so the leaf stays unaware of the layout layer (and no import cycle appears). */
+export type StructureNeutralizer = (text: string) => string
+
+export function relayText(
+  settled: readonly SettledResult[],
+  sourceSessionId: string,
+  options: { neutralize?: StructureNeutralizer; maxChars?: number } = {},
+): string | undefined {
   if (settled.length === 0) return undefined
+  const neutralize = options.neutralize ?? ((text: string) => text)
+  const budget = Number.isFinite(options.maxChars) ? Number(options.maxChars) : RELAY_TOTAL_CHARS
   const jobs = settled.filter((item) => item.kind === 'job')
   const subs = settled.filter((item) => item.kind === 'subagent')
   const counts: string[] = []
   if (jobs.length > 0) counts.push(`${jobs.length} 个后台作业`)
   if (subs.length > 0) counts.push(`${subs.length} 个子代理`)
 
-  const lines = [
-    `[先前会话的后台结果已回来] 切片时留下的 ${counts.join('和')}已经结束，结果转述如下。`,
-    ...settled.map((item) => {
-      const head = `· ${item.kind === 'job' ? '后台作业' : '子代理'} ${item.label}（${item.id}）已结束，settle 在 seq=${item.settledSeq}`
-      return item.summary === undefined
-        ? `${head}；摘要未随事件写入，原文用 graft_read_result(${sourceSessionId}, ${item.settledSeq}) 读取。`
-        : `${head}：\n  ${item.summary}`
-    }),
-    '这些结果不会再有第二次通知。需要原文时按上面的 seq 回读源会话。',
-  ]
-  return lines.join('\n')
+  const header = `[先前会话的后台结果已回来] 切片时留下的 ${counts.join('和')}已经结束，结果转述如下。`
+  const footer = '这些结果不会再有第二次通知。需要原文时按上面的 seq 回读源会话。'
+  /** Budget applies to the BODY: the header and footer are our own structure and always fit. */
+  const bodyBudget = Math.max(200, budget - header.length - footer.length)
+
+  const rendered: string[] = []
+  let used = 0
+  let omitted = 0
+  for (const item of settled) {
+    const kindName = item.kind === 'job' ? '后台作业' : '子代理'
+    const head = `· ${kindName} ${item.label}（${item.id}）已结束，settle 在 seq=${item.settledSeq}`
+    const pointerOnly = `· ${kindName} ${item.id} @ seq=${item.settledSeq}`
+    const withSummary = item.summary === undefined ? undefined : `${head}：\n  ${neutralize(item.summary)}`
+    const chosen = withSummary ?? `${head}；摘要未随事件写入，原文用 graft_read_result(${sourceSessionId}, ${item.settledSeq}) 读取。`
+    if (used + chosen.length <= bodyBudget || rendered.length === 0) {
+      rendered.push(chosen)
+      used += chosen.length
+      continue
+    }
+    /**
+     * Over budget. Degrade in TWO steps, because both are honest and they cost different amounts:
+     *
+     *   1. the full pointer (~80 chars) when it still fits — label + id + seq, no quoted text;
+     *   2. the minimal pointer (`<id> @ seq=`) when even that does not.
+     *
+     * MEASURED MISTAKE THIS CORRECTS: the first version always pushed the full `head`, so thirty
+     * over-budget items still added ~2,400 characters and the total came out at 2,955 against a
+     * 2,000-character budget — the cap existed in the code and had no effect on the output. A budget
+     * that can be exceeded by continuing to append is not a budget.
+     */
+    const fitsFull = used + head.length <= bodyBudget
+    const fitsMinimal = used + pointerOnly.length <= bodyBudget
+    if (fitsFull) {
+      rendered.push(head)
+      used += head.length
+    } else if (fitsMinimal) {
+      rendered.push(pointerOnly)
+      used += pointerOnly.length
+    }
+    /** Either way the item is counted as NOT fully relayed — the reader must know. */
+    omitted += 1
+  }
+
+  const omissionLine =
+    omitted === 0
+      ? ''
+      : `另有 ${omitted} 条结果因总长超出 ${budget} 字符预算而只保留回读坐标（内容未转述；这些结果确实存在，只是没在这里展开）。`
+
+  return [header, ...rendered, ...(omissionLine.length > 0 ? [omissionLine] : []), footer].join('\n')
 }
 
 /**

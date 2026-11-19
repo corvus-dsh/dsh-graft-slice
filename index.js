@@ -2489,25 +2489,93 @@ function settledSince(
 }
 
 /** The one message the target receives when results have come back. */
-function relayText(settled                          , sourceSessionId        )                     {
+/**
+ * ── W1-5 (B4-0b-2): A FOREIGN RESULT IS QUOTED DATA, NOT LAYOUT ────────────────────────────────
+ *
+ * `relayText` dropped `summary` in verbatim (400 chars per item, no total cap) and the caller wrapped
+ * the whole thing in `[系统提示] …`. A job whose output contains `## 下一步`, a fenced block or a `---`
+ * therefore injected a HEADING or a FENCE into the target's context — inside a message that claims to
+ * be a plugin notice. `neutralizeStructure` already exists for exactly this (`pending-state.ts`), and
+ * user-typed text already goes through it; tool output did not.
+ *
+ * TWO MECHANISMS, and the second is the one that is easy to miss:
+ *
+ *   1. every `summary` passes through the injected `neutralize` (the caller supplies
+ *      `neutralizeStructure` — this module must not import `pending-state.ts`, which would make a
+ *      cycle, and the plugins' doctrine is "inject the value, keep the leaf ignorant");
+ *   2. the WHOLE relay has a character budget (`RELAY_TOTAL_CHARS`). Thirty settled items at 400 chars
+ *      each is 12,000 characters of somebody else's text in one pre-step message; past the budget each
+ *      remaining item is degraded to `seq + label` — still a usable pointer — and the omission is
+ *      DECLARED with a count, per the "silent truncation is a defect" rule.
+ */
+const RELAY_TOTAL_CHARS = 2_000
+
+/** Injected so the leaf stays unaware of the layout layer (and no import cycle appears). */
+                                                           
+
+function relayText(
+  settled                          ,
+  sourceSessionId        ,
+  options                                                           = {},
+)                     {
   if (settled.length === 0) return undefined
+  const neutralize = options.neutralize ?? ((text        ) => text)
+  const budget = Number.isFinite(options.maxChars) ? Number(options.maxChars) : RELAY_TOTAL_CHARS
   const jobs = settled.filter((item) => item.kind === 'job')
   const subs = settled.filter((item) => item.kind === 'subagent')
   const counts           = []
   if (jobs.length > 0) counts.push(`${jobs.length} 个后台作业`)
   if (subs.length > 0) counts.push(`${subs.length} 个子代理`)
 
-  const lines = [
-    `[先前会话的后台结果已回来] 切片时留下的 ${counts.join('和')}已经结束，结果转述如下。`,
-    ...settled.map((item) => {
-      const head = `· ${item.kind === 'job' ? '后台作业' : '子代理'} ${item.label}（${item.id}）已结束，settle 在 seq=${item.settledSeq}`
-      return item.summary === undefined
-        ? `${head}；摘要未随事件写入，原文用 graft_read_result(${sourceSessionId}, ${item.settledSeq}) 读取。`
-        : `${head}：\n  ${item.summary}`
-    }),
-    '这些结果不会再有第二次通知。需要原文时按上面的 seq 回读源会话。',
-  ]
-  return lines.join('\n')
+  const header = `[先前会话的后台结果已回来] 切片时留下的 ${counts.join('和')}已经结束，结果转述如下。`
+  const footer = '这些结果不会再有第二次通知。需要原文时按上面的 seq 回读源会话。'
+  /** Budget applies to the BODY: the header and footer are our own structure and always fit. */
+  const bodyBudget = Math.max(200, budget - header.length - footer.length)
+
+  const rendered           = []
+  let used = 0
+  let omitted = 0
+  for (const item of settled) {
+    const kindName = item.kind === 'job' ? '后台作业' : '子代理'
+    const head = `· ${kindName} ${item.label}（${item.id}）已结束，settle 在 seq=${item.settledSeq}`
+    const pointerOnly = `· ${kindName} ${item.id} @ seq=${item.settledSeq}`
+    const withSummary = item.summary === undefined ? undefined : `${head}：\n  ${neutralize(item.summary)}`
+    const chosen = withSummary ?? `${head}；摘要未随事件写入，原文用 graft_read_result(${sourceSessionId}, ${item.settledSeq}) 读取。`
+    if (used + chosen.length <= bodyBudget || rendered.length === 0) {
+      rendered.push(chosen)
+      used += chosen.length
+      continue
+    }
+    /**
+     * Over budget. Degrade in TWO steps, because both are honest and they cost different amounts:
+     *
+     *   1. the full pointer (~80 chars) when it still fits — label + id + seq, no quoted text;
+     *   2. the minimal pointer (`<id> @ seq=`) when even that does not.
+     *
+     * MEASURED MISTAKE THIS CORRECTS: the first version always pushed the full `head`, so thirty
+     * over-budget items still added ~2,400 characters and the total came out at 2,955 against a
+     * 2,000-character budget — the cap existed in the code and had no effect on the output. A budget
+     * that can be exceeded by continuing to append is not a budget.
+     */
+    const fitsFull = used + head.length <= bodyBudget
+    const fitsMinimal = used + pointerOnly.length <= bodyBudget
+    if (fitsFull) {
+      rendered.push(head)
+      used += head.length
+    } else if (fitsMinimal) {
+      rendered.push(pointerOnly)
+      used += pointerOnly.length
+    }
+    /** Either way the item is counted as NOT fully relayed — the reader must know. */
+    omitted += 1
+  }
+
+  const omissionLine =
+    omitted === 0
+      ? ''
+      : `另有 ${omitted} 条结果因总长超出 ${budget} 字符预算而只保留回读坐标（内容未转述；这些结果确实存在，只是没在这里展开）。`
+
+  return [header, ...rendered, ...(omissionLine.length > 0 ? [omissionLine] : []), footer].join('\n')
 }
 
 /**
@@ -8665,11 +8733,20 @@ export { STALE_AFTER_DAYS, TASK_POSITION_MAX_CHARS, notEstablishedPosition, rend
 export const backgroundWorkInternals = {
   JOB_OPEN_EVENT_NAMES,
   JOB_SETTLE_EVENT_NAMES,
+  RELAY_TOTAL_CHARS,
   SUBAGENT_OPEN_EVENT_NAMES,
   SUBAGENT_SETTLE_EVENT_NAMES,
   isBackgroundOpenEvent,
   isBackgroundSettleEvent,
   backgroundWorkIdOf,
+  /**
+   * W1-5: the structural neutraliser, exposed THROUGH this object rather than as a new top-level name.
+   *
+   * The test-seam doctrine in this file says "prefer folding a new function into an object already
+   * listed; one more top-level export costs a name forever". `neutralizeStructure` is the function the
+   * relay now calls, and a test that re-implements it would be testing its own copy.
+   */
+  neutralizeStructure,
 }
 export { deliveryKey, relayText, settledSince, transferRecord }
                                               
@@ -13623,7 +13700,12 @@ async function pendingTransferMessage(ctx                   , targetSessionId   
   }
   if (settled.length === 0) return undefined
 
-  const text = relayText(settled, sources[0] ?? owed[0].sourceSessionId)
+  /**
+   * W1-5: the relay quotes FOREIGN text, so it goes through the same structural neutraliser the
+   * user-turn replay already uses. Without it a job whose output contains `## 下一步` or a fence
+   * injects a heading into a message that claims to be a plugin notice.
+   */
+  const text = relayText(settled, sources[0] ?? owed[0].sourceSessionId, { neutralize: neutralizeStructure })
   if (text === undefined) return undefined
   /**
    * Stamp BEFORE returning: a delivery that throws later must not be re-announced forever. The cost of
@@ -15642,8 +15724,16 @@ async function graftSliceAndInjectUnlocked(
   options               ,
 )                       {
   const settings = normalizeConfig(config)
-  const sourceId = asNonEmptyString(sourceSessionId, 'sourceSessionId')
-  const newId = asNonEmptyString(newSessionId, 'newSessionId')
+  const sourceId = asSessionIdOrThrow(sourceSessionId, 'sourceSessionId')
+  /**
+   * ── W1-4 (B4-0b-2): THE TARGET ID IS A FILENAME AND A KEY, SO ITS ALPHABET IS PART OF THE API ──
+   *
+   * `asNonEmptyString` accepted `../x`, `C:\x`, `\\?\C:\x` and anything containing NUL. The journal
+   * filename was protected by `encodeURIComponent`, but the id is ALSO used as a title suffix, a
+   * `.graft-targets.json` key, an audit field, and a `persistence.create` argument — one validated
+   * alphabet at the entry is the only place all of those can be covered at once.
+   */
+  const newId = asSessionIdOrThrow(newSessionId, 'newSessionId')
   if (sourceId === newId) {
     throw graftError('SAME_SESSION', 'sourceSessionId and newSessionId must differ')
   }
@@ -17025,10 +17115,56 @@ export function txnOwnerVerdict(record                , now         = Date.now()
  * journal's only job.
  */
 function txnFileFor(sourceSessionId        )         {
-  // The id is already restricted to safe characters by asNonEmptyString + the
-  // host's id policy; encode anyway so a future host that permits other shapes
-  // cannot escape the directory.
+  /**
+   * ── W1-4 (B4-0b-2): THE COMMENT HERE USED TO BE FALSE ────────────────────────────────────────
+   *
+   * It said: "The id is already restricted to safe characters by asNonEmptyString + the host's id
+   * policy". Measured, both halves are wrong — `asNonEmptyString` (`utils/serialize.ts:24`) checks
+   * `typeof === 'string' && length !== 0` and nothing else, and the host's policy is not something a
+   * plugin may assume. So the ONLY thing standing between a hostile id and the store was
+   * `encodeURIComponent`, which is real protection for the FILENAME but says nothing about the id
+   * elsewhere (titles, target marks, audit lines, `.graft-targets.json` keys).
+   *
+   * The id is now validated at the entry (`asSessionIdOrThrow`), and this encode stays as defence in
+   * depth. If the comment and the code ever disagree again, the comment is the thing to distrust.
+   */
   return join(storePaths().txnDir, `${encodeURIComponent(sourceSessionId)}.json`)
+}
+
+/**
+ * ── W1-4 (B4-0b-2): ONE VALIDATED ALPHABET FOR SESSION IDS ─────────────────────────────────────
+ *
+ * The rule: `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`.
+ *
+ * WHAT IT EXCLUDES AND WHY EACH ONE MATTERS (not "for safety" in the abstract):
+ *   · `/` and `\`  — a path separator turns an id into a path fragment (journal filename,
+ *                     `.graft-targets.json` key, log line).
+ *   · `:`          — `C:` / `\\?\C:` are drive and device prefix syntax on Windows.
+ *   · `..`         — rejected by the `[A-Za-z0-9._-]` body only if it STARTS the id; a `..` anywhere
+ *                     is also refused explicitly below, because `foo..bar` is legal on disk but
+ *                     becomes a traversal the moment anyone joins it.
+ *   · NUL and other control characters — truncate paths in native calls and corrupt JSON round-trips.
+ *   · leading `.`  — hidden files, and `..` starts that way.
+ *
+ * WHY 128 CHARACTERS: the longest session id this project has produced is ~40 characters
+ * (`auto-graft-<base36>-<6>`); 128 leaves room for a host that uses UUIDs with prefixes and still
+ * bounds the filename the id ends up in (`encodeURIComponent` can triple a character's byte count).
+ *
+ * `encodeURIComponent` in `txnFileFor` stays as defence in depth: this check is the rule, that one is
+ * the belt.
+ */
+function asSessionIdOrThrow(value         , field        )         {
+  const id = asNonEmptyString(value, field)
+  if (id.length > 128) throw graftError('INVALID_ARGUMENT', `${field} must be at most 128 characters (got ${id.length})`)
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(id)) {
+    throw graftError(
+      'INVALID_ARGUMENT',
+      `${field} must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ — ` +
+        'path separators, drive prefixes, control characters and a leading dot are refused',
+    )
+  }
+  if (id.includes('..')) throw graftError('INVALID_ARGUMENT', `${field} must not contain ".."`)
+  return id
 }
 
 /**

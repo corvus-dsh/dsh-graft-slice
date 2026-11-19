@@ -153,6 +153,7 @@ import {
   isScanExhausted,
   JOB_OPEN_EVENT_NAMES,
   JOB_SETTLE_EVENT_NAMES,
+  RELAY_TOTAL_CHARS,
   relayText,
   settledSince,
   SUBAGENT_OPEN_EVENT_NAMES,
@@ -173,11 +174,20 @@ import type { PendingTransfer, SettledResult } from './core/pending-transfers.js
 export const backgroundWorkInternals = {
   JOB_OPEN_EVENT_NAMES,
   JOB_SETTLE_EVENT_NAMES,
+  RELAY_TOTAL_CHARS,
   SUBAGENT_OPEN_EVENT_NAMES,
   SUBAGENT_SETTLE_EVENT_NAMES,
   isBackgroundOpenEvent,
   isBackgroundSettleEvent,
   backgroundWorkIdOf,
+  /**
+   * W1-5: the structural neutraliser, exposed THROUGH this object rather than as a new top-level name.
+   *
+   * The test-seam doctrine in this file says "prefer folding a new function into an object already
+   * listed; one more top-level export costs a name forever". `neutralizeStructure` is the function the
+   * relay now calls, and a test that re-implements it would be testing its own copy.
+   */
+  neutralizeStructure,
 }
 export { deliveryKey, relayText, settledSince, transferRecord }
 export type { PendingTransfer, SettledResult }
@@ -5245,7 +5255,12 @@ async function pendingTransferMessage(ctx: PluginContextLike, targetSessionId: s
   }
   if (settled.length === 0) return undefined
 
-  const text = relayText(settled, sources[0] ?? owed[0].sourceSessionId)
+  /**
+   * W1-5: the relay quotes FOREIGN text, so it goes through the same structural neutraliser the
+   * user-turn replay already uses. Without it a job whose output contains `## 下一步` or a fence
+   * injects a heading into a message that claims to be a plugin notice.
+   */
+  const text = relayText(settled, sources[0] ?? owed[0].sourceSessionId, { neutralize: neutralizeStructure })
   if (text === undefined) return undefined
   /**
    * Stamp BEFORE returning: a delivery that throws later must not be re-announced forever. The cost of
@@ -7264,8 +7279,16 @@ async function graftSliceAndInjectUnlocked(
   options?: SliceOptions,
 ): Promise<GraftReport> {
   const settings = normalizeConfig(config)
-  const sourceId = asNonEmptyString(sourceSessionId, 'sourceSessionId')
-  const newId = asNonEmptyString(newSessionId, 'newSessionId')
+  const sourceId = asSessionIdOrThrow(sourceSessionId, 'sourceSessionId')
+  /**
+   * ── W1-4 (B4-0b-2): THE TARGET ID IS A FILENAME AND A KEY, SO ITS ALPHABET IS PART OF THE API ──
+   *
+   * `asNonEmptyString` accepted `../x`, `C:\x`, `\\?\C:\x` and anything containing NUL. The journal
+   * filename was protected by `encodeURIComponent`, but the id is ALSO used as a title suffix, a
+   * `.graft-targets.json` key, an audit field, and a `persistence.create` argument — one validated
+   * alphabet at the entry is the only place all of those can be covered at once.
+   */
+  const newId = asSessionIdOrThrow(newSessionId, 'newSessionId')
   if (sourceId === newId) {
     throw graftError('SAME_SESSION', 'sourceSessionId and newSessionId must differ')
   }
@@ -8647,10 +8670,56 @@ export function txnOwnerVerdict(record: GraftTxnRecord, now: number = Date.now()
  * journal's only job.
  */
 function txnFileFor(sourceSessionId: string): string {
-  // The id is already restricted to safe characters by asNonEmptyString + the
-  // host's id policy; encode anyway so a future host that permits other shapes
-  // cannot escape the directory.
+  /**
+   * ── W1-4 (B4-0b-2): THE COMMENT HERE USED TO BE FALSE ────────────────────────────────────────
+   *
+   * It said: "The id is already restricted to safe characters by asNonEmptyString + the host's id
+   * policy". Measured, both halves are wrong — `asNonEmptyString` (`utils/serialize.ts:24`) checks
+   * `typeof === 'string' && length !== 0` and nothing else, and the host's policy is not something a
+   * plugin may assume. So the ONLY thing standing between a hostile id and the store was
+   * `encodeURIComponent`, which is real protection for the FILENAME but says nothing about the id
+   * elsewhere (titles, target marks, audit lines, `.graft-targets.json` keys).
+   *
+   * The id is now validated at the entry (`asSessionIdOrThrow`), and this encode stays as defence in
+   * depth. If the comment and the code ever disagree again, the comment is the thing to distrust.
+   */
   return join(storePaths().txnDir, `${encodeURIComponent(sourceSessionId)}.json`)
+}
+
+/**
+ * ── W1-4 (B4-0b-2): ONE VALIDATED ALPHABET FOR SESSION IDS ─────────────────────────────────────
+ *
+ * The rule: `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`.
+ *
+ * WHAT IT EXCLUDES AND WHY EACH ONE MATTERS (not "for safety" in the abstract):
+ *   · `/` and `\`  — a path separator turns an id into a path fragment (journal filename,
+ *                     `.graft-targets.json` key, log line).
+ *   · `:`          — `C:` / `\\?\C:` are drive and device prefix syntax on Windows.
+ *   · `..`         — rejected by the `[A-Za-z0-9._-]` body only if it STARTS the id; a `..` anywhere
+ *                     is also refused explicitly below, because `foo..bar` is legal on disk but
+ *                     becomes a traversal the moment anyone joins it.
+ *   · NUL and other control characters — truncate paths in native calls and corrupt JSON round-trips.
+ *   · leading `.`  — hidden files, and `..` starts that way.
+ *
+ * WHY 128 CHARACTERS: the longest session id this project has produced is ~40 characters
+ * (`auto-graft-<base36>-<6>`); 128 leaves room for a host that uses UUIDs with prefixes and still
+ * bounds the filename the id ends up in (`encodeURIComponent` can triple a character's byte count).
+ *
+ * `encodeURIComponent` in `txnFileFor` stays as defence in depth: this check is the rule, that one is
+ * the belt.
+ */
+function asSessionIdOrThrow(value: unknown, field: string): string {
+  const id = asNonEmptyString(value, field)
+  if (id.length > 128) throw graftError('INVALID_ARGUMENT', `${field} must be at most 128 characters (got ${id.length})`)
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(id)) {
+    throw graftError(
+      'INVALID_ARGUMENT',
+      `${field} must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ — ` +
+        'path separators, drive prefixes, control characters and a leading dot are refused',
+    )
+  }
+  if (id.includes('..')) throw graftError('INVALID_ARGUMENT', `${field} must not contain ".."`)
+  return id
 }
 
 /**
