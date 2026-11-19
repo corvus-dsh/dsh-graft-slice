@@ -3,7 +3,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { homedir } from 'node:os'
+import { homedir, hostname } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 
@@ -3874,7 +3874,25 @@ async function attemptIgnition(
  * WHAT A CALLER DOES WITH IT: appends the returned message to the pre-step `messages` array. Nothing is
  * written to any log, so no `turn`/`step` is consumed and no resume-time format check can trip.
  */
-function takeRollbackNotice(agentId        )                                                                                                                     {
+/**
+ * ── B4-0a① : THE ROLLBACK NOTICE IS A PLUGIN NOTICE ───────────────────────────────────────────
+ *
+ * `role: 'user'` is the HOST's constraint (pre-step `messages` are projected as `user/message`, and
+ * the developer role would need a real step-scoped `developer/message` write — the very thing this
+ * path exists to avoid). `source.kind` is NOT the host's to decide: it says who AUTHORED the text,
+ * and the author is the plugin. It said `kind: 'user'` until B4, which made `isHumanAuthored()` true
+ * and let the next slice replay a rollback notice as 【用户】's own words.
+ */
+function takeRollbackNotice(
+  agentId        ,
+  /**
+   * The kind is INJECTED, not imported: `index.ts` already owns `GRAFT_REPLAY_SOURCE_KIND`, and this
+   * leaf importing it added `core/ignition.ts -> ./host-shape` — a new dependency between two
+   * pre-existing modules, which `v136` refused. Same doctrine as the `PROMPT_MARKER` ruling: the value
+   * travels as a parameter, the lower layer stays ignorant of the upper one.
+   */
+  graftSourceKind        ,
+)                                                                                                                     {
   const notice = state().rollbackNotices.get(agentId)
   if (notice === undefined) return undefined
   state().rollbackNotices.delete(agentId)
@@ -3886,12 +3904,11 @@ function takeRollbackNotice(agentId        )                                    
      * Measured on this host: pre-step `messages` are projected as `user/message`, and DSH requires the
      * developer role to travel with a real `developer/message` event instead — i.e. a shape that would
      * need the very step-scoped write this change exists to eliminate. A user-role message carrying an
-     * explicit `[系统提示]` header is the shape a pre-step listener can legitimately deliver, and it is
-     * the same choice the constraint re-assertion already makes.
+     * explicit `[系统提示]` header is the shape a pre-step listener can legitimately deliver.
      */
     role: 'user',
     content: [{ type: 'text', text: notice.text }],
-    source: { kind: 'user' },
+    source: { kind: graftSourceKind },
   }
 }
 
@@ -16632,7 +16649,117 @@ function callingSessionId(exec     )         {
                    
                                                                 
                 
+     
+                                                           
+    
+                                                                                  
+                                                                                    
+                                                                                
+                                                        
+     
+                       
  
+
+/**
+ * v0.35 B4-0a④: the ownership stamp on a transaction record.
+ *
+ * WHY THIS EXISTS AT ALL. Two windows of the same desktop sharing one `dataDir` is a
+ * SUPPORTED deployment (user ruling, 2026-11-19). Recovery runs on EVERY activation,
+ * and its pre-v0.35 rule was "any record that is not COMMITTED is mine to roll back" —
+ * so window B, starting up, would mark window A's in-flight target `[损坏]` and delete
+ * it while A was still flushing that very target. The journal said "in flight"; it did
+ * not say "whose".
+ *
+ * THE DECISION RULE, and why it is pid-first and not lease-first:
+ *
+ *   1. Another HOST ⇒ never reclaim. A lease computed on another machine's clock is
+ *      not evidence about this one; the honest answer is "someone else may hold it".
+ *   2. pid ALIVE on this host ⇒ it is a running process; do not touch its record.
+ *      Liveness beats the clock: a slow migration that outlives its lease is still a
+ *      migration, and killing it because a timer elapsed is exactly the bug being fixed.
+ *   3. pid DEAD ⇒ reclaim. Nothing can still be writing, whatever the lease says.
+ *   4. No owner at all (any pre-v0.35 record) ⇒ reclaim, i.e. the old behaviour, so the
+ *      first start after an upgrade still cleans up what the old build left behind.
+ *
+ * The pid check has one known false positive: pid recycling after a crash. Rule 5 keeps
+ * it bounded — a record far older than any migration this plugin has ever performed is
+ * reclaimed even though its pid now belongs to some unrelated process. Six hours is
+ * deliberately generous; the largest session measured in this repo is minutes, not hours.
+ */
+                                
+             
+                                                                                         
+               
+              
+                                                                            
+                    
+ 
+
+/** How long a claim looks fresh. Refreshed at every stage write; advisory. */
+export const TXN_LEASE_MS = 120_000
+
+/** Rule 5's bound: a live pid holding a record this old is treated as recycled. */
+export const TXN_OWNER_GRACE_MS = 6 * 60 * 60 * 1000
+
+/** Process identity: pid plus the second the process started (stable across calls). */
+function txnOwnerToken()         {
+  let started = 0
+  try {
+    started = Math.round((Date.now() - process.uptime() * 1000) / 1000)
+  } catch {
+    started = 0
+  }
+  return `${process.pid}-${started}`
+}
+
+/** The owner stamp for a record written NOW. Pure enough to test: `now` is a parameter. */
+export function graftTxnOwner(now         = Date.now())                {
+  return {
+    pid: process.pid,
+    token: txnOwnerToken(),
+    host: (() => {
+      try {
+        return hostname()
+      } catch {
+        return ''
+      }
+    })(),
+    leaseUntil: new Date(now + TXN_LEASE_MS).toISOString(),
+  }
+}
+
+                                                                                        
+
+/**
+ * Should recovery roll this record back, or leave it alone?
+ *
+ * Extracted from `recoverGraftTransactions` so the rule has one home and can be
+ * asserted without writing a journal to disk. `now` is a parameter for the same
+ * reason: the grace window must be testable without waiting six hours.
+ */
+export function txnOwnerVerdict(record                , now         = Date.now())                  {
+  const owner = record.owner
+  if (owner === undefined || typeof owner !== 'object') return 'reclaim'
+  const host = typeof owner.host === 'string' ? owner.host : ''
+  const self = (() => {
+    try {
+      return hostname()
+    } catch {
+      return ''
+    }
+  })()
+  // Rule 1: a claim made on another machine is not evidence about this one.
+  if (host.length > 0 && self.length > 0 && host !== self) return 'foreign-host'
+  const pid = Number(owner.pid)
+  if (!Number.isFinite(pid) || pid <= 0) return 'reclaim'
+  // Rule 3: nothing alive can be writing.
+  if (!isProcessAlive(pid)) return 'reclaim'
+  // Rule 5: alive, but so old that the pid almost certainly belongs to someone else now.
+  const at = Date.parse(String(record.updatedAt ?? ''))
+  if (Number.isFinite(at) && now - at > TXN_OWNER_GRACE_MS) return 'recycled-pid'
+  // Rule 2: a live owner keeps its record.
+  return 'live-owner'
+}
 
 /**
  * Why a journal and not just ordering.
@@ -16656,9 +16783,12 @@ function txnFileFor(sourceSessionId        )         {
 
 function writeGraftTxn(ctx                               , record                )       {
   if (ctx === undefined) return
+  // v0.35 B4-0a④: every write carries the CURRENT owner. A caller that supplies one
+  // explicitly keeps it (tests need to write a record claiming another pid/host).
+  const stamped                 = record.owner === undefined ? { ...record, owner: graftTxnOwner() } : record
   try {
     mkdirSync(storePaths().txnDir, { recursive: true })
-    writeJsonAtomic(txnFileFor(record.sourceSessionId), record)
+    writeJsonAtomic(txnFileFor(stamped.sourceSessionId), stamped)
   } catch (error) {
     try {
       ctx.logger?.warn?.(`[dsh-graft-slice] cannot write transaction record: ${String((error       )?.message ?? error)}`)
@@ -16734,8 +16864,16 @@ function markTargetBroken(
  * Running this twice is a no-op the second time, which is what makes it safe to
  * call on every activation.
  */
-export function recoverGraftTransactions(ctx                   )                                            {
+                                      
+                 
+                      
+                                                                                           
+                                                                  
+ 
+
+export function recoverGraftTransactions(ctx                   , now         = Date.now())                      {
   const rolledBack           = []
+  const skipped                                                          = []
   let files           = []
   try {
     files = readdirSync(storePaths().txnDir).filter((name) => name.endsWith('.json'))
@@ -16756,7 +16894,7 @@ export function recoverGraftTransactions(ctx                   )                
         // Logging must not block activation.
       }
     }
-    return { scanned: 0, rolledBack }
+    return { scanned: 0, rolledBack, skipped }
   }
   for (const file of files) {
     const path = join(storePaths().txnDir, file)
@@ -16780,6 +16918,26 @@ export function recoverGraftTransactions(ctx                   )                
         rmSync(path, { force: true })
       } catch {
         // Ignore.
+      }
+      continue
+    }
+    // v0.35 B4-0a④: OWNERSHIP BEFORE ROLLBACK.
+    //
+    // "Not COMMITTED" used to mean "mine to roll back". With two windows on one
+    // `dataDir` (a supported deployment) it means "someone else may be writing this
+    // right now". A record whose owner is still alive is left EXACTLY as it is: not
+    // rolled back, not marked, not deleted — the next start re-decides.
+    const verdict = txnOwnerVerdict(record, now)
+    if (verdict !== 'reclaim') {
+      skipped.push({ sourceSessionId: record.sourceSessionId, verdict })
+      try {
+        ctx.logger?.warn?.(
+          `[dsh-graft-slice] left an unfinished migration ${record.sourceSessionId} alone (${verdict}` +
+            `${record.owner === undefined ? '' : `, owner pid ${record.owner.pid} on ${record.owner.host}`}): ` +
+            'another process may still be writing it',
+        )
+      } catch {
+        // Logging must not block activation.
       }
       continue
     }
@@ -16815,7 +16973,7 @@ export function recoverGraftTransactions(ctx                   )                
       }
     }
   }
-  return { scanned: files.length, rolledBack }
+  return { scanned: files.length, rolledBack, skipped }
 }
 
 /**
@@ -18410,7 +18568,12 @@ export function apply(ctx                   , config              = {})       {
     if (recovery.scanned > 0) {
       ctx.logger?.warn?.(
         `[dsh-graft-slice] transaction recovery: scanned ${recovery.scanned}, rolled back ${recovery.rolledBack.length}` +
-          (recovery.rolledBack.length > 0 ? ` (${recovery.rolledBack.join(', ')})` : ''),
+          (recovery.rolledBack.length > 0 ? ` (${recovery.rolledBack.join(', ')})` : '') +
+          (recovery.skipped.length > 0
+            ? `, left ${recovery.skipped.length} to another live owner (${recovery.skipped
+                .map((item) => `${item.sourceSessionId}: ${item.verdict}`)
+                .join('; ')})`
+            : ''),
       )
     }
   } catch (error) {
@@ -18605,7 +18768,17 @@ function takeDraftMerge(agentId        , messages         )                     
     id: `graft-draft-${agentId}`       ,
     role: 'user',
     content: [{ type: 'text', text: merged }],
-    source: { kind: 'user' },
+    /**
+     * ── B4-0a① : THE DRAFT MERGE IS A PLUGIN NOTICE, NOT A USER TURN ────────────────────────────
+     *
+     * It used to say `kind: 'user'`. It carries INSTRUCTIONS ([系统提示：…] plus 「请把这两段当成
+     * 同一个连续意图」), so `isHumanAuthored()` treated it as something the user said: the next
+     * slice collected it into `userTexts` and re-rendered it under 【用户…】, one generation at a
+     * time. The role stays `user` (pre-step messages are projected as user/message and the host
+     * requires the developer role to travel as a real developer/message event); the SOURCE is what
+     * says who authored it, and that is the plugin.
+     */
+    source: { kind: GRAFT_REPLAY_SOURCE_KIND },
   }
   return { messages: [injected] }
 }
@@ -18674,7 +18847,7 @@ function takePendingConstraintMessages(agentId        )        {
           ].join('\n'),
         },
       ],
-      source: { kind: 'user' },
+      source: { kind: GRAFT_REPLAY_SOURCE_KIND },
     },
   ]
 }
@@ -19237,7 +19410,7 @@ async function appendTransitionCard(
        * Positioned right after `extra` on purpose: both are one-shot system notes to the model, and a
        * reader looking for "what does this plugin tell the session" finds them together.
        */
-      const rollbackExtra = takeRollbackNotice(agentId)
+      const rollbackExtra = takeRollbackNotice(agentId, GRAFT_REPLAY_SOURCE_KIND)
       const rollbackMessages = rollbackExtra === undefined ? [] : [rollbackExtra]
       // v7.5: the node-plan hint rides the same channel (and the same discipline:
       // once, quiet, non-blocking).
@@ -21017,7 +21190,7 @@ export { inheritedConstraintAnchor }
 
 
 /** Test-only: where the durable stores currently resolve. */
-let lastRecovery                                                       
+let lastRecovery                                 
 
 /**
  * v0.14 D5: what the activation lock sweep found and did, so the debug panel can

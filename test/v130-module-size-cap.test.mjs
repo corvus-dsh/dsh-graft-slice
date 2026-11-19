@@ -63,11 +63,15 @@ const EXEMPT = new Map([
       '(graftError 49×, isRecord 2×, SessionEventLike 7×) but never imported.',
   }],
   ['core/ignition.ts', {
-    ceiling: 1069,
+    ceiling: 1086,
     reason:
       'The ignition channel: per-goal admission, the durable queue, retries and rollback. Its pieces share ' +
       'module-level state (the deps resolver, the pending queue), so a split needs dependency inversion — ' +
-      'that is a signature change, not a move, and must be its own ruled-on item.',
+      'that is a signature change, not a move, and must be its own ruled-on item. ' +
+      'Ceiling raised 1069 → 1086 by B4-0a①: the rollback notice stopped claiming `source.kind`s it does ' +
+      'not own — the literal `\'user\'` became an INJECTED parameter (importing `host-shape` from here was ' +
+      'refused by `v136` as a new edge between two pre-existing modules). The 15 lines are that rule ' +
+      'stated where the next reader will look, not new machinery.',
   }],
 ])
 

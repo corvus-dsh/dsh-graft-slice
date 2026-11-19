@@ -36,6 +36,7 @@ import {
   resumePendingIgnitions,
   rollbackFailedIgnition,
   takeRollbackNotice,
+  GRAFT_REPLAY_SOURCE_KIND,
 } from '../index.js'
 import { dispatchPreStep, makeCtx, makeSourceLog } from './fake-harness.mjs'
 
@@ -297,8 +298,8 @@ test('v7.8: the rollback notice queue is ONE-SHOT and keyed per source', async (
    */
   const { ctx, log } = scaffold({ controller: { async prompt() { return { accepted: true } } } })
   await rollbackFailedIgnition(ctx, log.session.id, 'session-notice-q', 'no channel')
-  assert.equal(takeRollbackNotice(log.session.id)?.content?.[0]?.text, ROLLBACK_NOTICE)
-  assert.equal(takeRollbackNotice(log.session.id), undefined, 'the second take finds nothing')
+  assert.equal(takeRollbackNotice(log.session.id, GRAFT_REPLAY_SOURCE_KIND)?.content?.[0]?.text, ROLLBACK_NOTICE)
+  assert.equal(takeRollbackNotice(log.session.id, GRAFT_REPLAY_SOURCE_KIND), undefined, 'the second take finds nothing')
 
   /**
    * PER SOURCE. A notice queued for session A must not be delivered to session B — the exact class of
@@ -306,10 +307,10 @@ test('v7.8: the rollback notice queue is ONE-SHOT and keyed per source', async (
    */
   await rollbackFailedIgnition(ctx, log.session.id, 'session-notice-q2', 'no channel again')
   assert.equal(
-    takeRollbackNotice('session-some-other-source'),
+    takeRollbackNotice('session-some-other-source', GRAFT_REPLAY_SOURCE_KIND),
     undefined,
     'a notice is addressed to the session that rolled back, not to whoever asks next',
   )
-  assert.equal(takeRollbackNotice(log.session.id), undefined, 'the doorbell has already been answered once')
+  assert.equal(takeRollbackNotice(log.session.id, GRAFT_REPLAY_SOURCE_KIND), undefined, 'the doorbell has already been answered once')
   resetRetiredSessions()
 })

@@ -796,7 +796,25 @@ export async function attemptIgnition(
  * WHAT A CALLER DOES WITH IT: appends the returned message to the pre-step `messages` array. Nothing is
  * written to any log, so no `turn`/`step` is consumed and no resume-time format check can trip.
  */
-export function takeRollbackNotice(agentId: string): { id: string; role: 'user'; content: Array<{ type: 'text'; text: string }>; source: { kind: 'user' } } | undefined {
+/**
+ * ── B4-0a① : THE ROLLBACK NOTICE IS A PLUGIN NOTICE ───────────────────────────────────────────
+ *
+ * `role: 'user'` is the HOST's constraint (pre-step `messages` are projected as `user/message`, and
+ * the developer role would need a real step-scoped `developer/message` write — the very thing this
+ * path exists to avoid). `source.kind` is NOT the host's to decide: it says who AUTHORED the text,
+ * and the author is the plugin. It said `kind: 'user'` until B4, which made `isHumanAuthored()` true
+ * and let the next slice replay a rollback notice as 【用户】's own words.
+ */
+export function takeRollbackNotice(
+  agentId: string,
+  /**
+   * The kind is INJECTED, not imported: `index.ts` already owns `GRAFT_REPLAY_SOURCE_KIND`, and this
+   * leaf importing it added `core/ignition.ts -> ./host-shape` — a new dependency between two
+   * pre-existing modules, which `v136` refused. Same doctrine as the `PROMPT_MARKER` ruling: the value
+   * travels as a parameter, the lower layer stays ignorant of the upper one.
+   */
+  graftSourceKind: string,
+): { id: string; role: 'user'; content: Array<{ type: 'text'; text: string }>; source: { kind: string } } | undefined {
   const notice = state().rollbackNotices.get(agentId)
   if (notice === undefined) return undefined
   state().rollbackNotices.delete(agentId)
@@ -808,12 +826,11 @@ export function takeRollbackNotice(agentId: string): { id: string; role: 'user';
      * Measured on this host: pre-step `messages` are projected as `user/message`, and DSH requires the
      * developer role to travel with a real `developer/message` event instead — i.e. a shape that would
      * need the very step-scoped write this change exists to eliminate. A user-role message carrying an
-     * explicit `[系统提示]` header is the shape a pre-step listener can legitimately deliver, and it is
-     * the same choice the constraint re-assertion already makes.
+     * explicit `[系统提示]` header is the shape a pre-step listener can legitimately deliver.
      */
     role: 'user',
     content: [{ type: 'text', text: notice.text }],
-    source: { kind: 'user' },
+    source: { kind: graftSourceKind },
   }
 }
 
