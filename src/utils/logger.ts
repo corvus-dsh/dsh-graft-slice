@@ -35,6 +35,16 @@ export interface GraftAuditEntry {
      * See commit msg.
      */
     | 'command-asked'
+    /**
+     * W1-3 (B4-0b-2): a file in `.txn` that recovery will NOT act on.
+     *
+     * Two shapes produce it: a filename this plugin could never have written, and one of our own
+     * filenames whose content cannot be parsed. The first is LEFT ALONE (it is not ours to delete);
+     * the second is dropped after this line. Both used to be a silent `rmSync`.
+     */
+    | 'journal-foreign'
+    /** W1-2: a complete-but-unretired target that recovery kept for a human to decide about. */
+    | 'journal-kept'
   file?: string
   sessionId?: string
   targetSessionId?: string

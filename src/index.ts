@@ -7567,13 +7567,35 @@ async function graftSliceAndInjectUnlocked(
     // Write-ahead is what makes recovery possible: a process killed right after the write has a record
     // saying which source was migrating and that a target may exist, so the next start can mark it
     // instead of presenting it as usable.
-    writeGraftTxn(ctx, {
+    /**
+     * ── W1-2: THE WRITE-AHEAD RECORD IS LOAD-BEARING, SO A FAILED WRITE STOPS THE SLICE ──────────
+     *
+     * Refusing here costs one slice attempt and leaves NOTHING behind: no id reserved, no target, no
+     * source retired. Proceeding costs a phantom session that looks resumable and is not — the exact
+     * failure this journal exists to prevent. The error names the journal path so the operator knows
+     * what to fix (a full disk / a permission denial is fixable; a lost migration is not).
+     */
+    const journaled = writeGraftTxn(ctx, {
       sourceSessionId: sourceId,
       targetSessionId: newId,
       state: 'PREPARING',
       stage: 'paradise.create',
       updatedAt: new Date().toISOString(),
     })
+    if (!journaled) {
+      return {
+        ok: false,
+        stage: 'journal',
+        warnings: [],
+        error: {
+          code: 'JOURNAL_WRITE_FAILED',
+          stage: 'journal',
+          message:
+            `无法写入事务日志（${storePaths().txnDir}）：迁移在预留任何 id 之前中止。` +
+            '没有产生目标、没有退役源。修好该目录（磁盘空间 / 权限）之后重试即可。',
+        },
+      }
+    }
 
     /* ── the write itself: ONE call, through the layer OR through the gateway ── */
     /**
@@ -8633,20 +8655,48 @@ function txnFileFor(sourceSessionId: string): string {
   return join(storePaths().txnDir, `${encodeURIComponent(sourceSessionId)}.json`)
 }
 
-function writeGraftTxn(ctx: PluginContextLike | undefined, record: GraftTxnRecord): void {
-  if (ctx === undefined) return
+/**
+ * ── W1-2 (B4-0b-2): A JOURNAL THAT COULD NOT BE WRITTEN IS NOT A JOURNAL ────────────────────────
+ *
+ * This used to swallow the failure: `catch { logger.warn }`, with a comment explaining that "the
+ * journal must never change a migration's outcome". The comment is backwards. The journal's ONLY job
+ * is to say "this was in flight" so the next start can clean up a half-built target. A journal that
+ * silently failed to write means:
+ *
+ *   · the migration proceeds and creates a target;
+ *   · the process dies before retirement;
+ *   · the next start finds NO record, so it reports a clean start;
+ *   · the target stays in the sidebar looking resumable, and the source looks ordinary.
+ *
+ * That is exactly the failure the journal was added to prevent (v7.4 P0-2). So the write is now
+ * LOAD-BEARING for the WRITE-AHEAD step: it returns whether the record is durable, and
+ * `graftSliceAndInjectUnlocked` refuses to reserve an id when it is not. The cost of the honest
+ * failure is one refused slice; the cost of the silent one is a phantom session.
+ *
+ * The state-transition writes (`TARGET_FLUSHED` / `COLD_VERIFIED`) after the target exists are NOT
+ * load-bearing in the same way: the record already exists from the write-ahead step, so a failed
+ * update degrades the report rather than losing the fact. Those keep returning `false` and the caller
+ * records it in `warnings`.
+ */
+function writeGraftTxn(ctx: PluginContextLike | undefined, record: GraftTxnRecord): boolean {
+  if (ctx === undefined) return false
   // v0.35 B4-0a④: every write carries the CURRENT owner. A caller that supplies one
   // explicitly keeps it (tests need to write a record claiming another pid/host).
   const stamped: GraftTxnRecord = record.owner === undefined ? { ...record, owner: graftTxnOwner() } : record
   try {
     mkdirSync(storePaths().txnDir, { recursive: true })
     writeJsonAtomic(txnFileFor(stamped.sourceSessionId), stamped)
+    return true
   } catch (error) {
     try {
-      ctx.logger?.warn?.(`[dsh-graft-slice] cannot write transaction record: ${String((error as any)?.message ?? error)}`)
+      ctx.logger?.warn?.(
+        `[dsh-graft-slice] cannot write transaction record (${stamped.state} ${stamped.sourceSessionId} → ` +
+          `${stamped.targetSessionId}): ${String((error as any)?.message ?? error)}`,
+      )
     } catch {
-      // The journal must never change a migration's outcome.
+      // Reporting must not replace the primary failure.
     }
+    return false
   }
 }
 
@@ -8716,16 +8766,42 @@ function markTargetBroken(
  * Running this twice is a no-op the second time, which is what makes it safe to
  * call on every activation.
  */
+/**
+ * ── W1-3 (B4-0b-2): A FILE WE DID NOT WRITE IS EVIDENCE, NOT DEBRIS ────────────────────────────
+ *
+ * One helper so every "I found something in `.txn` that I will not act on" produces the SAME three
+ * facts: the file name, why it was not acted on, and that the file is still there. Silence here would
+ * be indistinguishable from "the journal is clean", which is the failure mode this batch exists for.
+ */
+function reportForeignJournal(ctx: PluginContextLike, file: string, reason: string): void {
+  const message = `[dsh-graft-slice] .txn 里有一个文件不处理（保留原样）：${file} —— ${reason}`
+  try {
+    ctx.logger?.warn?.(message)
+  } catch {
+    // Reporting must not block activation.
+  }
+  appendGraftAudit({ at: new Date().toISOString(), kind: 'journal-foreign', file, detail: `MEASUREMENT_BROKEN: ${reason}` })
+}
+
 export interface GraftRecoveryResult {
   scanned: number
   rolledBack: string[]
   /** Records left ALONE because a live owner (or another host) may still be using them. */
   skipped: { sourceSessionId: string; verdict: TxnOwnerVerdict }[]
+  /**
+   * W1-2: complete-but-unretired targets that recovery KEPT and reported.
+   *
+   * A crash between `flush` and retirement leaves a fully written session. The old code marked it
+   * `[损坏]` and removed it — deleting work to tidy up a bookkeeping gap. These entries say "this is
+   * intact, a human decides", and the leftover ledger carries the same facts to the panel.
+   */
+  kept: { sourceSessionId: string; targetSessionId: string; state: string }[]
 }
 
 export function recoverGraftTransactions(ctx: PluginContextLike, now: number = Date.now()): GraftRecoveryResult {
   const rolledBack: string[] = []
   const skipped: { sourceSessionId: string; verdict: TxnOwnerVerdict }[] = []
+  const kept: { sourceSessionId: string; targetSessionId: string; state: string }[] = []
   let files: string[] = []
   try {
     files = readdirSync(storePaths().txnDir).filter((name) => name.endsWith('.json'))
@@ -8746,17 +8822,40 @@ export function recoverGraftTransactions(ctx: PluginContextLike, now: number = D
         // Logging must not block activation.
       }
     }
-    return { scanned: 0, rolledBack, skipped }
+    return { scanned: 0, rolledBack, skipped, kept }
   }
   for (const file of files) {
     const path = join(storePaths().txnDir, file)
+    /**
+     * ── W1-3 (B4-0b-2): DELETE ONLY WHAT WE COULD HAVE WRITTEN ─────────────────────────────────
+     *
+     * The scan takes every `*.json` in `.txn` and treats it as a journal record. Anything it cannot
+     * parse is `rmSync`'d. So ONE foreign file dropped into that directory — a note, a backup, another
+     * tool's state — is destroyed by an activation that was only supposed to clean up after ITSELF.
+     * The filename is the identity: this plugin writes `<encodeURIComponent(sourceSessionId)>.json`,
+     * so anything outside that alphabet was never ours.
+     *
+     * A file we did not write is REPORTED (`MEASUREMENT_BROKEN`) and LEFT ALONE. That word is chosen
+     * deliberately: it is not "corrupt" (we do not know what it is), and it is not silence (which is
+     * what this batch is about).
+     */
+    if (!/^[0-9A-Za-z%._-]+\.json$/u.test(file)) {
+      reportForeignJournal(ctx, file, '文件名不是本插件会写出的形状（只认 encodeURIComponent 后的 id + .json）')
+      continue
+    }
     let record: GraftTxnRecord
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf8'))
       if (!isRecord(parsed) || typeof parsed.sourceSessionId !== 'string') throw new Error('malformed record')
       record = parsed as unknown as GraftTxnRecord
-    } catch {
-      // A corrupt journal entry cannot describe a migration we can repair; drop it.
+    } catch (error) {
+      /**
+       * A file whose NAME is ours but whose CONTENT is not is a torn write of our own record (a crash
+       * mid-`writeJsonAtomic` cannot produce one — temp+rename — but a hand-edited or truncated file
+       * can). That one IS debris: it names a migration we cannot describe, and the source stays
+       * usable because retirement is last. It is still reported before being dropped.
+       */
+      reportForeignJournal(ctx, file, `内容无法解析（${String((error as any)?.message ?? error)}）；这是我们自己的名字，按坏记录处理`)
       try {
         rmSync(path, { force: true })
       } catch {
@@ -8793,13 +8892,55 @@ export function recoverGraftTransactions(ctx: PluginContextLike, now: number = D
       }
       continue
     }
-    // Roll back.
+    /**
+     * ── W1-2 (B4-0b-2): `TARGET_FLUSHED` IS A COMPLETE TARGET, NOT GARBAGE ─────────────────────
+     *
+     * The record's state says how far the migration got. `TARGET_FLUSHED` means the tape was written
+     * AND flushed — the target is a complete session that simply was not retired. The old code sent
+     * every non-COMMITTED state down the same path: `markTargetBroken` (`[损坏]`) + `discardPartialTarget`
+     * (remove). So a crash between flush and retirement DESTROYED a perfectly good, fully written
+     * session and told the user it was corrupt.
+     *
+     * The audit's B-11 asked which of the two readings is right — "one deliverable" vs "usable
+     * artifact" — and this batch answers with the reading that cannot lose work: a COMPLETE target is
+     * KEPT and REPORTED, and a human decides. Removing it is a decision, not cleanup.
+     *
+     * The states that are genuinely partial (PREPARING, and any record with an `error`) still roll
+     * back: those describe a write that did not finish, where the artifact cannot be trusted.
+     */
+    const completeButUnretired = record.state === 'TARGET_FLUSHED' || record.state === 'COLD_VERIFIED'
     try {
       // A source must never stay retired because of an unfinished migration.
       if (retiredSessions.has(record.sourceSessionId) || transferredSessions.has(record.sourceSessionId)) {
         resumeSession(ctx, record.sourceSessionId)
       }
-      // A target that exists is not a session we may present as usable.
+      if (completeButUnretired) {
+        /**
+         * Keep the artifact, say so loudly, and do NOT mark it broken — it is not broken.
+         *
+         * The report goes to three places on purpose: the log (immediate), the leftover ledger (the
+         * panel and `graft_debug_status`), and the returned `kept` list (tests and the next reader).
+         */
+        if (typeof record.targetSessionId === 'string' && record.targetSessionId.length > 0) {
+          try {
+            ctx.logger?.warn?.(
+              `[dsh-graft-slice] 一个已写完但未退休的目标被保留：${record.targetSessionId}（来自 ${record.sourceSessionId}，` +
+                `state ${record.state}）。源已恢复可用；目标是一个完整会话，是否删除由人决定 —— 恢复流程不替你删。`,
+            )
+          } catch {
+            // Logging must not block activation.
+          }
+          kept.push({ sourceSessionId: record.sourceSessionId, targetSessionId: record.targetSessionId, state: record.state })
+          recordLeftover(ctx, {
+            targetId: record.targetSessionId,
+            sourceSessionId: record.sourceSessionId,
+            stage: `kept:${record.state}`,
+            reason: '已写完但未退休：目标完整，保留待人工决定',
+          })
+        }
+        continue
+      }
+      // A target that exists for a PARTIAL migration is not a session we may present as usable.
       if (typeof record.targetSessionId === 'string' && record.targetSessionId.length > 0) {
         markTargetBroken(ctx, record.targetSessionId, record.error ?? `interrupted at ${record.stage}`, {
           sourceSessionId: record.sourceSessionId,
@@ -8816,8 +8957,11 @@ export function recoverGraftTransactions(ctx: PluginContextLike, now: number = D
         `[dsh-graft-slice] rollback of ${record.sourceSessionId} failed: ${String((error as any)?.message ?? error)}`,
       )
     } finally {
-      // Even a failed rollback removes the record: retrying the same broken
-      // artifact on every start is worse than leaving it marked.
+      /**
+       * The record is consumed either way: `kept` records are reported through the leftover ledger
+       * (which is append-only anyway), and re-processing a partial artifact on every start is worse
+       * than leaving it marked.
+       */
       try {
         rmSync(path, { force: true })
       } catch {
@@ -8825,7 +8969,7 @@ export function recoverGraftTransactions(ctx: PluginContextLike, now: number = D
       }
     }
   }
-  return { scanned: files.length, rolledBack, skipped }
+  return { scanned: files.length, rolledBack, skipped, kept }
 }
 
 /**
@@ -9992,6 +10136,23 @@ export function collectDebugStatus(input: DebugStatusInput): Record<string, unkn
       reclaimedAtActivation: (input.lockCleanup ?? []).filter((entry) => entry.action === 'reclaimed').map((entry) => entry.label),
     }
     out.transactions = {
+      /**
+       * ── W1-3 (B4-0b-2): WHICH STORE IS LIVE IS A FACT THE OPERATOR NEEDS ────────────────────────
+       *
+       * `store` is the resolved directory and how it was resolved. It exists because "one store, one
+       * spelling" (W1-3) is a claim about a STRING, and a claim about a string is unverifiable unless
+       * the string is published. It also answers the most common two-window question — "are these two
+       * windows actually using the same data?" — from the panel instead of from a guess.
+       */
+      store: (() => {
+        try {
+          const paths = storePaths()
+          return { dir: paths.dir, txnDir: paths.txnDir }
+        } catch {
+          /** Before `apply()` there is no layer; saying so is better than an empty object. */
+          return { dir: '', txnDir: '', unavailable: 'store layer not resolved (apply() has not run)' }
+        }
+      })(),
       pending: (input.txns ?? []).map((txn) => ({ ...txn })),
       retiredCount: (input.retired ?? []).length,
       retiredRecent: (input.retired ?? []).slice(-10),
@@ -10438,6 +10599,10 @@ export function apply(ctx: PluginContextLike, config: GraftConfig = {}): void {
             ? `, left ${recovery.skipped.length} to another live owner (${recovery.skipped
                 .map((item) => `${item.sourceSessionId}: ${item.verdict}`)
                 .join('; ')})`
+            : '') +
+          (recovery.kept.length > 0
+            ? `, KEPT ${recovery.kept.length} complete-but-unretired target(s) — a human decides whether to delete ` +
+              `(${recovery.kept.map((item) => `${item.targetSessionId} ← ${item.sourceSessionId} [${item.state}]`).join('; ')})`
             : ''),
       )
     }

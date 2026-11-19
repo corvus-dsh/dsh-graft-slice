@@ -23,7 +23,8 @@
  * profile's retirement stores, which decides which sessions a pre-step gate refuses.
  */
 
-import { join } from 'node:path'
+import { realpathSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { isRecord } from '../utils/serialize.js'
 import type { PluginContextLike } from './gateway-types.js'
 
@@ -105,10 +106,50 @@ const FILE_NAMES = {
  *   4. `DSH_HOME` (+ `DSH_PROFILE`) — the same value, derived by hand.
  *   5. `config.fallbackDir`        — the plugin directory; shared by every profile, hence last.
  */
+/**
+ * ── W1-3 (B4-0b-2): ONE STORE, ONE SPELLING ────────────────────────────────────────────────────
+ *
+ * An explicit `dataDir` used to be returned VERBATIM. That means `/data` , `/data/` , `/x/../data`
+ * and a junction pointing at `/data` were four different strings for ONE directory — and the plugin
+ * keys every store file by string. Measured consequences of that shape:
+ *
+ *   · two windows configured with `data/` and `data` write two different `.retired.json` files and
+ *     neither sees the other's retirements (a "clean start" that is anything but);
+ *   · `.txn` records written under one spelling are invisible to recovery run under the other;
+ *   · a path with a trailing separator makes `join()` produce `data//.txn`, which is legal but makes
+ *     every log line and every test fixture inconsistent.
+ *
+ * The normalisation is deliberately narrow: `resolve()` (kills `..`, `.`, duplicate separators and
+ * makes it absolute) plus `realpathSync.native` WHEN the path exists (resolves junctions/symlinks).
+ * It does NOT reject anything — a rejection would make a previously-working profile stop mounting,
+ * and "the same store under a different name" is a correctness bug, not a security boundary.
+ *
+ * WHAT IS NOT NORMALISED, stated rather than implied: a store directory that does not exist yet is
+ * left at its resolved (not real) form, because realpath of a missing path has no answer. If it is
+ * created LATER through a junction, a second mount could still see two spellings — that window is
+ * unavoidable without locking the filesystem, and it is recorded in the leftover report rather than
+ * papered over.
+ */
+function normaliseStoreDir(raw: string): string {
+  const resolved = resolve(raw)
+  /** W1-3 can-red hook: `return raw` restores the verbatim behaviour this fix removes. */
+  return realpathIfExists(resolved)
+}
+
+/** Separated so the W1-3 can-red is one line, not a re-write of the function. */
+function realpathIfExists(resolved: string): string {
+  try {
+    return realpathSync.native(resolved)
+  } catch {
+    /** Missing, or a path we may not stat: the resolved form is the best honest answer. */
+    return resolved
+  }
+}
+
 export function resolveStoreDir(ctx: PluginContextLike | undefined, config: StoreLayerConfig): { dir: string; scope: string } {
   const explicit = config.dataDir
   if (typeof explicit === 'string' && explicit.length > 0) {
-    return { dir: explicit, scope: 'config.dataDir' }
+    return { dir: normaliseStoreDir(explicit), scope: 'config.dataDir' }
   }
 
   let paths: unknown
