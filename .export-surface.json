@@ -43,6 +43,8 @@
     "TASK_POSITION_MAX_CHARS",
     "TODO_STATUS_MAX_LINES",
     "TURN_STOPPING_EVENT",
+    "TXN_LEASE_MS",
+    "TXN_OWNER_GRACE_MS",
     "WATERMARK_HARD_CEILING",
     "WATERMARK_HARD_FLOOR",
     "WATERMARK_MIN_GAP",
@@ -116,6 +118,7 @@
     "graftReadResult",
     "graftSearchHistory",
     "graftSliceAndInject",
+    "graftTxnOwner",
     "hasClosedTurn",
     "hasHostGateway",
     "hasIgnitionAdmission",
@@ -201,6 +204,7 @@
     "textOfMessage",
     "toTaskPosition",
     "transferRecord",
+    "txnOwnerVerdict",
     "unavailableWriteBinding",
     "verifyHardConstraints",
     "verifyWorkspace",
@@ -210,6 +214,6 @@
     "writeLayoutManifest",
     "writeManualConstraints"
   ],
-  "count": 209,
-  "note": "baseline updated by a declared [export-change] (COMMIT 8c28d17 \"feat(graft): task-position 说得出「自 … 起未更新」（TD-M17 ②③）[export-change]\" (tree clean over src, index.js))"
+  "count": 213,
+  "note": "baseline updated by a declared [export-change] (COMMIT 181b864 \"fix(graft): 插件通知不再冒充用户 + 事务恢复先看所有权（B4-0a ①④）[export-change]\" (tree clean over src, index.js))"
 }
