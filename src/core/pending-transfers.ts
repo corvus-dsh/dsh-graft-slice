@@ -224,20 +224,58 @@ export function settledSince(
  * be a plugin notice. `neutralizeStructure` already exists for exactly this (`pending-state.ts`), and
  * user-typed text already goes through it; tool output did not.
  *
- * TWO MECHANISMS, and the second is the one that is easy to miss:
+ * ── W1-5b: AND `label` IS THE SAME KIND OF FOREIGN TEXT ────────────────────────────────────────
  *
- *   1. every `summary` passes through the injected `neutralize` (the caller supplies
- *      `neutralizeStructure` — this module must not import `pending-state.ts`, which would make a
- *      cycle, and the plugins' doctrine is "inject the value, keep the leaf ignorant");
- *   2. the WHOLE relay has a character budget (`RELAY_TOTAL_CHARS`). Thirty settled items at 400 chars
+ * The first fix covered `summary` and stopped there, which was half a fix: `label` is taken from the
+ * settle event's `data.label` — a job TITLE, written by the host or by whatever produced the work — and
+ * it was string-interpolated into `head` verbatim. A job titled `x\n## 下一步` or one carrying a fence
+ * put that heading into the next generation's pending state just as surely as a summary could.
+ *
+ * The rule is the one this repo keeps re-learning: **被引用的数据不能变成版面**. It applies to every
+ * field that came from outside, not to the field that happened to be found first.
+ *
+ * THREE MECHANISMS, and the second is the one that is easy to miss:
+ *
+ *   1. every `summary` AND every `label` passes through the injected `neutralize` (the caller supplies
+ *      `neutralizeStructure` — this module must not import `pending-state.ts`, which would make a cycle,
+ *      and the plugins' doctrine is "inject the value, keep the leaf ignorant");
+ *   2. `label` also has a LENGTH CAP (`LABEL_MAX_CHARS`), because a neutraliser rewrites structure, not
+ *      size: a 5,000-character title is still 5,000 characters of somebody else's text inside a notice,
+ *      and truncation is DECLARED (the ellipsis is part of the rendered label, so the reader can see it);
+ *   3. the WHOLE relay has a character budget (`RELAY_TOTAL_CHARS`). Thirty settled items at 400 chars
  *      each is 12,000 characters of somebody else's text in one pre-step message; past the budget each
  *      remaining item is degraded to `seq + label` — still a usable pointer — and the omission is
  *      DECLARED with a count, per the "silent truncation is a defect" rule.
  */
 export const RELAY_TOTAL_CHARS = 2_000
 
+/**
+ * How much of a foreign `label` may be quoted.
+ *
+ * 120 is not a measured optimum; it is long enough for a real job title and short enough that the
+ * pointer line stays a pointer. `labelOf` states when it cut something, because a truncation the reader
+ * cannot see reads as the job's actual name.
+ */
+export const LABEL_MAX_CHARS = 120
+
 /** Injected so the leaf stays unaware of the layout layer (and no import cycle appears). */
 export type StructureNeutralizer = (text: string) => string
+
+/** Colour the label is rendered with, plus whether it was shortened. */
+interface RenderedLabel {
+  text: string
+  truncated: boolean
+}
+
+function labelOf(item: SettledResult, neutralize: StructureNeutralizer): RenderedLabel {
+  /**
+   * Neutralise FIRST, then cap. The other order would let the neutraliser's own escapes be cut in half —
+   * `\` + a backtick split across the boundary is a broken escape, which is worse than either problem.
+   */
+  const neutral = neutralize(item.label)
+  if (neutral.length <= LABEL_MAX_CHARS) return { text: neutral, truncated: false }
+  return { text: `${neutral.slice(0, LABEL_MAX_CHARS)}…`, truncated: true }
+}
 
 export function relayText(
   settled: readonly SettledResult[],
@@ -255,15 +293,26 @@ export function relayText(
 
   const header = `[先前会话的后台结果已回来] 切片时留下的 ${counts.join('和')}已经结束，结果转述如下。`
   const footer = '这些结果不会再有第二次通知。需要原文时按上面的 seq 回读源会话。'
-  /** Budget applies to the BODY: the header and footer are our own structure and always fit. */
-  const bodyBudget = Math.max(200, budget - header.length - footer.length)
+  /**
+   * Budget applies to the BODY: the header and footer are our own structure and always fit.
+   *
+   * W1-5c: the omission line is charged to the SAME budget (`omissionReserve` below), because the old
+   * text said 「总长超出 2000 字符预算」 while the implementation was a BODY budget and the omission line
+   * sat outside it — so the real total could reach ~2.1k. Either the sentence or the arithmetic had to
+   * change; this charges the line, so the sentence can honestly say 正文.
+   */
+  const OMISSION_RESERVE = 120
+  const bodyBudget = Math.max(200, budget - header.length - footer.length - OMISSION_RESERVE)
 
   const rendered: string[] = []
   let used = 0
   let omitted = 0
+  let truncatedLabels = 0
   for (const item of settled) {
     const kindName = item.kind === 'job' ? '后台作业' : '子代理'
-    const head = `· ${kindName} ${item.label}（${item.id}）已结束，settle 在 seq=${item.settledSeq}`
+    const label = labelOf(item, neutralize)
+    if (label.truncated) truncatedLabels += 1
+    const head = `· ${kindName} ${label.text}（${item.id}）已结束，settle 在 seq=${item.settledSeq}`
     const pointerOnly = `· ${kindName} ${item.id} @ seq=${item.settledSeq}`
     const withSummary = item.summary === undefined ? undefined : `${head}：\n  ${neutralize(item.summary)}`
     const chosen = withSummary ?? `${head}；摘要未随事件写入，原文用 graft_read_result(${sourceSessionId}, ${item.settledSeq}) 读取。`
@@ -299,9 +348,30 @@ export function relayText(
   const omissionLine =
     omitted === 0
       ? ''
-      : `另有 ${omitted} 条结果因总长超出 ${budget} 字符预算而只保留回读坐标（内容未转述；这些结果确实存在，只是没在这里展开）。`
+      : `另有 ${omitted} 条结果因正文超出 ${budget} 字符预算而只保留回读坐标（内容未转述；这些结果确实存在，只是没在这里展开）。`
+  /**
+   * W1-5c: what the sentence used to say, and why the word changed.
+   *
+   * 「总长超出」 described the wrong denominator: `bodyBudget` is `budget − header − footer −
+   * OMISSION_RESERVE`, and until now the omission line itself was OUTSIDE that budget — so the rendered
+   * total could exceed `budget` while the sentence claimed it did not. `v259 ②` asserted `budget + 400`
+   * and passed, which is the definition of a test that agrees with the bug.
+   *
+   * The line is now charged (`OMISSION_RESERVE`) and the word is 「正文」: the number in the message and
+   * the number the arithmetic uses are the same number, and truncating labels are declared separately.
+   */
+  const truncationLine =
+    truncatedLabels === 0
+      ? ''
+      : `（其中 ${truncatedLabels} 条的标题超过 ${LABEL_MAX_CHARS} 字符，已截断并用 … 标出。）`
 
-  return [header, ...rendered, ...(omissionLine.length > 0 ? [omissionLine] : []), footer].join('\n')
+  return [
+    header,
+    ...rendered,
+    ...(omissionLine.length > 0 ? [omissionLine] : []),
+    ...(truncationLine.length > 0 ? [truncationLine] : []),
+    footer,
+  ].join('\n')
 }
 
 /**

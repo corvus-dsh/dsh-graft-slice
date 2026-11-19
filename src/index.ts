@@ -118,6 +118,21 @@ import { checkSafeHarbor, checkTaskBoundary, extractTaskState, splitSentences } 
 import type { HarborState, TaskBoundaryState, TaskState } from './core/task-state.js'
 export { checkSafeHarbor, checkTaskBoundary, extractTaskState }
 export type { HarborState, TaskBoundaryState, TaskState }
+/**
+ * ── W1-5 MOVE-TO-TOP: `neutralizeStructure` BELONGS IN THIS BLOCK, NOT AT LINE ~10,027 ─────────────
+ *
+ * It was imported in the middle of the file (in the v0.14 guard-rails block), and ESM hoists imports so
+ * it WORKED — which is exactly why nobody noticed. But it made new code depend on a known misplacement:
+ * a reader at the first call site sees a function that appears to be used before it is imported, and the
+ * only reason that is not a bug is a language rule they have to remember.
+ *
+ * `pending-state.ts` is a leaf for this purpose (it imports `task-state.ts` and `serialize`, neither of
+ * which imports back), so hoisting the import cannot create a cycle — which `check-cycles.mjs` verifies.
+ */
+import { buildPendingState, neutralizeStructure, staleTodoHint } from './core/pending-state.js'
+import type { LastStepScene } from './core/pending-state.js'
+export { staleTodoHint }
+export type { LastStepScene }
 import { ledgerRecord, readJsonRecord, readLedger, readLedgerPayload, writeJsonAtomic, writeLedgerAtomic } from './core/ledger.js'
 import type { LedgerDefect } from './core/ledger.js'
 import { LEDGER_EPOCH } from './core/ledger.js'
@@ -170,6 +185,7 @@ import {
   isScanExhausted,
   JOB_OPEN_EVENT_NAMES,
   JOB_SETTLE_EVENT_NAMES,
+  LABEL_MAX_CHARS,
   RELAY_TOTAL_CHARS,
   relayText,
   settledSince,
@@ -191,6 +207,7 @@ import type { PendingTransfer, SettledResult } from './core/pending-transfers.js
 export const backgroundWorkInternals = {
   JOB_OPEN_EVENT_NAMES,
   JOB_SETTLE_EVENT_NAMES,
+  LABEL_MAX_CHARS,
   RELAY_TOTAL_CHARS,
   SUBAGENT_OPEN_EVENT_NAMES,
   SUBAGENT_SETTLE_EVENT_NAMES,
@@ -6687,6 +6704,16 @@ export function resetRetiredSessions(): void {
   // sample ring would let one test's tool results predict the next test's growth.
   nudgeDeliveredAt.clear()
   nudgeSamples.clear()
+  /**
+   * W1-4b: the staged reviews are session state too, and this reset had forgotten them.
+   *
+   * Measured while writing `v261`: a test (or an operator's explicit reset) that ran after a
+   * `graft_prepare` still saw that review — so a "fresh" activation could commit a slice prepared against
+   * a previous world, and a tampered entry on disk was masked by the stale clean copy in memory. Same
+   * family as the plan-nudge gap noted below: a per-session map the reset does not clear makes the reset
+   * partial, and a partial reset is a state that lies.
+   */
+  preparedSlices.clear()
   // v0.21: the ignition queue and the rollback notice ledger are session state too.
   // A reset that kept them would (a) leave a stale "already noticed" mark that
   // suppresses the next rollback's notice, and (b) leave a queued ignition that
@@ -7024,7 +7051,24 @@ export async function prepareSlice(
   handover?: ModelHandover,
 ): Promise<PreparedSlice> {
   const settings = normalizeConfig(config)
-  const sourceId = asNonEmptyString(sourceSessionId, 'sourceSessionId')
+  /**
+   * ── W1-4b: THE ALPHABET IS CHECKED HERE TOO, NOT ONLY ON THE DIRECT-SLICE PATH ─────────────────
+   *
+   * `graft_prepare.targetSessionId` is a MODEL-VISIBLE parameter, and this function used to pass it
+   * through with only `asNonEmptyString` (or `autoTargetId` when omitted). The value was then written to
+   * `.prepared-slices.json` and later handed straight to `graftSliceAndInjectUnlocked` by
+   * `graft_commit` — which meant the two-phase path, the one the nudge TELLS the model to use, was the
+   * one path with no alphabet check.
+   *
+   * Validating here is the EARLY failure (the model gets `INVALID_ARGUMENT` before anything is staged or
+   * written). `graftSliceAndInjectUnlocked` validates again, because a preview is not the only way an
+   * entry can exist: it also comes back off disk.
+   */
+  const sourceId = asSessionIdOrThrow(sourceSessionId, 'sourceSessionId')
+  const requestedTarget =
+    typeof targetSessionId === 'string' && targetSessionId.length > 0
+      ? asSessionIdOrThrow(targetSessionId, 'targetSessionId')
+      : undefined
   const raw = await readSourceForPreview(ctx, sourceId)
   if (!hasClosedTurn(raw.events)) {
     throw graftError('NO_CLOSED_TURN', `session "${sourceId}" has no closed turn yet; nothing to review`)
@@ -7070,9 +7114,7 @@ export async function prepareSlice(
   const handoverNoteCount = (handover?.notes ?? []).filter((item) => String(item).trim().length > 0).length
 
   const preparedId = `prep-${digest.slice(0, 12)}-${Date.now().toString(36)}`
-  const target = typeof targetSessionId === 'string' && targetSessionId.length > 0
-    ? targetSessionId
-    : autoTargetId(settings)
+  const target = requestedTarget ?? autoTargetId(settings)
 
   const review = [
     `准备就绪：切片来自 ${sourceId}（最后一轮 Turn ${plan?.boundary?.lastTurn ?? '?'}，边界 seq=${boundarySeq}）。`,
@@ -7142,6 +7184,17 @@ export async function commitPreparedSlice(
   if (entry === undefined) {
     throw graftError('PREPARED_UNKNOWN', `no prepared slice "${preparedId}"; call graft_prepare first`)
   }
+  /**
+   * ── W1-4b: THE LAST LINE, AT THE DOOR THE WRITE GOES THROUGH ─────────────────────────────────
+   *
+   * `loadPrepared` already drops an entry whose target is not a legal id, and
+   * `graftSliceAndInjectUnlocked` validates again below. This check is the third one and it is not
+   * redundant: it is the only one that runs on an entry that was inserted by `prepareSlice` IN THIS
+   * PROCESS and then mutated (a test, a future feature). A validation that lives only at the edges
+   * cannot see a value that changed in the middle.
+   */
+  asSessionIdOrThrow(entry.sourceSessionId, 'sourceSessionId')
+  asSessionIdOrThrow(entry.targetSessionId, 'targetSessionId')
   if (Date.now() - entry.createdAt > PREPARED_TTL_MS) {
     preparedSlices.delete(preparedId)
     persistPrepared([preparedId])
@@ -7309,13 +7362,42 @@ function loadPrepared(): void {
   try {
     const parsed = JSON.parse(readFileSync(storePaths().prepared, 'utf8'))
     if (!isRecord(parsed)) return
+    const invalid: Array<{ id: string; field: string; reason: string }> = []
     for (const [id, value] of Object.entries(parsed)) {
       if (!isRecord(value)) continue
       if (typeof value.digest !== 'string' || typeof value.sourceSessionId !== 'string') continue
+      /**
+       * ── W1-4b: AN ILLEGAL ID ON DISK MEANS THE ENTRY IS NOT COMMIT-ABLE AT ALL ───────────────────
+       *
+       * This loader used to be `typeof value.targetSessionId === 'string' ? value.targetSessionId : ''`,
+       * i.e. a missing field became the empty string and the entry stayed in the map. An empty target
+       * can never be created, so the entry was a permanent `commit` failure with a message about
+       * "target" that said nothing about WHY — and a bad target written by an older build (`../x`,
+       * `C:\x`) survived every restart.
+       *
+       * Now: the target must be a legal session id, or the entry is DROPPED and the drop is audited as
+       * `prepared-entry-invalid` with the field and the reason. Dropping is the correct repair because a
+       * prepared slice is OUR OWN staging record (see the audit-kind comment in `utils/logger.ts`).
+       *
+       * `id` (the map key) is validated too: it becomes part of no filename, but it IS echoed back to
+       * the model and used as a map key, and accepting an arbitrary key here would let a hand-edited
+       * file address an entry the model was never shown.
+       */
+      let targetId: string
+      try {
+        targetId = asSessionIdOrThrow(value.targetSessionId, 'targetSessionId')
+      } catch (error) {
+        invalid.push({
+          id,
+          field: 'targetSessionId',
+          reason: String((error as any)?.message ?? error),
+        })
+        continue
+      }
       preparedSlices.set(id, {
         preparedId: id,
         sourceSessionId: value.sourceSessionId,
-        targetSessionId: typeof value.targetSessionId === 'string' ? value.targetSessionId : '',
+        targetSessionId: targetId,
         boundarySeq: Number(value.boundarySeq ?? 0),
         sourceLastSeq: Number(value.sourceLastSeq ?? 0),
         digest: value.digest,
@@ -7337,6 +7419,26 @@ function loadPrepared(): void {
               .map((chunk: any) => ({ kind: String(chunk.kind ?? ''), text: String(chunk.text ?? '') }))
           : undefined,
       })
+    }
+    /**
+     * The drop is REPORTED, and the file is NOT rewritten on load.
+     *
+     * Two different repairs live in this repo and this one is deliberate: `loadPendingConstraints`
+     * filters what it USES but keeps the file (the queue is audit evidence), and `loadPrepared` DROPS the
+     * entry from the map. Neither rewrites on load — a load that writes turns every activation into a
+     * migration, and a half-written store during activation is worse than a stale entry.
+     */
+    for (const drop of invalid) {
+      try {
+        appendGraftAudit({
+          at: new Date().toISOString(),
+          kind: 'prepared-entry-invalid',
+          file: storePaths().prepared,
+          detail: `dropped prepared slice "${drop.id}": ${drop.field} — ${drop.reason}`,
+        })
+      } catch {
+        /** Audit is evidence, never a gate. */
+      }
     }
   } catch {
     // A missing or corrupt prepared store only costs the pending review.
@@ -9937,10 +10039,6 @@ export { INSTRUCTION_CARD_MAX_CHARS, renderTaskBoard, BOARD_TRAILER }
 import { renderInstructionCard } from './core/instruction-card.js'
 import type { SemanticNextAction, SemanticState, InstructionCardInput } from './core/instruction-card.js'
 export { renderInstructionCard }
-import { buildPendingState, neutralizeStructure, staleTodoHint } from './core/pending-state.js'
-import type { LastStepScene } from './core/pending-state.js'
-export { staleTodoHint }
-export type { LastStepScene }
 export type { SemanticNextAction, SemanticState, InstructionCardInput }
 export type { SemanticOutcomeKind, SemanticOutcome, SemanticDiscard, TaskBoardInput, BoardVerification }
 

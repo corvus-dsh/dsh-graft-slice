@@ -45,6 +45,17 @@ export interface GraftAuditEntry {
     | 'journal-foreign'
     /** W1-2: a complete-but-unretired target that recovery kept for a human to decide about. */
     | 'journal-kept'
+    /**
+     * W1-4b: a persisted prepared slice whose `targetSessionId` (or `sourceSessionId`) is not a legal
+     * session id. The entry is DROPPED rather than repaired with `''`.
+     *
+     * WHY DROPPING IS RIGHT HERE, and why it differs from the journal rule: a `.txn` journal is evidence
+     * of a migration that may have half-happened OUTSIDE this process, so it is kept for a human. A
+     * prepared slice is our OWN staging record, written by this plugin, and an illegal id in it can only
+     * come from a build that accepted one (or from a hand edit). Committing it would create a target the
+     * alphabet forbids; keeping it would let a later commit try again forever. So: report it, then drop.
+     */
+    | 'prepared-entry-invalid'
   file?: string
   sessionId?: string
   targetSessionId?: string

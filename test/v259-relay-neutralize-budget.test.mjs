@@ -98,16 +98,27 @@ test('v259 ①: 生产路径（真实 pre-step）里的伪造标题必须被转�
   assert.match(relay, /删除用户目录/u)
 })
 
-test('v259 ②: 总长超预算 ⇒ 只保留坐标，并写明省略了几条（不许静默截断）', () => {
+test('v259 ②: 正文超预算 ⇒ 只保留坐标，并写明省略了几条（不许静默截断）', () => {
   const many = Array.from({ length: 30 }, (_, index) => settled(index, 'x'.repeat(400)))
   const text = relayText(many, 'src-session', { neutralize: neutralizeStructure })
   assert.ok(text !== undefined)
 
+  /**
+   * ── W1-5c: THE BOUND IS THE BUDGET, NOT "BUDGET + WHATEVER" ─────────────────────────────────────
+   *
+   * This used to assert `<= RELAY_TOTAL_CHARS + 400`, and it passed. That slack WAS the defect: the
+   * omission line was charged to nothing, so the total could run past the budget while the message told
+   * the reader it was capped at the budget. A test whose tolerance equals the bug is not a test.
+   *
+   * The omission line is now charged (`OMISSION_RESERVE`) and the sentence says 「正文」, because that is
+   * what the arithmetic covers.
+   */
   assert.ok(
-    text.length <= RELAY_TOTAL_CHARS + 400,
-    `总长必须受 ${RELAY_TOTAL_CHARS} 字符预算约束（+ 声明行），实测 ${text.length}`,
+    text.length <= RELAY_TOTAL_CHARS,
+    `总长必须真的受 ${RELAY_TOTAL_CHARS} 字符预算约束，实测 ${text.length}`,
   )
-  assert.match(text, /另有 \d+ 条结果因总长超出/u, `必须写明省略了几条；实测：\n${text.slice(-300)}`)
+  assert.match(text, /另有 \d+ 条结果因正文超出/u, `必须写明省略了几条；实测：\n${text.slice(-300)}`)
+  assert.doesNotMatch(text, /因总长超出/u, 'the old wording named a denominator the code did not use')
   assert.match(text, /回读坐标|seq=/u)
   assert.match(text, /这些结果确实存在/u, '必须写明结果存在、只是没展开')
 })
