@@ -387,27 +387,99 @@ export function staleDays(freshness: TaskPositionInput['freshness'] | undefined)
  * ── THE CAP, AND WHAT GIVES WAY FIRST ──────────────────────────────────────────────────────────
  *
  * Trimming the middle of a prose block is the usual answer; it is the wrong one here, because every
- * line of this block is a different kind of statement. What gives way first is the least actionable
- * repeated material, and the last thing to go is the current node — the one line a reader came for.
+ * line of this block is a different kind of statement.
  *
- * In practice the sections are already bounded (8 ids per list, 3 requirements), so this is a backstop
- * for pathological input: a single 900-character node title, say. When it does fire, the block says so.
+ * ── W1-6: THE OLD ORDER SACRIFICED THE MOST ACTIONABLE LINES FIRST ─────────────────────────────
+ *
+ * The old implementation kept `lines.slice(0, 4)` and dropped from the BOTTOM. The bottom is exactly
+ * where 「未开始」/「我被谁阻塞」/「我解锁谁」 live — the three lines a next generation needs in order to
+ * know what to do — while 「已完成」 sits ABOVE them and survived. So the one case where the cap fires
+ * left the reader with the history and no instructions.
+ *
+ * The order below is by ACTIONABILITY, most expendable first:
+ *
+ *   1. 已完成          — history; useful, but the next generation does not act on it
+ *   2. 本代 / 目标链     — provenance; needed for audit, not for the next step
+ *   3. 要求（多条）      — the node's requirements, trimmed one at a time
+ *   4. 新鲜度「自 … 起」   — a warning about staleness, which the truncation line already implies
+ *   5. 进度            — a number the current node line already carries in spirit
+ *   NEVER: 当前节点 / 未开始 / 我被谁阻塞 / 我解锁谁 / 全局目标
+ *
+ * The cap is a BODY cap: the declaration line is charged separately (`TRUNCATION_NOTE_RESERVE`), so
+ * `TASK_POSITION_MAX_CHARS` really bounds the position text and the note cannot push it over. The old
+ * implementation appended the note to an already-full body and every assertion still passed, because
+ * nothing measured the total.
  */
+const TRUNCATION_NOTE_RESERVE = 80
+
+/** Which line is which kind, by its prefix — the renderer's own vocabulary, reused rather than re-invented. */
+type SacrificeKind = 'done' | 'generation' | 'requirements' | 'freshness' | 'progress' | 'never'
+
+function sacrificeKindOf(line: string): SacrificeKind {
+  if (line.startsWith('已完成：')) return 'done'
+  if (line.startsWith('本代：')) return 'generation'
+  if (line.startsWith('  要求：')) return 'requirements'
+  if (line.startsWith('  自 ') && line.includes('起未更新')) return 'freshness'
+  if (line.startsWith('  进度：')) return 'progress'
+  return 'never'
+}
+
+/**
+ * The order lines are given up in. A line whose kind is not listed is `never` and is never dropped;
+ * if the block STILL does not fit with only `never` lines, the last resort below truncates text.
+ */
+const SACRIFICE_ORDER: readonly SacrificeKind[] = ['done', 'generation', 'requirements', 'freshness', 'progress']
+
 function capText(body: string): string {
   if (body.length <= TASK_POSITION_MAX_CHARS) return body
   const lines = body.split('\n')
-  /** Keep the heading and the current-node lines; drop list lines from the bottom until it fits. */
-  const keep = lines.slice(0, 4)
-  let rest = lines.slice(4)
-  let out = [...keep, ...rest].join('\n')
-  while (out.length > TASK_POSITION_MAX_CHARS && rest.length > 0) {
-    rest = rest.slice(0, -1)
-    out = [...keep, ...rest].join('\n')
+  /**
+   * Give up whole lines in sacrifice order. `requirements` may be given up MULTIPLE times — it is a
+   * comma-joined list, so shortening it is a real intermediate step rather than an all-or-nothing one.
+   * Every other kind is a single line.
+   */
+  const dropped = new Set<number>()
+  let out = lines.join('\n')
+  const dropFirstOfKind = (kind: SacrificeKind): boolean => {
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (dropped.has(index)) continue
+      const line = lines[index] as string
+      if (sacrificeKindOf(line) !== kind) continue
+      if (kind === 'requirements') {
+        const parts = line.replace(/^  要求：/u, '').split('；')
+        if (parts.length > 1) {
+          lines[index] = `  要求：${parts.slice(0, -1).join('；')}…（已截断）`
+          out = lines.filter((_, at) => !dropped.has(at)).join('\n')
+          return true
+        }
+      }
+      dropped.add(index)
+      out = lines.filter((_, at) => !dropped.has(at)).join('\n')
+      return true
+    }
+    return false
   }
+  for (const kind of SACRIFICE_ORDER) {
+    let guard = 0
+    while (out.length > TASK_POSITION_MAX_CHARS && guard < 200) {
+      guard += 1
+      if (!dropFirstOfKind(kind)) break
+    }
+  }
+  const note = `（本块已按 ${TASK_POSITION_MAX_CHARS} 字符上限截断，完整图请用 memory_graph_read 读取）`
   if (out.length <= TASK_POSITION_MAX_CHARS) {
-    return `${out}\n（本块已按 ${TASK_POSITION_MAX_CHARS} 字符上限截断，完整图请用 memory_graph_read 读取）`
+    /**
+     * The note is charged against the SAME number the caller believes bounds the block, so what is
+     * returned is `body + '\n' + note` where the body already left room for the note.
+     */
+    const head = out.slice(0, Math.max(0, TASK_POSITION_MAX_CHARS - TRUNCATION_NOTE_RESERVE - 1))
+    return `${head}\n${note}`
   }
-  /** Even the header plus four lines overflows: cut the middle of the last kept line. */
-  const budget = TASK_POSITION_MAX_CHARS - 40
-  return `${keep.join('\n').slice(0, budget)}…（已截断）`
+  /**
+   * Only `never` lines remain and they still overflow: a single pathological line (a 900-character
+   * node title). Cut IT, and say so — silence here would be the "truncated but looks complete" failure
+   * the whole block exists to avoid.
+   */
+  const budget = Math.max(40, TASK_POSITION_MAX_CHARS - TRUNCATION_NOTE_RESERVE - 1)
+  return `${out.slice(0, budget)}…（已截断）`
 }
