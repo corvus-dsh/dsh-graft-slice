@@ -51,14 +51,14 @@ function cloneRepo() {
   return root
 }
 
-function runGate(root, commitMessage = '') {
+function runGate(root, commitMessage = '', extraEnv = {}) {
   try {
     const stdout = execFileSync(process.execPath, ['scripts/verify-bundle.mjs'], {
       cwd: root,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 120_000,
-      env: { ...process.env, GRAFT_COMMIT_MESSAGE: commitMessage },
+      env: { ...process.env, GRAFT_COMMIT_MESSAGE: commitMessage, ...extraEnv },
     })
     return { code: 0, out: stdout }
   } catch (error) {
@@ -100,7 +100,16 @@ test('v0.9.5: the same change, declared with [export-change], passes and refresh
   const { path } = desyncBaseline(root)
   const before = readFileSync(path, 'utf8')
 
-  const { code, out } = runGate(root, 'chore: intentional surface change [export-change]')
+  /**
+   * ── B4-0b-1 A8: A FIXTURE WITHOUT `.git` CANNOT PROVE A CLEAN TREE ─────────────────────────────
+   *
+   * `cloneRepo` deliberately excludes `.git` (the copy is a bundle fixture, not a checkout), and since
+   * A8 an ENVIRONMENT declaration only counts when the measured tree is clean — "cannot ask git" is
+   * not "clean" (the same fail-closed rule the commit-message path has always used). The fixture
+   * therefore takes the explicit escape hatch, which is exactly the shape A8 defines for a waiver:
+   * the run says GRAFT_ACCEPT_DIRTY_TREE=1 and the output names it.
+   */
+  const { code, out } = runGate(root, 'chore: intentional surface change [export-change]', { GRAFT_ACCEPT_DIRTY_TREE: '1' })
 
   assert.equal(code, 0, `a declared change must pass; output:\n${out}`)
   assert.match(out, /\[declared\]/u)

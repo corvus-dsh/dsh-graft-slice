@@ -67,6 +67,7 @@
     "assertSessionSummary",
     "assertTopLevelHeader",
     "attemptIgnition",
+    "backgroundWorkInternals",
     "buildIgnitionPrompt",
     "buildInjectionEvents",
     "buildInjectionPlan",
@@ -214,6 +215,6 @@
     "writeLayoutManifest",
     "writeManualConstraints"
   ],
-  "count": 213,
-  "note": "baseline updated by a declared [export-change] (COMMIT 181b864 \"fix(graft): 插件通知不再冒充用户 + 事务恢复先看所有权（B4-0a ①④）[export-change]\" (tree clean over src, index.js))"
+  "count": 214,
+  "note": "baseline updated by a declared [export-change] (COMMIT 2412e57 \"fix(graft): 转述幂等键 + 结算事件表 + env 声明绑定 + 声称降级 + 控制台契约（B4-0b-1 A5-A8 / C-6）[export-change] [bundle-change]\" (tree clean over src, index.js))"
 }
