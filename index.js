@@ -2313,6 +2313,35 @@ function capText(body        )         {
                    
                                                                              
                       
+     
+                                                                                                    
+    
+                                                                                               
+                                                                                                    
+                                                                                                
+                                     
+    
+                                                                      
+                                                       
+                                                                                                   
+                                                                                       
+    
+                                                                                                      
+                                                                                             
+     
+                          
+     
+                                                                                                   
+    
+                                                                                                      
+                                                                                                       
+                                                                                                    
+                                                
+    
+                                                                                                    
+                                                       
+     
+                      
  
 
 /** A settled item that the target has not been told about yet. */
@@ -2342,6 +2371,54 @@ function capText(body        )         {
  * with no text still counts: "it finished, here is where to read it" is the actionable part, and
  * withholding it because the event was terse would defeat the point.
  */
+/**
+ * ── v0.43 (B4-0b-1 A6): ONE TABLE FOR "IS THIS BACKGROUND WORK STILL RUNNING?" ──────────────────
+ *
+ * The audit's B-3 measured the two halves disagreeing: `extractOpenBackgroundWork` treated
+ * `subagent/end` as the end of a subagent (`src/index.ts:2939`), while `settledSince` only recognised
+ * `subagent-settled` / `subagent/settled` (`:104`). Consequences, both permanent:
+ *
+ *   · a subagent that ended with `subagent/end` stayed in `openSubagentIds` of the ledger row, so the
+ *     row was never "fully settled" and the target was owed a result it could never be told about;
+ *   · a settle named `subagent/end` arriving after the slice was invisible to the relay.
+ *
+ * The names are host shapes, and there are more than one of them per kind. Listing them in a single
+ * table is the only form in which "the two sides agree" is checkable: `v248` feeds EVERY name in this
+ * table through BOTH functions, so a name added to one side and forgotten on the other fails there.
+ */
+const JOB_OPEN_EVENT_NAMES = ['job/registered']         
+const JOB_SETTLE_EVENT_NAMES = ['job/settled']         
+const SUBAGENT_OPEN_EVENT_NAMES = ['subagent/start']         
+const SUBAGENT_SETTLE_EVENT_NAMES = ['subagent/end', 'subagent-settled', 'subagent/settled']         
+
+/** Does this event type mean "a subagent/job of this kind started"? */
+function isBackgroundOpenEvent(kind                    , type         )          {
+  if (typeof type !== 'string') return false
+  const table = kind === 'job' ? JOB_OPEN_EVENT_NAMES : SUBAGENT_OPEN_EVENT_NAMES
+  return (table                     ).includes(type)
+}
+
+/** Does this event type mean "a subagent/job of this kind finished"? */
+function isBackgroundSettleEvent(kind                    , type         )          {
+  if (typeof type !== 'string') return false
+  const table = kind === 'job' ? JOB_SETTLE_EVENT_NAMES : SUBAGENT_SETTLE_EVENT_NAMES
+  return (table                     ).includes(type)
+}
+
+/**
+ * The id a background-work event names, across the shapes the host has used.
+ *
+ * `jobId` for jobs; `id` or `taskId` for subagents. Returned as `''` when the event does not carry
+ * one — the callers treat that as "not evidence", never as an id of empty string.
+ */
+function backgroundWorkIdOf(kind                    , data         )         {
+  if (data === null || typeof data !== 'object') return ''
+  const record = data                           
+  if (kind === 'job') return typeof record.jobId === 'string' ? record.jobId : ''
+  if (typeof record.id === 'string') return record.id
+  return typeof record.taskId === 'string' ? record.taskId : ''
+}
+
 function settledSince(
   events                ,
   watched                                                           ,
@@ -2361,21 +2438,24 @@ function settledSince(
     if (data === null || typeof data !== 'object') continue
 
     let kind                                
-    let id = ''
-    if (event.type === 'job/settled') {
-      kind = 'job'
-      id = typeof data.jobId === 'string' ? data.jobId : ''
-    } else if (event.type === 'subagent-settled' || event.type === 'subagent/settled') {
-      kind = 'subagent'
-      id = typeof data.id === 'string' ? data.id : typeof data.taskId === 'string' ? data.taskId : ''
-    } else {
-      continue
-    }
+    if (isBackgroundSettleEvent('job', event.type)) kind = 'job'
+    else if (isBackgroundSettleEvent('subagent', event.type)) kind = 'subagent'
+    else continue
+    const id = backgroundWorkIdOf(kind, data)
     if (id.length === 0 || kind === undefined) continue
     if (wanted.get(`${kind}:${id}`) !== kind) continue
     const key = `${kind}:${id}`
-    if (seen.has(key)) continue
-    seen.add(key)
+    /**
+     * Deduplicate by `kind:id:settledSeq`, NOT by id alone.
+     *
+     * Two different seqs for one id mean the job RAN AGAIN — `deliveryKey`'s own docstring calls that
+     * news. The old id-only `seen` set swallowed it: the first settle was relayed, the re-run never
+     * was, and the `deliveredKeys` fix could not help because the second settle never reached it.
+     * Repeats of the same event (same seq) are still collapsed here, which is what this set is for.
+     */
+    const fullKey = `${key}:${seq}`
+    if (seen.has(fullKey)) continue
+    seen.add(fullKey)
 
     const label =
       typeof data.label === 'string' && data.label.length > 0 ? data.label : id
@@ -2433,9 +2513,52 @@ function deliveryKey(item               )         {
   return `${item.kind}:${item.id}:${item.settledSeq}`
 }
 
-/** `true` when this entry still owes the target a message. */
-function isOwed(entry                 )          {
-  return entry.deliveredAt === undefined
+/**
+ * `true` when this entry still owes the target a message.
+ *
+ * ── v0.43 (B4-0b-1 A5): THE ANSWER NOW DEPENDS ON WHAT SETTLED ──────────────────────────────────
+ *
+ * With `settled` supplied, the question is "is any of these results still undelivered?" — the only
+ * form that can be true for a row that already spoke about a different id. Without it (a caller that
+ * has not read the source log yet, and legacy rows), the answer stays the old row-level one.
+ *
+ * Both answers are honest: the first is what the relay needs, the second is what a reader needs
+ * before it has paid for the cold read.
+ */
+function isOwed(entry                 , settled                           )          {
+  if (settled === undefined || settled.length === 0) return entry.deliveredAt === undefined
+  const delivered = new Set(entry.deliveredKeys ?? [])
+  return settled.some((item) => !delivered.has(deliveryKey(item)))
+}
+
+/**
+ * May this row be skipped WITHOUT reading the source log?
+ *
+ * Two yes-cases, both about "no further result can arrive":
+ *   · `exhaustedAt` was set (a retired source whose frozen log was fully scanned);
+ *   · the row was written by a build BEFORE `deliveredKeys` existed and has already spoken. Its
+ *     un-relaid results were lost by the old row-level stamp — nothing can recover them, and re-reading
+ *     it forever would buy nothing. The row is kept (it is history), just not re-scanned.
+ *
+ * A live source is NEVER skipped: it can grow, and a re-run at a new seq is new information.
+ */
+function isScanExhausted(entry                 )          {
+  if (entry.exhaustedAt !== undefined) return true
+  return entry.deliveredKeys === undefined && entry.deliveredAt !== undefined
+}
+
+/**
+ * The subset of `keys` this row is responsible for, i.e. the ones naming an id it watches.
+ *
+ * Used by the delivery stamp: appending a correction must record the keys that belong to THIS row
+ * and leave every other row's set alone.
+ */
+function watchedDeliveryKeys(entry                 , keys                   )           {
+  const prefixes = [
+    ...entry.watchJobIds.map((id) => `job:${id}:`),
+    ...entry.watchSubagentIds.map((id) => `subagent:${id}:`),
+  ]
+  return keys.filter((key) => prefixes.some((prefix) => key.startsWith(prefix)))
 }
 
 /** A ledger row from the slice-time inputs. Kept here so the shape has one definition. */
@@ -8480,6 +8603,24 @@ export { STALE_AFTER_DAYS, TASK_POSITION_MAX_CHARS, notEstablishedPosition, rend
  * Pure decision logic in `core/pending-transfers.ts`; the IO lives here, beside the other store
  * readers, so there is exactly ONE place that opens this file.
  */
+
+/**
+ * v0.43 (B4-0b-1 A6): ONE object for the background-work vocabulary, exactly as the test-seam
+ * doctrine prescribes elsewhere ("prefer folding a new function into an object already listed").
+ *
+ * It is the shared TABLE the extractor and the relay both consult; `v248` walks every name in it
+ * through both functions, which is the only way "the two sides agree" can be a measured claim
+ * instead of two lists someone eyeballed side by side.
+ */
+export const backgroundWorkInternals = {
+  JOB_OPEN_EVENT_NAMES,
+  JOB_SETTLE_EVENT_NAMES,
+  SUBAGENT_OPEN_EVENT_NAMES,
+  SUBAGENT_SETTLE_EVENT_NAMES,
+  isBackgroundOpenEvent,
+  isBackgroundSettleEvent,
+  backgroundWorkIdOf,
+}
 export { deliveryKey, relayText, settledSince, transferRecord }
                                               
 export {
@@ -11136,28 +11277,36 @@ export function extractOpenBackgroundWork(events                             )  
   for (const event of events) {
     const data = event.data
     if (!isRecord(data)) continue
-    if (event.type === 'job/registered') {
-      const id = typeof data.jobId === 'string' ? data.jobId : ''
+    /**
+     * ── v0.43 (B4-0b-1 A6): THE SAME TABLE AS THE RELAY ────────────────────────────────────────
+     *
+     * These four branches used to compare literal strings here while `settledSince` compared a
+     * DIFFERENT set of literal strings there — and the two disagreed exactly on the subagent case
+     * (`subagent/end` vs `subagent-settled`). Now both sides ask the shared predicate, so "which
+     * names mean finished" has one answer. `v248` walks the whole table through both functions.
+     */
+    if (isBackgroundOpenEvent('job', event.type)) {
+      const id = backgroundWorkIdOf('job', data)
       if (id.length === 0) continue
       const label = typeof data.label === 'string' && data.label.length > 0 ? data.label : id
       jobs.set(id, label)
       continue
     }
-    if (event.type === 'job/settled') {
-      const id = typeof data.jobId === 'string' ? data.jobId : ''
+    if (isBackgroundSettleEvent('job', event.type)) {
+      const id = backgroundWorkIdOf('job', data)
       if (id.length > 0) jobs.delete(id)
       continue
     }
     // A spawned subagent's lifetime is visible through its own events: the
     // task id appears on creation and again on settlement.
-    if (event.type === 'subagent/start') {
-      const id = typeof data.id === 'string' ? data.id : typeof data.taskId === 'string' ? data.taskId : ''
+    if (isBackgroundOpenEvent('subagent', event.type)) {
+      const id = backgroundWorkIdOf('subagent', data)
       if (id.length === 0) continue
       subagents.set(id, typeof data.label === 'string' && data.label.length > 0 ? data.label : id)
       continue
     }
-    if (event.type === 'subagent/end') {
-      const id = typeof data.id === 'string' ? data.id : typeof data.taskId === 'string' ? data.taskId : ''
+    if (isBackgroundSettleEvent('subagent', event.type)) {
+      const id = backgroundWorkIdOf('subagent', data)
       if (id.length > 0) subagents.delete(id)
     }
   }
@@ -13339,23 +13488,28 @@ function readPendingTransfers()                    {
 }
 
 /**
- * Stamp `deliveredAt` on the rows that just spoke, by identity, APPENDING a corrected copy.
+ * Record which results just spoke, by `deliveryKey`, on the rows that own them.
  *
- * "Appending a correction" rather than rewriting: the last row for a key wins when reading, which
- * keeps the operation append-only (a crash mid-rewrite cannot truncate the file). The reader below
- * folds rows last-wins, so the stamp is a new fact rather than an edit of an old one.
+ * ── v0.43 (B4-0b-1 A5): APPEND KEYS, DO NOT STAMP THE ROW ────────────────────────────────────────
+ *
+ * The old version stamped `deliveredAt` on any row whose watched ids appeared among the delivered
+ * keys. With two watched ids and one relaid result, that marked BOTH delivered — the second result
+ * could never be announced, and the tape had already promised it would be. Now each row records the
+ * exact keys it delivered (`deliveredKeys`), so "job-2 has not spoken yet" is a fact the ledger holds.
+ *
+ * `deliveredAt` is still written as the legacy "this row has spoken at least once" marker; rows from
+ * older builds carry only it, and reading them must not re-announce what they already said.
  */
 function markTransfersDelivered(targetSessionId        , deliveredKeys                   )       {
   if (storeLayer === undefined || deliveredKeys.length === 0) return
   const at = Date.now()
   for (const entry of readPendingTransfers()) {
     if (entry.targetSessionId !== targetSessionId) continue
-    /** Only rows whose watched ids actually produced a delivered result are stamped. */
-    const touched = [...entry.watchJobIds.map((id) => `job:${id}`), ...entry.watchSubagentIds.map((id) => `subagent:${id}`)].some(
-      (prefix) => deliveredKeys.some((key) => key.startsWith(`${prefix}:`)),
-    )
-    if (!touched) continue
-    appendPendingTransfer({ ...entry, deliveredAt: at })
+    /** Only the keys naming an id THIS row watches belong to it. */
+    const mine = watchedDeliveryKeys(entry, deliveredKeys)
+    if (mine.length === 0) continue
+    const merged = [...new Set([...(entry.deliveredKeys ?? []), ...mine])].sort()
+    appendPendingTransfer({ ...entry, deliveredKeys: merged, deliveredAt: entry.deliveredAt ?? at })
   }
 }
 
@@ -13370,8 +13524,19 @@ function markTransfersDelivered(targetSessionId        , deliveredKeys          
  * log already holds. That is what makes this work for a retired source on another host.
  */
 async function pendingTransferMessage(ctx                   , targetSessionId        )                              {
+  /**
+   * ── v0.43 (B4-0b-1 A5): FILTER BY UNDELIVERED RESULT, NOT BY ROW ─────────────────────────────
+   *
+   * `isOwed(entry)` alone asks "did this row ever speak?" — so a row that already relayed job-1 was
+   * skipped forever and job-2's result died with it. The per-row answer can only be computed AFTER
+   * the source has been read, which is why the row-level filter below is deliberately weaker
+   * (only "the row still has watched ids"), and the real decision happens per settled item.
+   */
   const owed = foldPendingTransfers(readPendingTransfers()).filter(
-    (entry) => entry.targetSessionId === targetSessionId && isOwed(entry),
+    (entry) =>
+      entry.targetSessionId === targetSessionId &&
+      entry.watchJobIds.length + entry.watchSubagentIds.length > 0 &&
+      !isScanExhausted(entry),
   )
   if (owed.length === 0) return undefined
 
@@ -13387,8 +13552,23 @@ async function pendingTransferMessage(ctx                   , targetSessionId   
     }
     const events = Array.isArray(raw?.events) ? raw.events : []
     const found = settledSince(events, { jobs: entry.watchJobIds, subagents: entry.watchSubagentIds }, entry.sinceSeq)
-    if (found.length === 0) continue
-    settled.push(...found)
+    /** Drop only the results this row has already relayed; keep the rest. */
+    const fresh = found.filter((item) => isOwed(entry, [item]))
+    if (fresh.length === 0) {
+      /**
+       * Nothing new. If the source is RETIRED the log is frozen, so this is a terminal answer — record
+       * it, and this row stops costing a cold read on every pre-step. A live source is left alone.
+       */
+      if (isRetired(entry.sourceSessionId)) {
+        try {
+          appendPendingTransfer({ ...entry, exhaustedAt: Date.now() })
+        } catch {
+          /** A failed marker costs one more read, never correctness. */
+        }
+      }
+      continue
+    }
+    settled.push(...fresh)
     sources.push(entry.sourceSessionId)
   }
   if (settled.length === 0) return undefined

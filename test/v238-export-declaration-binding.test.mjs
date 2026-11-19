@@ -113,13 +113,39 @@ test('v238 ①: HEAD 带声明、工作树另有未声明改动 ⇒ exit 1，且
 
 // ── ② 环境变量声明总是算数，并点名来源 ──────────────────────────────────────────────────────
 
-test('v238 ②: 同样的脏工作树，但用环境变量声明 ⇒ exit 0，点名「环境变量」', () => {
+test('v238 ②: 同样的脏工作树，但用环境变量声明 + GRAFT_ACCEPT_DIRTY_TREE=1 ⇒ exit 0，点名「环境变量」与「接受了脏树」', () => {
   const root = worktree()
   try {
     addExportAndBuild(root, 'v238EnvProbe')
-    const { code, out } = runGate(root, { GRAFT_COMMIT_MESSAGE: 'feat: x\n\n[export-change]' })
-    assert.equal(code, 0, `环境变量为这一次运行而设，必须生效；实测 exit=${code}\n${out.slice(-700)}`)
+    /**
+     * ── B4-0b-1 A8 CHANGED THIS CASE, ON THE USER'S RULING ──────────────────────────────────────
+     *
+     * The environment variable says "a declaration exists for this run" — it does NOT say "the
+     * artifact being measured is the declared one". With a dirty tree the measured `index.js` is a
+     * rebuild nobody committed, so the declaration is about some other artifact. The ruling was 「是」
+     * (bind it), with one explicit escape hatch. This case now exercises the escape hatch, which is
+     * the only remaining way an env declaration can cover a dirty tree.
+     */
+    const { code, out } = runGate(root, {
+      GRAFT_COMMIT_MESSAGE: 'feat: x\n\n[export-change]',
+      GRAFT_ACCEPT_DIRTY_TREE: '1',
+    })
+    assert.equal(code, 0, `显式接受脏树时环境变量必须生效；实测 exit=${code}\n${out.slice(-700)}`)
     assert.match(out, /环境变量|environment/iu, `必须点名声明来自环境变量：${out.slice(-700)}`)
+    assert.match(out, /dirty tree ACCEPTED/iu, `必须点名这次豁免了脏树：${out.slice(-700)}`)
+  } finally {
+    cleanup(root)
+  }
+})
+
+test('v238 ②b: 同样的脏工作树，环境变量声明**不算数** —— 除非显式豁免（A8 的核心判据）', () => {
+  const root = worktree()
+  try {
+    addExportAndBuild(root, 'v238EnvUnboundProbe')
+    const before = baselineText(root)
+    const { code, out } = runGate(root, { GRAFT_COMMIT_MESSAGE: 'feat: x\n\n[export-change]' })
+    assert.equal(code, 1, `脏树上的环境变量声明不许算数；实测 exit=${code}\n${out.slice(-700)}`)
+    assert.equal(baselineText(root), before, '拒绝时基线必须逐字节不变')
   } finally {
     cleanup(root)
   }

@@ -2,7 +2,7 @@
   "name": "@corvus-dsh/dsh-graft-slice",
   "version": "0.9.2-beta.1",
   "private": false,
-  "description": "星火 OS 切片层 (graft-slice): physical handoff for long sessions: slice a closed log at its last turn/end into a zero-inheritance, cold-resumable session. No fork, no lossy compaction, crash-safe transaction journal. Can carry memory context into the new session.",
+  "description": "星火 OS 切片层 (graft-slice): physical handoff for long sessions: slice a closed log at its last turn/end into a zero-inheritance, cold-resumable session. No fork, no lossy compaction, crash-safe transaction journal. Can render memory context if the caller supplies it (NOT wired to dsh-memory: no producer yet, see TD-24).",
   "type": "module",
   "main": "index.js",
   "exports": {

@@ -37,6 +37,7 @@ const source = readFileSync(join(here, '..', 'src', 'index.ts'), 'utf8')
 
 /** Test-only seams (no consumer outside the suite). */
 const TEST_ONLY_SEAMS = [
+  'backgroundWorkInternals',
   'clearGraftTargetsForTest',
   'extractGoalForTest',
   'extractWorkspaceState',
@@ -77,7 +78,14 @@ test('every seam-SHAPED export is registered (the convention cannot smuggle one 
 
 test('every test-only seam is still exported, and still callable', () => {
   for (const name of [...TEST_ONLY_SEAMS, ...DEAD_SEAMS_PENDING_REMOVAL]) {
-    assert.equal(typeof entry[name], 'function', `${name} is pinned as a seam but is no longer exported`)
+    /**
+     * A seam is either a FUNCTION or an OBJECT of functions (the "fold a new function into an object
+     * already listed" rule). `backgroundWorkInternals` is the object form: the four event-name tables
+     * plus three predicates, exposed as one name so the foreign vocabulary has one home.
+     */
+    const value = entry[name]
+    const ok = typeof value === 'function' || (value !== null && typeof value === 'object' && Object.values(value).every((item) => typeof item === 'function' || Array.isArray(item)))
+    assert.ok(ok, `${name} is pinned as a seam but is no longer exported (or is not a seam shape)`)
   }
 })
 

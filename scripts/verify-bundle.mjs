@@ -288,7 +288,15 @@ if (surface !== undefined && !surface.includes('default')) {
    * because that is where the file is.
    */
   const isMeasuredPath = (path) => path === 'index.js' || path === 'src' || path.startsWith('src/')
-  const treeCleanOverMeasuredPaths = (() => {
+  /**
+   * The dirty lines over the measured paths — the EVIDENCE, kept as a list.
+   *
+   * It used to be reduced to a boolean, which made two quite different situations print the same
+   * sentence: "the tree is clean" and "we could not ask git at all" (a non-checkout). A4/B-6 want the
+   * list itself, because `GRAFT_ACCEPT_DIRTY_TREE=1` is a waiver a human signs — the waiver has to say
+   * WHAT it waived, not merely that something was waived.
+   */
+  const dirtyOverMeasuredPaths = (() => {
     try {
       const out = String(
         execFileSync('git', ['status', '--porcelain'], {
@@ -297,19 +305,21 @@ if (surface !== undefined && !surface.includes('default')) {
           stdio: ['ignore', 'pipe', 'ignore'],
         }),
       ).trim()
-      if (out.length === 0) return true
+      if (out.length === 0) return []
+      const dirty = []
       for (const line of out.split('\n')) {
         const body = line.slice(3)
         const target = body.includes(' -> ') ? body.split(' -> ').pop() : body
         const path = target.replace(/^"|"$/gu, '')
-        if (isMeasuredPath(path)) return false
+        if (isMeasuredPath(path)) dirty.push(line.trim())
       }
-      return true
+      return dirty
     } catch {
       /** Cannot ask at all (not a git checkout) ⇒ cannot claim clean. Fail closed. */
-      return false
+      return ['<git status unavailable — cannot claim a clean tree>']
     }
   })()
+  const treeCleanOverMeasuredPaths = dirtyOverMeasuredPaths.length === 0
   const headCommit = (() => {
     try {
       const raw = String(
@@ -337,14 +347,31 @@ if (surface !== undefined && !surface.includes('default')) {
     }
   })()
   const envMessage = `${process.env.GRAFT_COMMIT_MESSAGE ?? ''}\n${process.env.GITHUB_HEAD_COMMIT_MESSAGE ?? ''}`
-  const fromEnvironment = /\[export-change\]/u.test(envMessage)
+  /**
+   * ── B4-0b-1 A8 (user ruling, 2026-11-19): AN ENV DECLARATION MUST ALSO BIND THE MEASURED TREE ──
+   *
+   * `fromEnvironment` used to count unconditionally. The argument for that was "CI sets it for this
+   * run", which is true — and irrelevant: the environment variable says *a declaration exists for
+   * this run*, not *the artifact being measured is the declared one*. With a dirty tree, the measured
+   * `index.js` is a rebuild nobody committed, so the declaration is about some other artifact.
+   *
+   * The ruling was "是" (yes, bind it), with one escape hatch: `GRAFT_ACCEPT_DIRTY_TREE=1` waives the
+   * binding EXPLICITLY. Both outcomes name themselves in the output, and a waived run records the
+   * dirty list, because a waiver that does not say what it waived is a blank cheque.
+   */
+  const acceptDirtyTree = String(process.env.GRAFT_ACCEPT_DIRTY_TREE ?? '') === '1'
+  const envDeclares = /\[export-change\]/u.test(envMessage)
+  const fromEnvironment = envDeclares && (treeCleanOverMeasuredPaths || acceptDirtyTree)
   /** A commit-message declaration is honoured ONLY when the measured artifact IS that commit's. */
   const fromCommit = treeCleanOverMeasuredPaths && /\[export-change\]/u.test(String(commitMessage))
   const declared = fromEnvironment || fromCommit
 
   /** Where the waiver came from — printed, so a reader can tell it covers the change they see. */
   const declarationSource = fromEnvironment
-    ? 'ENVIRONMENT VARIABLE (GRAFT_COMMIT_MESSAGE / GITHUB_HEAD_COMMIT_MESSAGE) — set for this run'
+    ? acceptDirtyTree && !treeCleanOverMeasuredPaths
+      ? `ENVIRONMENT VARIABLE (GRAFT_COMMIT_MESSAGE / GITHUB_HEAD_COMMIT_MESSAGE) — dirty tree ACCEPTED via GRAFT_ACCEPT_DIRTY_TREE=1: ${dirtyOverMeasuredPaths.join('; ')}`
+      : 'ENVIRONMENT VARIABLE (GRAFT_COMMIT_MESSAGE / GITHUB_HEAD_COMMIT_MESSAGE) — set for this run, tree clean over ' +
+        MEASURED_PATHS.join(', ')
     : fromCommit
       ? `COMMIT ${headCommit.sha} "${headCommit.subject}" (tree clean over ${MEASURED_PATHS.join(', ')})`
       : undefined
@@ -400,10 +427,16 @@ if (surface !== undefined && !surface.includes('default')) {
        * Refresh the baseline only when the change was declared — and, since B2-T4b, only when the
        * declaration actually covers THIS measurement (see `fromCommit`). An undeclared change must
        * keep failing until someone looks at it, not silently become the new normal.
+       *
+       * A8: a run that waived a dirty tree records the dirty list in the note. The waiver is a human
+       * decision, and the file it rewrites is the durable record of it.
        */
+      const note =
+        `baseline updated by a declared [export-change] (${declarationSource})` +
+        (!treeCleanOverMeasuredPaths ? ` — dirty tree was accepted: ${dirtyOverMeasuredPaths.join('; ')}` : '')
       writeFileSync(
         SURFACE_FILE,
-        `${JSON.stringify({ exports: surface, count: surface.length, note: `baseline updated by a declared [export-change] (${declarationSource})` }, null, 2)}\n`,
+        `${JSON.stringify({ exports: surface, count: surface.length, note }, null, 2)}\n`,
         'utf8',
       )
     }
