@@ -102,7 +102,7 @@ const perSession = []
  *
  * The dispatch's can-red is 「去预测 ⇒ 覆盖率变差」. On THIS corpus that can-red is VACUOUS, and the
  * measurement says so plainly: every crossing here is a giant jump (560k–640k tokens) or a 76k step
- * against an p90 of 833, and no p90 can bridge those — so layer 2 covers 0 of 31 either way, and the
+ * against an p90 of 833, and no p90 can bridge those — so layer 2 announces 0 of 31 either way, and the
  * "coverage got worse" test would report 0 → 0 (a comparison that cannot fail is not a test).
  *
  * The honest alternative is to count what layer 2 DOES change: the number of pre-steps it turns into a
@@ -110,6 +110,72 @@ const perSession = []
  * NOT move — that pins the two disjuncts independently.
  */
 const nudgeStats = { thresholdNudges: 0, predictedNudges: 0, predictedSkippedByCutoff: 0 }
+
+/**
+ * ── §17.2: `prevented` WAS A RESULT NAME FOR A PROCESS FACT ──────────────────────────────────────
+ *
+ * The first version classified a crossing as `prevented` when the pre-step BEFORE the jump would have
+ * fired a prediction. That only proves 「预警比切断早一步到达」. The cut itself still happens: the
+ * pre-step checks `ratio >= hardAt` and returns before the predictor ever runs, and whether the model
+ * then hands over is a separate question with its own evidence (a `graft_*` tool call).
+ *
+ * A field named `prevented` would be quoted in acceptance notes and read as 「这一次切没发生」 the first
+ * time it is non-zero. That is the same fault as `prevented` vs `disclosed` one level deeper, so the
+ * judgement is now made from evidence rather than from a name:
+ *
+ *   `announced-then-handed-over` — a prediction fired before the jump AND a `graft_*` call appears
+ *                                  between that nudge and the jump. The cut was genuinely pre-empted.
+ *   `announced-not-prevented`    — a prediction fired and NO handover call followed. The model was
+ *                                  warned; the cut happened anyway.
+ *
+ * `graft_*` is the right evidence because it is what the handover actually IS: measured across this
+ * corpus, the log carries `tool/call` events named `graft_prepare` / `graft_commit` /
+ * `graft_slice_and_inject` (29 / 9 / 14 occurrences) and no separate transfer event type.
+ */
+/**
+ * The three tools that ARE a handover. An exact set, not a `graft_` prefix.
+ *
+ * MEASURED MISTAKE (caught by `v266 ⑤`): the first version matched the prefix, which swept in
+ * `graft_debug_status` (14 calls in this corpus) and `graft_read_result` (11) — diagnostic tools that
+ * say nothing about the model handing over. Counting those as prevention evidence would inflate exactly
+ * the number this section exists to keep honest.
+ */
+export const HANDOVER_TOOLS_FOR_PROBE = ['graft_prepare', 'graft_commit', 'graft_slice_and_inject']
+
+/** Seq numbers of every handover call in this session, ascending. Exported so `v266` can pin the judgement. */
+export function handoverSeqsOf(events) {
+  const seqs = []
+  for (const event of events) {
+    if (event?.type !== 'tool/call') continue
+    if (!HANDOVER_TOOLS_FOR_PROBE.includes(String(event.data?.name ?? ''))) continue
+    seqs.push(Number(event.seq) || 0)
+  }
+  return seqs.sort((left, right) => left - right)
+}
+
+/**
+ * ── §17.2: THE CROSSING CLASSIFIER, EXTRACTED SO IT CAN BE TESTED ────────────────────────────────
+ *
+ * The name is the whole point of this function, so it must not live inline in a loop that only the real
+ * corpus can reach: `v266` drives it with fixtures and asserts the `announced-not-prevented` case, which
+ * is the one the old code mislabelled as `prevented`.
+ *
+ * The three answers, and what each is evidence FOR:
+ *   · `announced-then-handed-over` — a prediction fired AND a `graft_*` call lands between that nudge and
+ *     the jump. Prevention, with evidence.
+ *   · `announced-not-prevented`    — a prediction fired and NO handover call followed. The warning
+ *     arrived; the cut was not averted. This is what the old code called `prevented`.
+ *   · `forced-cut`                 — no prediction at all, so layer 3's mark is the only disclosure.
+ */
+export function classifyCrossing(input) {
+  if (!(input.predictedBefore === true)) return 'forced-cut'
+  const handover = (input.handoverSeqs ?? []).some(
+    (seq) => input.nudgeSeq !== undefined && seq > input.nudgeSeq && seq <= input.jumpSeq,
+  )
+  return handover ? 'announced-then-handed-over' : 'announced-not-prevented'
+}
+
+/** Which tools count as "the model handed over" — see `HANDOVER_TOOLS_FOR_PROBE` above. */
 
 for (const file of files) {
   let log
@@ -152,9 +218,12 @@ for (const file of files) {
    */
   const derived = deriveWarnAt(CONSERVATIVE_HARD_AT, contextWindow, RATIO_FALLBACK)
   const warnAt = derived.warnAt
+  const handoverSeqs = handoverSeqsOf(events)
   let ring = []
   let nudgeDelivered = false
   let nudgeDeliveredAtRatio
+  /** The seq of the most recent nudge, so a following handover can be attributed to it. */
+  let lastNudgeSeq
   let covered = 0
   let coveredByPrediction = 0
 
@@ -177,6 +246,7 @@ for (const file of files) {
       if (verdict.reason === 'predicted') nudgeStats.predictedNudges += 1
       else nudgeStats.thresholdNudges += 1
       nudgeDelivered = true
+      lastNudgeSeq = previous.seq
       if (nudgeDeliveredAtRatio === undefined) nudgeDeliveredAtRatio = previous.tokens / contextWindow
     }
     const before = previous.tokens / contextWindow
@@ -187,8 +257,21 @@ for (const file of files) {
      */
     if (!(before < warnAt && after >= CONSERVATIVE_HARD_AT)) continue
     covered += 1
-    const layer = verdict.fire && verdict.reason === 'predicted' ? 'predicted' : 'forced-cut'
-    if (layer === 'predicted') coveredByPrediction += 1
+    /**
+     * §17.2: the classification comes from EVIDENCE, not from the name of the branch that fired.
+     *
+     * A prediction firing before the jump only proves the warning arrived one step early. Whether the cut
+     * was actually averted needs a handover call between that nudge and the jump — `handoverSeqs` is that
+     * evidence, and `announced-not-prevented` is what the absence of it must be CALLED.
+     */
+    const predictedBefore = verdict.fire && verdict.reason === 'predicted'
+    const layer = classifyCrossing({
+      predictedBefore,
+      nudgeSeq: lastNudgeSeq,
+      jumpSeq: current.seq,
+      handoverSeqs,
+    })
+    if (predictedBefore) coveredByPrediction += 1
     crossings.push({
       session: file.split(/[\\/]/u).slice(-2, -1)[0]?.slice(0, 28) ?? '?',
       seq: current.seq,
@@ -201,6 +284,8 @@ for (const file of files) {
       predictedFrom: prediction.from,
       predictedSamples: prediction.samples,
       nudgeDeliveredBefore: nudgeDelivered,
+      nudgeSeq: lastNudgeSeq ?? null,
+      handoverSeqsBeforeJump: handoverSeqs.filter((seq) => seq <= current.seq).length,
       layer,
     })
   }
@@ -218,23 +303,29 @@ for (const file of files) {
 }
 
 const total = crossings.length
-const byPrediction = crossings.filter((entry) => entry.layer === 'predicted').length
+const byPrediction = crossings.filter((entry) => entry.layer === 'announced-then-handed-over' || entry.layer === 'announced-not-prevented').length
+const actuallyPrevented = crossings.filter((entry) => entry.layer === 'announced-then-handed-over').length
+const announcedOnly = crossings.filter((entry) => entry.layer === 'announced-not-prevented').length
 const byForcedCut = total - byPrediction
 /** How many of the crossings are reset-shaped (`before` under the window's shrink ratio). */
 const resetShaped = crossings.filter((entry) => entry.before < 0.05).length
 
 /**
- * ── §16.4-1: 「预防」 AND 「披露」 ARE NOT THE SAME VERB ─────────────────────────────────────────
+ * ── §16.4-1 / §17.2: THREE VERBS, BECAUSE THERE ARE THREE FACTS ──────────────────────────────────
  *
- * The first version called the sum `coveredByOneLayer`, which reads as 「每件事都有人管」. Layer 3 does not
- * PREVENT a cut — it cannot; the cut already happened. It only DISCLOSES it in the handoff. Folding the two
- * into one word is the same failure this project keeps recording: a number that answers a question nobody
- * asked, in a way that makes the answer look better than it is.
+ * `coveredByOneLayer` (the original) read as 「每件事都有人管」. Then `prevented`/`disclosed` fixed the
+ * first half but `prevented` still named a RESULT for a PROCESS fact: a prediction firing means the
+ * warning arrived one step early, not that the cut was averted.
  *
- * So the fields say what they measure:
- *   · `preventedByLayer2` — cuts that never happened because the model was warned in time;
- *   · `disclosedByLayer3` — cuts that happened and were described in the handoff;
- *   · `preventedOrDisclosed` — the sum, which is the honest name for "every crossing is accounted for".
+ * So the count is now split three ways, and each name is checkable against the log:
+ *
+ *   `announcedThenHandedOver` — a prediction fired before the jump AND a `graft_*` call follows it.
+ *                              The cut was genuinely pre-empted. This is the ONLY count that may be
+ *                              called prevention.
+ *   `announcedNotPrevented`   — a prediction fired and no handover call followed. Warned; cut anyway.
+ *   `disclosedByLayer3`       — no prediction at all, so layer 3 describes the cut in the handoff.
+ *
+ * `announcedOrDisclosed` is the sum, and it is the honest name for "every crossing is accounted for".
  */
 const summary = {
   root,
@@ -251,17 +342,21 @@ const summary = {
   /** `before` under 5% of the window: a just-reset context, not a working one (154-of-160 shape). */
   crossingsResetShaped: resetShaped,
   crossingsRealGrowth: total - resetShaped,
-  preventedByLayer2: byPrediction,
+  announcedByLayer2: byPrediction,
+  /** The subset of `announcedByLayer2` that ALSO saw a handover call — the only real prevention. */
+  announcedThenHandedOver: actuallyPrevented,
+  announcedNotPrevented: announcedOnly,
   disclosedByLayer3: byForcedCut,
   /** Every crossing is accounted for by exactly one verb; anything else is a hole in the argument. */
-  preventedOrDisclosed: byPrediction + byForcedCut === total,
+  announcedOrDisclosed: byPrediction + byForcedCut === total,
   /**
-   * NOT a coverage claim. On this corpus layer 2 prevents nothing (see the report): its effectiveness is
-   * proved by `v260 ②`'s instrumented window, not by this number.
+   * NOT a coverage claim. On this corpus layer 2 announces nothing: its effectiveness is proved by
+   * `v260 ②`'s instrumented window, not by this number.
    */
   layer2CoverageNote: noPredict
-    ? 'layer 2 disabled (can-red): the preventedByLayer2 count must fall, and it is 0 either way on this corpus'
-    : 'this corpus cannot demonstrate layer 2 (all crossings are jumps); see test/v260 ② for the proof',
+    ? 'layer 2 disabled (can-red): announcedByLayer2 must be 0, and it is 0 either way on this corpus'
+    : 'this corpus cannot demonstrate layer 2 (all crossings are jumps); see test/v260 ② for the proof. '
+      + 'announcedByLayer2 counts WARNINGS ARRIVING FIRST — prevention additionally needs a graft_* call',
   /** Layer 2's actual effect on this corpus: how many nudges it fired, by reason. */
   nudges: nudgeStats,
   sessionsWithCrossings: perSession,
@@ -282,9 +377,12 @@ const lines = [
   `crossings                ${total}`,
   `  reset-shaped           ${resetShaped}   (before < 5% of the window: a post-reset re-read)`,
   `  real growth            ${summary.crossingsRealGrowth}   (this is the number the ruling is about)`,
-  `  PREVENTED by layer 2   ${byPrediction}   (the cut never happened: the model was warned first)`,
-  `  DISCLOSED by layer 3   ${byForcedCut}   (the cut happened and the handoff says so — 未经预警)`,
-  `  every one accounted    ${summary.preventedOrDisclosed ? 'YES' : 'NO — a crossing has no layer'}`,
+  '',
+  `  ANNOUNCED by layer 2   ${byPrediction}   (a prediction fired before the jump)`,
+  `    ├ handed over after  ${actuallyPrevented}   (a graft_* call follows ⇒ the cut really was averted)`,
+  `    └ NOT prevented      ${announcedOnly}   (warned, and the cut happened anyway)`,
+  `  DISCLOSED by layer 3   ${byForcedCut}   (no prediction ⇒ the handoff says 未经预警)`,
+  `  every one accounted    ${summary.announcedOrDisclosed ? 'YES' : 'NO — a crossing has no layer'}`,
   '',
   `  NOTE                   ${summary.layer2CoverageNote}`,
   '',

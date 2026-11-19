@@ -16073,6 +16073,32 @@ function sliceDigest(_input
   return createHash('sha256').update(JSON.stringify(_input)).digest('hex')
 }
 
+/**
+ * ── W1-8: THE DIGEST MUST NOT CONTAIN A CLOCK ───────────────────────────────────────────────────
+ *
+ * `task-position` renders a staleness line 「自 2026-10-20 起未更新（已 30 天）」. The date comes from the
+ * graph (stable); the DAY COUNT comes from `now`, which is read fresh at every call. Hashing the rendered
+ * text therefore made the digest change at midnight — a review opened at 23:58 and committed at 00:02
+ * would differ for a reason that has nothing to do with what the user approved.
+ *
+ * Measured shape of the failure: `digestOfPlan` hashes `chunk.text`, so ANY time-derived text inside ANY
+ * chunk is a source of drift. Only one chunk does that today, and it is this one.
+ *
+ * ── WHY NORMALISE RATHER THAN EXCLUDE THE CHUNK ────────────────────────────────────────────────
+ *
+ * The dispatch allows either "drop the day count from the digest inputs" or "make task-position a tail
+ * kind". The second would let a REAL change to the position (a different current node, a different goal)
+ * through unchecked, because tail kinds are explicitly allowed to move between review and commit. So the
+ * chunk stays IN the digest and only its volatile part is normalised: the day count is replaced with a
+ * placeholder while the DATE — which is data — is kept.
+ *
+ * The same normalisation runs on both sides (prepare and the commit re-check), so the comparison stays
+ * apples-to-apples.
+ */
+export function normalizeDigestText(text        )         {
+  return String(text ?? '').replace(/（已 \d+ 天）/gu, '（已 N 天）')
+}
+
 function digestOfPlan(plan     , handover                )         {
   // v7.4 P1-2: hash exactly what the user reviews — the goal plus every injected
   // chunk (`buildInjectionPlan` exposes the tape as chunks, not as turns, so an
@@ -16084,8 +16110,10 @@ function digestOfPlan(plan     , handover                )         {
   // and a chunk-only hash would collide — yet the review still differs, because the board then
   // says 「模型提供」. The digest is the fingerprint of what the user approved, provenance
   // included, so provenance is hashed.
+  //
+  // W1-8: `normalizeDigestText` strips the day count (a clock reading) and keeps the date (data).
   const chunks = Array.isArray(plan?.chunks)
-    ? plan.chunks.map((chunk     ) => [String(chunk?.kind ?? ''), String(chunk?.text ?? '')])
+    ? plan.chunks.map((chunk     ) => [String(chunk?.kind ?? ''), normalizeDigestText(String(chunk?.text ?? ''))])
     : []
   const constraints           = Array.isArray(plan?.constraints) ? plan.constraints.map(String) : []
   const handoverDigest = {
@@ -16351,7 +16379,12 @@ export async function commitPreparedSlice(
   for (let index = 0; index < stableBefore.length; index += 1) {
     const a = stableBefore[index]
     const b = stableAfter[index]
-    if (String(a.kind) !== String(b.kind) || String(a.text) !== String(b.text)) {
+    /**
+     * W1-8: compared through the SAME normalisation the digest uses. Comparing raw text here would make
+     * 「已 30 天」 vs 「已 31 天」 a `SLICE_DIGEST_MISMATCH` at midnight — the check would refuse a commit
+     * for exactly the drift the digest was changed to ignore, and the two would contradict each other.
+     */
+    if (String(a.kind) !== String(b.kind) || normalizeDigestText(String(a.text)) !== normalizeDigestText(String(b.text))) {
       changed.push(String(b.kind))
     }
   }
