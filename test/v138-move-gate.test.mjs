@@ -132,8 +132,25 @@ test('v138: spans come from the COMPILER, not from a second parser', (t) => {
   // And the declaration the old scanner lost entirely, because buildInjectionPlan swallowed it.
   const forced = gateJson('noteForcedCut')
   assert.equal(forced.A.verdict, 'YES')
-  assert.equal(forced.A.measured.declarations[0].lines, 7,
-    'noteForcedCut was invisible while buildInjectionPlan measured 4,002 lines')
+  /**
+   * ── THE JUDGEMENT IS "SEEN AS ITSELF", NOT A REMEMBERED LINE COUNT ─────────────────────────────
+   *
+   * This used to assert `lines === 7`, and an honest edit of the function body (W0-2 split its single
+   * `return` into a facts object plus a renderer call) made it 13 — the scanner was still exactly right,
+   * the test was pinned to a number that was never the claim. The claim is the one in the comment above:
+   * the declaration must not be swallowed by its container. So the span is checked against the FILE
+   * (starts on the declaration, ends on the brace that closes it) and against the defect's shape (a
+   * few dozen lines, not 4,002).
+   */
+  const forcedSpan = forced.A.measured.declarations[0]
+  {
+    const lines = readFileSync(SRC, 'utf8').split('\n')
+    assert.equal(lines[forcedSpan.start - 1], 'function noteForcedCut(sourceSessionId?: string): string | undefined {',
+      'the reported start must be the declaration')
+    assert.equal(lines[forcedSpan.end - 1], '}', 'the reported end must close it')
+  }
+  assert.ok(forcedSpan.lines <= 40,
+    `noteForcedCut must be measured as itself, not swallowed by buildInjectionPlan (4,002 lines); got ${forcedSpan.lines}`)
 })
 
 test('v138: C4 can actually DETECT a read of a container local (its 0 must mean something)', (t) => {

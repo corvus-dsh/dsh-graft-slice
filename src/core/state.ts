@@ -346,7 +346,42 @@ export const modelDrivenNudgeTurns = new Map<string, number>()
  */
 export const watermarkEscalations = new Map<string, { at: number; ratio: number; sinceSeq: number }>()
 export const watermarkEscalated = new Set<string>()
-export const forcedCutMarks = new Map<string, { ratio: number; at: number }>()
+/**
+ * ── W0-2 layer 3: the forced-cut mark carries FACTS, not a motive ────────────────────────────────
+ *
+ * The mark used to be `{ ratio, at }` and was set only when a nudge had been delivered, so a session
+ * that JUMPED the whole nudge window produced no mark at all and the handoff said nothing. It now also
+ * carries whether a nudge was delivered and, when it was, at what ratio — those two booleans are the
+ * difference between 「预警已送达」 and 「未经预警」, and both sentences are statements about what this
+ * process observed, never about what the model intended.
+ */
+export const forcedCutMarks = new Map<
+  string,
+  { ratio: number; at: number; warned: boolean; warnedAtRatio?: number; beforeRatio?: number }
+>()
+
+/**
+ * ── W0-2 layer 3 (the delivery fact layer 3 depends on) ──────────────────────────────────────────
+ *
+ * `watermarkEscalations` is armed at nudge time and CONSUMED by the escalation step, so it stops being
+ * evidence of delivery the moment that step runs. This map is not consumed: it records "a nudge was
+ * delivered to this session at ratio R" for the rest of the session, which is exactly what the forced
+ * cut has to report.
+ */
+export const nudgeDeliveredAt = new Map<string, number>()
+
+/**
+ * ── W0-2 layer 2: the growth predictor's per-session sample ring ─────────────────────────────────
+ *
+ * Each entry is one pre-step observation `{ seq, tokens }`. The delta between two entries is a step's
+ * growth as the watermark measured it. `NUDGE_PREDICT_WINDOW` entries are kept (20), which bounds the
+ * memory per session to a few hundred bytes and keeps p90 local to the CURRENT shape of the work — a
+ * session that used to run big tool calls and no longer does must not keep predicting them.
+ *
+ * The ring is process-local on purpose: after a restart the predictor reports `from: 'floor'` instead
+ * of pretending it remembers deltas it never saw (see `predictGrowthTokens`).
+ */
+export const nudgeSamples = new Map<string, Array<{ seq: number; tokens: number }>>()
 
 /* ── the two-phase slice ─────────────────────────────────────────────────────────────────── */
 

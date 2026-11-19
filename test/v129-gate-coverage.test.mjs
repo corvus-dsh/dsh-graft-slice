@@ -111,7 +111,8 @@ const KINDS = new Map([
   ['e2e-multiproject.mjs', 'OPS'],
   ['prune-ghosts.mjs', 'OPS'],
   ['read-session-log.mjs', 'OPS'],
-  ['scan-real-logs.mjs', 'OPS'],
+  ['w0-token-jump.mjs', 'INSTRUMENT'],
+  ['w0-three-layers.mjs', 'INSTRUMENT'],  ['scan-real-logs.mjs', 'OPS'],
   ['validate-real-format.mjs', 'OPS'],
 ])
 
@@ -145,6 +146,20 @@ const NOT_A_CI_STEP = new Map([
   ['who-references.mjs', 'an INSTRUMENT (it measures and always exits 0): it is run BY `scripts/check-symbol-lookup.mjs`, which is the CI step — and now also a local `npm run check` step — that asserts its answer. Until 2026-11-17 the assertion was `node -e` inline in ci.yml writing /tmp/refs.json, which is why this file looked like a CI step itself; that shape could not be reproduced on Windows at all'],
   ['calibrate-who-references.mjs', 'a CALIBRATION for who-references.mjs: it asserts a known answer (5 real references across three shapes). It is run by test/v141 as a precondition, which is the point — the classifier must be calibrated BEFORE its answer is trusted, not after it is published'],
   ['families.mjs', 'needs closure.mjs and who-references.mjs, both of which need the TypeScript compiler this package deliberately does not depend on. It also answers a question that only exists DURING a refactor — "which declarations still cluster together" — so there is nothing to assert on a tree with no pending move; the 10-component table it printed is quoted in the step5 commit message instead of pinned here'],
+  /**
+   * ── W0-2 §12.5: THE TWO MEASUREMENT SCRIPTS, AND WHY THEY ARE NOT CI STEPS ────────────────────
+   *
+   * They were REQUIRED to be committed precisely because 「没有可复跑物，数字就只是声称」 — the first W0
+   * run lived in a temp directory and the next generation could read the conclusion but not re-run it.
+   * Committing them is the fix; running them on CI is not, for the same reason `scan-real-logs.mjs` is
+   * not: both read a LIVE DSH session store (`$DSH_HOME/sessions`), and a CI runner has none. On an
+   * empty store they would exit 2, which the classification rule exists to keep out of the gate list.
+   *
+   * `w0-three-layers.mjs` imports `src/core/nudge-margin.ts` — the shipped decision functions, so the
+   * measurement cannot drift from the code it measures. That import works because Node 24 strips types.
+   */
+  ['w0-token-jump.mjs', 'measures per-step token growth over a real session store. It is the re-runnable artifact for the W0 numbers, not a gate: a CI runner has no session store, so it exits 2 by design. Its verdict is quoted in 报告/B4-0b-2-W0-测量.md, and `--exclude-resets` is its can-red'],
+  ['w0-three-layers.mjs', 'replays the same corpus through the SHIPPED `shouldNudge`/`predictGrowthTokens` and reports layer 2 / layer 3 coverage. Same store dependency, same reason it is not a gate. `test/v260` is the CI-safe pin for the same behaviour, driven through the real `agent/pre-step` listener on fixtures'],
 ])
 
 const scriptNames = readdirSync(join(ROOT, 'scripts')).filter((name) => name.endsWith('.mjs')).sort()

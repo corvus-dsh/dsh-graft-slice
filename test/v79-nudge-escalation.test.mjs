@@ -19,7 +19,17 @@ import { dispatchPreStep, makeCtx, makeSourceLog } from './fake-harness.mjs'
 
 const NUDGE = /当前上下文水位已达 \d+%/u
 const URGENT = /水位告急/u
-const FORCED = /模型拒绝提前切走/u
+/**
+ * ── W0-2 (B4-0b-2 §十二) REPLACED THE ASSERTION, NOT THE BEHAVIOUR ──────────────────────────────
+ *
+ * `FORCED` used to be `/模型拒绝提前切走/u` — and that sentence was the defect: it asserted a MOTIVE
+ * ("refused") from "kept calling tools", and it hard-coded 70% while the effective `hardAt` can be
+ * 0.55 under the compaction ceiling. The replacement states the fact that was actually observed (a
+ * nudge was delivered, at what ratio) and the ratio of the cut. Both new wordings are pinned here.
+ */
+const FORCED_WARNED = /预警已送达（\d+%）/u
+const FORCED_UNANNOUNCED = /未经预警的强制中断/u
+const REFUSAL_CLAIM = /拒绝/u
 const USER_TURN = '继续推进实现，先把这一轮写完。'
 
 function setup({ window = 2600 } = {}) {
@@ -55,6 +65,22 @@ function textsOf(decision) {
     .flatMap((message) => message.content ?? [])
     .filter((block) => block?.type === 'text')
     .map((block) => block.text)
+}
+
+/** Every `text` block inside a persisted record (the fake persistence stores events, not messages). */
+function textsIn(storedJson) {
+  const out = []
+  const walk = (node) => {
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item)
+      return
+    }
+    if (node === null || typeof node !== 'object') return
+    if (typeof node.text === 'string') out.push(node.text)
+    for (const value of Object.values(node)) walk(value)
+  }
+  walk(typeof storedJson === 'string' ? JSON.parse(storedJson) : storedJson)
+  return out
 }
 
 /** Append an event to the live fixture log (snapshotEvents reads this array). */
@@ -105,7 +131,18 @@ test('v7.9: an ignored nudge that hits the hard cutoff marks the target as force
   assert.ok(targetId, 'a target must have been created')
 
   const stored = JSON.stringify(ctx._persistence.read(targetId))
-  assert.match(stored, FORCED, 'the target must know the interruption was forced')
+  assert.match(stored, FORCED_WARNED, 'the target must be told a nudge HAD been delivered')
+  /**
+   * Scope the wording assertions to the NOTE itself.
+   *
+   * A whole-document `doesNotMatch(/拒绝/)` would also sweep the replayed tape, which quotes the source
+   * session's own text — a foreign occurrence there says nothing about what this plugin wrote. The
+   * judgement is about one sentence, so it is made about that sentence.
+   */
+  const note = textsIn(stored).find((text) => FORCED_WARNED.test(text)) ?? ''
+  assert.ok(note.length > 0, 'the forced-cut note must be present as its own message text')
+  assert.doesNotMatch(note, REFUSAL_CLAIM, 'and must not be told WHY the model kept working')
+  assert.doesNotMatch(note, /70%/u, 'the threshold in force is not necessarily 70% — do not name it')
   assert.match(stored, /75%|77%/u, 'and at what watermark')
 })
 
@@ -117,5 +154,6 @@ test('v7.9: a planned self-slice never carries the forced-cut mark', async () =>
     .execute({ sourceSessionId: log.session.id, newSessionId: 'session-planned-slice' }, {})
   assert.equal(report.ok, true, `graft failed: ${JSON.stringify(report.warnings ?? report)}`)
   const stored = JSON.stringify(ctx._persistence.read('session-planned-slice'))
-  assert.doesNotMatch(stored, FORCED, 'a handover the model performed itself is not a forced cut')
+  assert.doesNotMatch(stored, FORCED_WARNED, 'a handover the model performed itself is not a forced cut')
+  assert.doesNotMatch(stored, FORCED_UNANNOUNCED, 'and it must not claim to have been cut off either')
 })

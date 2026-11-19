@@ -74,8 +74,25 @@ import type { GraftCostEstimate, GraftCostInput, SessionEventLike, TokenWatermar
  * `core/compaction-guard.ts` computes the host threshold and lowers graft's cutoffs under
  * it, so "slice before compaction" becomes geometry instead of configuration good faith.
  */
-import { alertCompactionMounts, applyCompactionCeiling, readCompactionMounts } from './core/compaction-guard.js'
+import { alertCompactionMounts, applyCompactionCeiling, COMPACTION_WARN_MARGIN, readCompactionMounts } from './core/compaction-guard.js'
 import type { CompactionCeiling } from './core/compaction-guard.js'
+/**
+ * ── W0-2 (B4-0b-2 §十二): the three-layer nudge defence ─────────────────────────────────────────
+ *
+ * The arithmetic lives in a zero-import leaf (`core/nudge-margin.ts`) so it is testable without a host:
+ * the token margin, the p90 growth predictor, and the two forced-cut sentences. This file supplies the
+ * sentence with the facts it observed and nothing else.
+ */
+import {
+  deriveWarnAt,
+  forcedCutSentence,
+  isResetEventType,
+  nudgeDeltas,
+  predictGrowthTokens,
+  recordNudgeSample,
+  shouldNudge,
+} from './core/nudge-margin.js'
+import type { ForcedCutFacts, GrowthPrediction, NudgeSample, WarnMarginDerivation } from './core/nudge-margin.js'
 export {
   calculateSafeWatermark,
   deriveAutoTapeBudget,
@@ -266,6 +283,8 @@ import {
   inFlight,
   leftoverTargets,
   modelDrivenNudgeTurns,
+  nudgeDeliveredAt,
+  nudgeSamples,
   overflowRetries,
   pendingConfirms,
   pendingConstraints,
@@ -6142,13 +6161,21 @@ const GRAFT_HANDOVER_TOOLS = new Set(['graft_prepare', 'graft_slice_and_inject',
  *     not told about it anywhere else, so silence here reads as "no deadline".
  *   - the explicit no-argument call shape, because at 71% there is no budget for the model to
  *     rediscover the signature or to go hunting for an id.
+ *
+ * W0-2: the sentence no longer says 「70% 预警后」. The nudge fires at a DERIVED line (`warnAt` moves
+ * with the window and with the compaction ceiling), so a hard-coded 70% here would be a claim about a
+ * threshold that is not the one in force. The ratio that actually fired is passed in instead.
  */
-const WATERMARK_URGENT_TEXT =
-  '水位告急：70% 预警后你又开始了新的工具调用。请立刻切走，不要开始新的工具调用——' +
-  '直接调用 graft_prepare 查看交接单（不传参数即可，省略 sourceSessionId 表示切本会话），' +
-  '再用 graft_slice_and_inject 完成切片（同样可不传参数）。' +
-  '这是模型自驱的最后窗口：再往上会被系统强制迁移，届时你正在写的这一步会直接丢失。' +
-  '如果确实要显式传会话 id，先用 graft_debug_status 查，不要猜。'
+function watermarkUrgentText(warnedAtRatio: number | undefined): string {
+  const at = warnedAtRatio === undefined ? '预警' : `已在 ${Math.round(warnedAtRatio * 100)}% 预警`
+  return (
+    `水位告急：${at}后你又开始了新的工具调用。请立刻切走，不要开始新的工具调用——` +
+    '直接调用 graft_prepare 查看交接单（不传参数即可，省略 sourceSessionId 表示切本会话），' +
+    '再用 graft_slice_and_inject 完成切片（同样可不传参数）。' +
+    '这是模型自驱的最后窗口：再往上会被系统强制迁移，届时你正在写的这一步会直接丢失。' +
+    '如果确实要显式传会话 id，先用 graft_debug_status 查，不要猜。'
+  )
+}
 
 function takeWatermarkEscalation(ctx: PluginContextLike, agentId: string, payload: any): any[] {
   const pending = watermarkEscalations.get(agentId)
@@ -6171,29 +6198,168 @@ function takeWatermarkEscalation(ctx: PluginContextLike, agentId: string, payloa
   }
   if (obeyed) return []
   const turn = Number(payload?.turn)
+  const warnedAtRatio = nudgeDeliveredAt.get(agentId) ?? pending.ratio
   appendGraftAudit({
     at: new Date().toISOString(),
     kind: 'nudge-escalation',
     sessionId: agentId,
-    detail: `urgent handover instruction after the 70% nudge${Number.isFinite(turn) ? ` (turn ${turn})` : ''}`,
+    detail: `urgent handover instruction after the nudge at ${(warnedAtRatio * 100).toFixed(1)}%${Number.isFinite(turn) ? ` (turn ${turn})` : ''}`,
   })
   return [
     {
       id: `graft-watermark-urgent-${agentId}-${Date.now()}`,
       role: 'user',
-      content: [{ type: 'text', text: `[系统提示] ${WATERMARK_URGENT_TEXT}` }],
+      content: [{ type: 'text', text: `[系统提示] ${watermarkUrgentText(warnedAtRatio)}` }],
       source: { kind: GRAFT_REPLAY_SOURCE_KIND },
     },
   ]
 }
 
-/** Consume (once) the forced-cut mark for a source being sliced. */
+/**
+ * ── W0-2 LAYER 3: THE FORCED CUT SAYS WHETHER IT WAS ANNOUNCED ──────────────────────────────────
+ *
+ * Consume (once) the forced-cut mark for a source being sliced, and render it as two sentences chosen
+ * by ONE fact: was a nudge delivered?
+ *
+ * The old implementation could render neither correctly:
+ *
+ *   · the mark was only set when a nudge had been delivered, so a session that JUMPED the nudge window
+ *     had no mark and the handoff said NOTHING (the exact failure layer 2 cannot fix, because a jump
+ *     can exceed any prediction);
+ *   · the sentence hard-coded 「模型拒绝提前切走（70% 预警后仍继续调用工具）」 — a MOTIVE the log does not
+ *     establish, plus a percentage that is not the threshold in force (the compaction ceiling can pull
+ *     `hardAt` to 0.55).
+ *
+ * Both replacement sentences state only what this process observed. Neither contains 「拒绝」.
+ */
 function noteForcedCut(sourceSessionId?: string): string | undefined {
   if (sourceSessionId === undefined) return undefined
   const mark = forcedCutMarks.get(sourceSessionId)
   if (mark === undefined) return undefined
   forcedCutMarks.delete(sourceSessionId)
-  return `[系统提示] 模型拒绝提前切走（70% 预警后仍继续调用工具），导致在 ${Math.round(mark.ratio * 100)}% 水位被强制中断。`
+  const facts: ForcedCutFacts = {
+    ratio: mark.ratio,
+    warned: mark.warned,
+    ...(mark.warnedAtRatio === undefined ? {} : { warnedAtRatio: mark.warnedAtRatio }),
+    ...(mark.beforeRatio === undefined ? {} : { beforeRatio: mark.beforeRatio }),
+  }
+  return forcedCutSentence(facts)
+}
+
+/**
+ * The panel's view of layer 2 + layer 3 for one session.
+ *
+ * Written as a function so the debug payload and any future caller cannot disagree about the shape —
+ * and so `undefined` (nothing to report) is a distinguishable answer from "reported zero".
+ *
+ * ── §12.2 第 4 层: 「哑了」与「不需要」必须能区分 ────────────────────────────────────────────────
+ *
+ * `nudgeReason` is the field that does that work, and it has exactly the four values the dispatch names:
+ *
+ *   `already-nudged`          — the pacing key already fired this turn; silence is CORRECT.
+ *   `threshold`               — the ratio is at/over the line; silence would be a defect.
+ *   `predicted`               — still under the line, but the predicted growth crosses; this is layer 2.
+ *   `forced-cut-unannounced`  — a forced cut is pending and no nudge was ever delivered; this is the
+ *                               fact layer 3 exists to disclose, and it is the ONE reason the handoff
+ *                               says 「未经预警」.
+ *
+ * A panel that printed only `warnAt`/`hardAt` would make the first three indistinguishable.
+ */
+function nudgePanelState(
+  sessionId: string,
+  watermark: TokenWatermark | undefined,
+  thresholds: (WatermarkThresholds & { warnMargin?: WarnMarginDerivation }) | undefined,
+  cutoffRatio: number | undefined,
+): Record<string, unknown> | undefined {
+  if (sessionId.length === 0) return undefined
+  const delivered = nudgeDeliveredAt.get(sessionId)
+  const ring: readonly NudgeSample[] = nudgeSamples.get(sessionId) ?? []
+  const mark = forcedCutMarks.get(sessionId)
+  if (delivered === undefined && ring.length === 0 && mark === undefined && watermark === undefined) return undefined
+  const prediction = predictGrowthTokens(nudgeDeltas(ring), watermark?.contextWindow)
+  const warnAt = thresholds?.warnAt
+  const verdict =
+    watermark === undefined || warnAt === undefined
+      ? undefined
+      : shouldNudge({
+          tokens: watermark.tokens,
+          contextWindow: watermark.contextWindow,
+          warnAt,
+          cutoffRatio: cutoffRatio ?? 1,
+          prediction,
+        })
+  const nudgeReason = (() => {
+    if (mark !== undefined && !mark.warned) return 'forced-cut-unannounced'
+    if (verdict === undefined) return 'predicted-unavailable'
+    if (!verdict.fire) return 'below-both'
+    // `modelDrivenNudgeTurns` is keyed by the CURRENT turn, so a match means "already said this turn".
+    return modelDrivenNudgeTurns.has(sessionId) ? 'already-nudged' : verdict.reason
+  })()
+  return {
+    ...(thresholds?.warnMargin === undefined
+      ? {}
+      : { warnMarginSource: thresholds.warnMargin.source, warnMarginTokens: thresholds.warnMargin.marginTokens ?? null }),
+    ...(thresholds?.warnMargin?.fallbackReason === undefined
+      ? {}
+      : { warnMarginFallbackReason: thresholds.warnMargin.fallbackReason }),
+    warnAt: warnAt ?? null,
+    predictedTokens: prediction.tokens,
+    predictedFrom: prediction.from,
+    predictedSamples: prediction.samples,
+    wouldCross: verdict?.wouldCross ?? null,
+    nudgeReason,
+    samples: Math.max(0, ring.length - 1),
+    ...(delivered === undefined ? {} : { nudgeDeliveredAt: Number(delivered.toFixed(4)) }),
+    ...(mark === undefined
+      ? {}
+      : { forcedCutPending: { ratio: Number(mark.ratio.toFixed(4)), warned: mark.warned } }),
+  }
+}
+
+/**
+ * ── W0-2 LAYER 2: ONE SAMPLE PER PRE-STEP, RESETS EXCLUDED ──────────────────────────────────────
+ *
+ * The predictor reads the session's OWN recent growth. Two things make that honest:
+ *
+ *   1. the sample ring is fed here, once per pre-step, from the SAME watermark the decision uses —
+ *      a predictor fed from a different number than the decision would be modelling something else;
+ *   2. a reset since the previous sample discards the ring (`recordNudgeSample`), because a delta that
+ *      spans a compaction or a restore is a re-read of the tape, not growth. Measured: 154 of the 160
+ *      >50k jumps in the W0 corpus were exactly that shape.
+ */
+function nudgePredictionFor(ctx: PluginContextLike, agentId: string, watermark: TokenWatermark): GrowthPrediction {
+  let seq = 0
+  let resetSinceLastSample = false
+  try {
+    const live = ctx.sessions.get(agentId) as any
+    if (live !== undefined && typeof live.snapshotEvents === 'function') {
+      const events = live.snapshotEvents(0) as SessionEventLike[]
+      seq = Number(events.at(-1)?.seq ?? 0)
+      const previous = nudgeSamples.get(agentId)?.at(-1)
+      if (previous !== undefined) {
+        resetSinceLastSample = events.some(
+          (event) => Number(event?.seq ?? -1) > previous.seq && isResetEventType(event?.type),
+        )
+      }
+    }
+  } catch {
+    // An unreadable log costs one sample; it must not suppress the warning.
+  }
+  const ring = recordNudgeSample(
+    nudgeSamples.get(agentId) ?? [],
+    { seq, tokens: watermark.tokens },
+    watermark.contextWindow,
+    resetSinceLastSample,
+  )
+  nudgeSamples.set(agentId, ring)
+  return predictGrowthTokens(nudgeDeltas(ring), watermark.contextWindow)
+}
+
+/** The previous pre-step's ratio, when the ring remembers it — the "jumped from x%" half of layer 3. */
+function previousRatioOf(agentId: string, contextWindow: number): number | undefined {
+  const last = nudgeSamples.get(agentId)?.at(-1)
+  if (last === undefined || !(Number.isFinite(contextWindow) && contextWindow > 0)) return undefined
+  return last.tokens / contextWindow
 }
 
 function takeModelDrivenNudge(
@@ -6213,7 +6379,43 @@ function takeModelDrivenNudge(
   // allowlist) → the model is the only exit; the nudge lasts until the window
   // is genuinely full.
   const ceiling = hardCutoffRatio ?? 1
-  if (!(watermark.ratio >= floor && watermark.ratio < ceiling)) return []
+  /**
+   * ── LAYER 1 (de-intervalised) + LAYER 2 (predicted crossing), ONE PREDICATE ──────────────────
+   *
+   * The old test was `[warnAt, hardAt)` — an INTERVAL, and an interval can be jumped. The measured
+   * worst case is a single step of 320,941 tokens on a 1M window, which is 10.7× the whole 30k
+   * interval, so a session could go from below `warnAt` to above `hardAt` without one pre-step
+   * landing in between.
+   *
+   * `shouldNudge` answers the question the interval was a stand-in for — "is the model close enough
+   * to the end that it must be told NOW" — with two disjuncts that do not share a width:
+   *   threshold: ratio >= warnAt                (the slow climb; unchanged)
+   *   predicted: tokens + predictedTokens >= W×cutoff   (the jump; new)
+   *
+   * PACING IS STILL PER-TURN, and that is a stronger condition than 「本代未发过」: per-turn implies
+   * "not already sent this generation unless a turn boundary passed", so a session that keeps
+   * working gets reminded instead of forgotten. Nothing in the measured defect was caused by
+   * repeated reminders — it was caused by the reminder never being SENT.
+   */
+  const prediction = nudgePredictionFor(ctx, agentId, watermark)
+  const verdict = shouldNudge({
+    tokens: watermark.tokens,
+    contextWindow: watermark.contextWindow,
+    warnAt: floor,
+    cutoffRatio: ceiling,
+    prediction,
+  })
+  if (!verdict.fire) return []
+  /**
+   * ── THE UPPER BOUND IS GONE, AND THAT IS THE WHOLE OF LAYER 1 ────────────────────────────────
+   *
+   * There is deliberately NO `ratio < ceiling` guard. The forced cut returning early is what normally
+   * keeps this code from running above the cutoff — but "normally" is doing real work there: the cut
+   * DEFERS at an unsafe harbour, waits out `taskBoundaryMaxDeferTurns`, and never runs at all when the
+   * session is excluded from autoGraft. In each of those the session sits ABOVE the cutoff with no
+   * cut and, under the old interval, with no nudge either: the one case where the model most needs to
+   * be told is the one case the interval silenced.
+   */
   const turn = Number(payload?.turn)
   const turnKey = Number.isFinite(turn) ? turn : Number(payload?.step) || 0
   if (modelDrivenNudgeTurns.get(agentId) === turnKey) return []
@@ -6227,8 +6429,19 @@ function takeModelDrivenNudge(
     kind: 'model-nudge',
     sessionId: agentId,
     ratio: Number(watermark.ratio.toFixed(4)),
-    detail: `turn ${turnKey}`,
+    detail:
+      `turn ${turnKey}; reason=${verdict.reason}; predicted=${prediction.tokens}` +
+      ` (from ${prediction.from}, n=${prediction.samples}); wouldCross=${verdict.wouldCross}`,
   })
+  /**
+   * ── LAYER 3 DEPENDS ON THIS LINE ────────────────────────────────────────────────────────────
+   *
+   * `watermarkEscalations` is consumed by the escalation step, so it stops being evidence the moment
+   * that step runs. This map is NOT consumed: it is the durable "a nudge reached this session, at
+   * ratio R" fact the forced cut reports, and without it layer 3 can only say 「未经预警」 or say
+   * nothing.
+   */
+  nudgeDeliveredAt.set(agentId, watermark.ratio)
   // v7.9: arm the escalation. The next pre-step means the model started another
   // step instead of handing over; that step gets the hard instruction. The seq
   // recorded here lets that check tell obedience (a graft_* call after the nudge)
@@ -6469,6 +6682,11 @@ export function resetRetiredSessions(): void {
   watermarkEscalations.clear()
   watermarkEscalated.clear()
   forcedCutMarks.clear()
+  // W0-2: the two layer-3/layer-2 facts are session state for the same reason — a stale
+  // `nudgeDeliveredAt` would make an unrelated session's forced cut claim 「预警已送达」, and a stale
+  // sample ring would let one test's tool results predict the next test's growth.
+  nudgeDeliveredAt.clear()
+  nudgeSamples.clear()
   // v0.21: the ignition queue and the rollback notice ledger are session state too.
   // A reset that kept them would (a) leave a stale "already noticed" mark that
   // suppresses the next rollback's notice, and (b) leave a queued ignition that
@@ -10062,13 +10280,38 @@ async function governedWatermarks(
   sessionId: string,
   watermark: { contextWindow?: number } | undefined,
   logger?: { warn?: (message: string) => void },
-): Promise<WatermarkThresholds & { compaction?: CompactionCeiling }> {
+): Promise<WatermarkThresholds & { compaction?: CompactionCeiling; warnMargin: WarnMarginDerivation }> {
+  /**
+   * ── W0-2 LAYER 2: `warnAt` IS DERIVED FROM `hardAt` IN TOKENS ────────────────────────────────
+   *
+   * The ratio margin (0.03) is W-scaled in disguise: on this project's 1M window it is 30,000
+   * tokens, on a 200k window it is 6,000 — one tool result. `deriveWarnAt` states the margin in
+   * tokens so the warning keeps a real headroom, and falls back to the ratio constant ONLY when the
+   * window is unreadable (that is now that constant's single job; it is not deleted).
+   *
+   * The `min` with the configured line is deliberate: a profile that asked for an EARLIER warning
+   * must not be moved later by this derivation.
+   */
   const base = effectiveWatermarks(settings, watermark)
-  if (watermark === undefined) return base
+  const applyMargin = (
+    hardAt: number,
+    contextWindow: number | undefined,
+    ceilingWarnAt: number,
+  ): { warnAt: number; warnMargin: WarnMarginDerivation } => {
+    const derived = deriveWarnAt(hardAt, Number(contextWindow ?? 0), COMPACTION_WARN_MARGIN)
+    return { warnAt: Math.min(ceilingWarnAt, derived.warnAt), warnMargin: derived }
+  }
+  if (watermark === undefined) {
+    const { warnAt, warnMargin } = applyMargin(base.hardAt, undefined, base.warnAt)
+    return { ...base, warnAt, warnMargin }
+  }
   const mounts = readCompactionMounts(ctx)
-  if (!mounts.some((mount) => mount.auto)) return base
+  if (!mounts.some((mount) => mount.auto)) {
+    const { warnAt, warnMargin } = applyMargin(base.hardAt, watermark.contextWindow, base.warnAt)
+    return { ...base, warnAt, warnMargin }
+  }
   const reserved = await readReservedOutputTokens(ctx, sessionId)
-  const { warnAt, hardAt, compaction } = applyCompactionCeiling(
+  const { warnAt: ceilingWarnAt, hardAt, compaction } = applyCompactionCeiling(
     base,
     mounts,
     Number(watermark.contextWindow ?? 0),
@@ -10078,7 +10321,13 @@ async function governedWatermarks(
     conservativeCeilingWarned.add(sessionId)
     logger?.warn?.(`[dsh-graft-slice] compaction ceiling is CONSERVATIVE for ${sessionId}: ${compaction.reason}`)
   }
-  return { ...base, warnAt, hardAt, compaction }
+  /**
+   * `applyCompactionCeiling` derives its own `warnAt` from ITS margin; this derivation runs on the
+   * final `hardAt` and can only move the line EARLIER, so the "slice before compaction" geometry is
+   * preserved (and strengthened) rather than re-litigated.
+   */
+  const { warnAt, warnMargin } = applyMargin(hardAt, watermark.contextWindow, ceilingWarnAt)
+  return { ...base, warnAt, hardAt, compaction, warnMargin }
 }
 
 export interface DebugStatusInput {
@@ -10088,6 +10337,8 @@ export interface DebugStatusInput {
   watermark?: TokenWatermark
   /** v0.37: the compaction ceiling that actually governs the watermark panel. */
   compaction?: CompactionCeiling
+  /** W0-2: layer 2/3 observability (prediction, reason, forced-cut mark). Computed by the caller. */
+  nudge?: Record<string, unknown>
   settings: Required<GraftConfig>
   generation?: number
   graceTurnsRemaining?: number
@@ -10187,6 +10438,11 @@ export function collectDebugStatus(input: DebugStatusInput): Record<string, unkn
       reGraftBlocked: (input.graceTurnsRemaining ?? 0) > 0,
     }
     if (input.compaction !== undefined) out.compaction = { ...input.compaction }
+    /**
+     * W0-2 §12.2 第 4 层: the layer 2/3 readings ride the watermark panel, not a section of their own —
+     * they describe the SAME session's pressure and are read together ("why did it not warn?").
+     */
+    if (input.nudge !== undefined) out.nudge = { ...input.nudge }
   }
 
   if (section === 'all' || section === 'locks') {
@@ -11430,12 +11686,29 @@ async function appendTransitionCard(
             return { kind: 'enter', messages: Array.isArray(payload?.messages) ? payload.messages : [] }
           }
           const targetId = autoTargetId(settings)
-          // v7.9: was this cut forced by an ignored nudge? The target's pending
-          // state must say so, or the next generation reads a mid-write stop as
-          // a planned handover.
-          if (watermarkEscalations.has(agentId) || watermarkEscalated.has(agentId)) {
-            forcedCutMarks.set(agentId, { ratio: watermark.ratio, at: Date.now() })
-          }
+          /**
+           * ── W0-2 LAYER 3: UNCONDITIONAL, AND IT RECORDS WHAT WAS OBSERVED ────────────────────────
+           *
+           * The old code gated this on `watermarkEscalations.has || watermarkEscalated.has`, i.e. on a
+           * nudge HAVING BEEN DELIVERED. A step that crosses the whole warning window is precisely the
+           * case where no nudge was delivered, so the gate removed the mark exactly when the handoff
+           * needed it most: the target read a forced stop as a planned handover with no disclosure.
+           *
+           * The gate also answered the wrong question. What the next generation needs is not "was the
+           * model warned and did it disobey" — that is a motive claim this process cannot support —
+           * but "was the model warned at all". `nudgeDeliveredAt` answers THAT, and it survives the
+           * escalation step's consumption.
+           */
+          const warnedAtRatio = nudgeDeliveredAt.get(agentId)
+          forcedCutMarks.set(agentId, {
+            ratio: watermark.ratio,
+            at: Date.now(),
+            warned: warnedAtRatio !== undefined,
+            ...(warnedAtRatio === undefined ? {} : { warnedAtRatio }),
+            ...(previousRatioOf(agentId, watermark.contextWindow) === undefined
+              ? {}
+              : { beforeRatio: previousRatioOf(agentId, watermark.contextWindow) as number }),
+          })
           autoGraftStates.set(agentId, 'grafting')
           // Force the old session closed BEFORE creating the target. During
           // the async graft, every later pre-step sees 'grafting' or the
@@ -13173,6 +13446,19 @@ async function appendTransitionCard(
         Number(watermark?.contextWindow ?? 0),
         sessionId.length > 0 ? await readReservedOutputTokens(stableCtx, sessionId) : undefined,
       ).compaction
+      /**
+       * ── W0-2 §12.2 第 2 层: THE PANEL MUST SAY WHICH DERIVATION PRODUCED `warnAt` ────────────
+       *
+       * The dispatch requires `warnMarginSource: 'tokens' | 'ratio-fallback'`, for the same reason the
+       * observer panel reports `blockedBy`: "the warning is late" and "the warning could not be
+       * derived" are different facts, and a panel that prints only the resulting number makes them
+       * indistinguishable. The derivation comes from `governedWatermarks` — the same function every
+       * automatic decision calls — so the panel cannot disagree with the engine.
+       */
+      const governed =
+        watermark === undefined
+          ? undefined
+          : await governedWatermarks(stableCtx, settings, sessionId.length > 0 ? sessionId : 'unknown', watermark, ctx.logger)
       const generation = sessionId.length > 0 ? graftGenerationOf(sessionId) : 0
       const graceRemaining = (() => {
         if (sessionId.length === 0) return 0
@@ -13227,6 +13513,16 @@ async function appendTransitionCard(
           : { workspace: explicitWorkspace }),
         ...(watermark === undefined ? {} : { watermark }),
         compaction: compactionCeiling,
+        ...(watermark === undefined
+          ? {}
+          : {
+              nudge: nudgePanelState(
+                sessionId,
+                watermark,
+                governed,
+                governed === undefined ? undefined : governed.hardAt,
+              ),
+            }),
         settings,
         generation,
         graceTurnsRemaining: graceRemaining,
