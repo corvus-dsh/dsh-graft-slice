@@ -235,6 +235,19 @@ export interface ForcedCutFacts {
   warnedAtRatio?: number
   /** The ratio observed at the previous pre-step, when it is known (states the jump). */
   beforeRatio?: number
+  /**
+   * ── W0-2b: DID THE CONTEXT GET RESET AFTER THE NUDGE? ────────────────────────────────────────
+   *
+   * 「预警已送达」 is a fact about delivery. It is NOT a fact about what the model still knows: a
+   * compaction or a restore between the nudge and the cut can remove that message from the context
+   * entirely. Saying 「预警已送达（52%），本代继续调用工具后在 80% 被中断」 then invites the reader to
+   * conclude "the model was told and kept going", which may be false.
+   *
+   * Two facts, two sentences. When this is true the wording adds 「，此后上下文被重置」 — it does not
+   * deny the delivery (which really happened) and it does not claim continued awareness (which is not
+   * observable from here).
+   */
+  resetAfterNudge?: boolean
 }
 
 const ratioPct = (ratio: number): string => `${Math.round(ratio * 100)}%`
@@ -252,8 +265,14 @@ export function forcedCutSentence(facts: ForcedCutFacts): string {
       typeof facts.warnedAtRatio === 'number' && Number.isFinite(facts.warnedAtRatio)
         ? `（${ratioPct(facts.warnedAtRatio)}）`
         : ''
+    /**
+     * W0-2b: the reset clause is APPENDED, never substituted. Substituting would erase a delivery that
+     * really happened; omitting it would let the reader infer continued awareness. Both facts, one
+     * sentence, and the reader can tell which is which.
+     */
+    const reset = facts.resetAfterNudge === true ? '，此后上下文被重置（该预警可能已不在上下文中）' : ''
     return (
-      `[系统提示] 预警已送达${at}，本代继续调用工具后在 ${ratioPct(facts.ratio)} 水位被强制中断。` +
+      `[系统提示] 预警已送达${at}${reset}，本代在 ${ratioPct(facts.ratio)} 水位被强制中断。` +
       '交接内容取自强制中断前的最后状态。'
     )
   }

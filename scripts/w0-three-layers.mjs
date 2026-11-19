@@ -223,6 +223,19 @@ const byForcedCut = total - byPrediction
 /** How many of the crossings are reset-shaped (`before` under the window's shrink ratio). */
 const resetShaped = crossings.filter((entry) => entry.before < 0.05).length
 
+/**
+ * ── §16.4-1: 「预防」 AND 「披露」 ARE NOT THE SAME VERB ─────────────────────────────────────────
+ *
+ * The first version called the sum `coveredByOneLayer`, which reads as 「每件事都有人管」. Layer 3 does not
+ * PREVENT a cut — it cannot; the cut already happened. It only DISCLOSES it in the handoff. Folding the two
+ * into one word is the same failure this project keeps recording: a number that answers a question nobody
+ * asked, in a way that makes the answer look better than it is.
+ *
+ * So the fields say what they measure:
+ *   · `preventedByLayer2` — cuts that never happened because the model was warned in time;
+ *   · `disclosedByLayer3` — cuts that happened and were described in the handoff;
+ *   · `preventedOrDisclosed` — the sum, which is the honest name for "every crossing is accounted for".
+ */
 const summary = {
   root,
   sessionsScanned: files.length,
@@ -238,12 +251,19 @@ const summary = {
   /** `before` under 5% of the window: a just-reset context, not a working one (154-of-160 shape). */
   crossingsResetShaped: resetShaped,
   crossingsRealGrowth: total - resetShaped,
-  layer2Predicted: byPrediction,
-  layer3ForcedCut: byForcedCut,
+  preventedByLayer2: byPrediction,
+  disclosedByLayer3: byForcedCut,
+  /** Every crossing is accounted for by exactly one verb; anything else is a hole in the argument. */
+  preventedOrDisclosed: byPrediction + byForcedCut === total,
+  /**
+   * NOT a coverage claim. On this corpus layer 2 prevents nothing (see the report): its effectiveness is
+   * proved by `v260 ②`'s instrumented window, not by this number.
+   */
+  layer2CoverageNote: noPredict
+    ? 'layer 2 disabled (can-red): the preventedByLayer2 count must fall, and it is 0 either way on this corpus'
+    : 'this corpus cannot demonstrate layer 2 (all crossings are jumps); see test/v260 ② for the proof',
   /** Layer 2's actual effect on this corpus: how many nudges it fired, by reason. */
   nudges: nudgeStats,
-  /** Every crossing must be covered by exactly one layer; anything else is a hole in the argument. */
-  coveredByOneLayer: byPrediction + byForcedCut === total,
   sessionsWithCrossings: perSession,
   detail: crossings,
 }
@@ -262,9 +282,11 @@ const lines = [
   `crossings                ${total}`,
   `  reset-shaped           ${resetShaped}   (before < 5% of the window: a post-reset re-read)`,
   `  real growth            ${summary.crossingsRealGrowth}   (this is the number the ruling is about)`,
-  `  covered by layer 2     ${byPrediction}   (predicted before the jump)`,
-  `  covered by layer 3     ${byForcedCut}   (unpredicted ⇒ «未经预警» mark)`,
-  `  every one covered      ${summary.coveredByOneLayer ? 'YES' : 'NO — a crossing has no layer'}`,
+  `  PREVENTED by layer 2   ${byPrediction}   (the cut never happened: the model was warned first)`,
+  `  DISCLOSED by layer 3   ${byForcedCut}   (the cut happened and the handoff says so — 未经预警)`,
+  `  every one accounted    ${summary.preventedOrDisclosed ? 'YES' : 'NO — a crossing has no layer'}`,
+  '',
+  `  NOTE                   ${summary.layer2CoverageNote}`,
   '',
   `nudges fired             ${nudgeStats.thresholdNudges + nudgeStats.predictedNudges}`,
   `  by threshold (layer 1) ${nudgeStats.thresholdNudges}`,

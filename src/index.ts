@@ -6215,7 +6215,7 @@ function takeWatermarkEscalation(ctx: PluginContextLike, agentId: string, payloa
   }
   if (obeyed) return []
   const turn = Number(payload?.turn)
-  const warnedAtRatio = nudgeDeliveredAt.get(agentId) ?? pending.ratio
+  const warnedAtRatio = nudgeDeliveredAt.get(agentId)?.ratio ?? pending.ratio
   appendGraftAudit({
     at: new Date().toISOString(),
     kind: 'nudge-escalation',
@@ -6259,6 +6259,7 @@ function noteForcedCut(sourceSessionId?: string): string | undefined {
     warned: mark.warned,
     ...(mark.warnedAtRatio === undefined ? {} : { warnedAtRatio: mark.warnedAtRatio }),
     ...(mark.beforeRatio === undefined ? {} : { beforeRatio: mark.beforeRatio }),
+    ...(mark.resetAfterNudge === true ? { resetAfterNudge: true } : {}),
   }
   return forcedCutSentence(facts)
 }
@@ -6326,7 +6327,16 @@ function nudgePanelState(
     wouldCross: verdict?.wouldCross ?? null,
     nudgeReason,
     samples: Math.max(0, ring.length - 1),
-    ...(delivered === undefined ? {} : { nudgeDeliveredAt: Number(delivered.toFixed(4)) }),
+    ...(delivered === undefined
+      ? {}
+      : {
+          nudgeDeliveredAt: Number(delivered.ratio.toFixed(4)),
+          /**
+           * W0-2b, observability half: 「送达了」 and 「送达之后上下文被重置」 are different readings, and a
+           * panel that printed only the first would make them look the same.
+           */
+          ...(delivered.resetAfter ? { nudgeResetAfterDelivery: true } : {}),
+        }),
     ...(mark === undefined
       ? {}
       : { forcedCutPending: { ratio: Number(mark.ratio.toFixed(4)), warned: mark.warned } }),
@@ -6369,6 +6379,20 @@ function nudgePredictionFor(ctx: PluginContextLike, agentId: string, watermark: 
     resetSinceLastSample,
   )
   nudgeSamples.set(agentId, ring)
+  /**
+   * ── W0-2b: A RESET ALSO INVALIDATES THE *AWARENESS* HALF OF THE DELIVERY FACT ─────────────────
+   *
+   * The same `resetSinceLastSample` the predictor uses (same judgement, one source — see the comment
+   * above) now downgrades a recorded delivery: the nudge WAS sent, and it may no longer be in the
+   * context. Keeping the record and flagging it is better than deleting it, because "delivered, then
+   * reset" and "never delivered" produce different sentences and only one of them is true.
+   */
+  if (resetSinceLastSample) {
+    const delivered = nudgeDeliveredAt.get(agentId)
+    if (delivered !== undefined && delivered.resetAfter !== true) {
+      nudgeDeliveredAt.set(agentId, { ratio: delivered.ratio, resetAfter: true })
+    }
+  }
   return predictGrowthTokens(nudgeDeltas(ring), watermark.contextWindow)
 }
 
@@ -6377,6 +6401,32 @@ function previousRatioOf(agentId: string, contextWindow: number): number | undef
   const last = nudgeSamples.get(agentId)?.at(-1)
   if (last === undefined || !(Number.isFinite(contextWindow) && contextWindow > 0)) return undefined
   return last.tokens / contextWindow
+}
+
+/**
+ * ── W0-2b: WAS THE CONTEXT RESET AFTER THE NUDGE WAS DELIVERED? ─────────────────────────────────
+ *
+ * This has to be asked HERE, in the forced-cut branch, and not only inside the predictor. Measured while
+ * writing `v265`: a session that is nudged and then jumps past the cutoff never re-enters the nudge path —
+ * the auto-graft branch returns before `takeModelDrivenNudge` runs — so a reset flag maintained only by
+ * the predictor was NEVER set in the exact sequence this fix is about (nudge → reset → cut).
+ *
+ * The judgement is the SAME one the predictor uses (`isResetEventType`, same marker list) and the same
+ * `seq` boundary: events strictly after the last recorded sample. Two copies of the judgement would be
+ * two truths, which is the failure this project keeps recording.
+ */
+function resetSinceLastNudgeSample(ctx: PluginContextLike, agentId: string): boolean {
+  const previous = nudgeSamples.get(agentId)?.at(-1)
+  if (previous === undefined) return false
+  try {
+    const live = ctx.sessions.get(agentId) as any
+    if (live === undefined || typeof live.snapshotEvents !== 'function') return false
+    const events = live.snapshotEvents(0) as SessionEventLike[]
+    return events.some((event) => Number(event?.seq ?? -1) > previous.seq && isResetEventType(event?.type))
+  } catch {
+    // An unreadable log must not manufacture a reset (or hide one we already recorded).
+    return false
+  }
 }
 
 function takeModelDrivenNudge(
@@ -6458,7 +6508,24 @@ function takeModelDrivenNudge(
    * ratio R" fact the forced cut reports, and without it layer 3 can only say 「未经预警」 or say
    * nothing.
    */
-  nudgeDeliveredAt.set(agentId, watermark.ratio)
+  /**
+   * ── W0-2b: A RE-DELIVERY DOES NOT RESET THE RESET FLAG, BUT IT DOES RE-ESTABLISH AWARENESS ────
+   *
+   * Measured while writing `v265`: the predictor set `resetAfter: true`, and then the SAME pre-step sent a
+   * fresh nudge (a new turn is a new chance to be told) which overwrote the record with
+   * `{ ratio, resetAfter: false }`. The panel then reported 「delivered, no reset」 — the flag existed for
+   * microseconds and no surface could ever see it.
+   *
+   * The judgement is NOT "keep the old flag forever": a nudge delivered AFTER the reset is in the context
+   * by construction, so awareness really is re-established and `resetAfter` must go back to false. What
+   * fixes the bug is ORDER — the predictor's sample is taken from the PREVIOUS pre-step, so its reset
+   * refers to the interval BEFORE this delivery. Writing `resetAfter: false` here is therefore correct,
+   * and the panel test was asserting against a session that had just been told again.
+   *
+   * So: the flag is (re)computed from "was there a reset since the delivery", and this line states the
+   * delivery that starts a new interval.
+   */
+  nudgeDeliveredAt.set(agentId, { ratio: watermark.ratio, resetAfter: false })
   // v7.9: arm the escalation. The next pre-step means the model started another
   // step instead of handing over; that step gets the hard instruction. The seq
   // recorded here lets that check tell obedience (a graft_* call after the nudge)
@@ -7333,9 +7400,22 @@ export async function commitPreparedSlice(
   const rebuiltGoal = String(rebuilt?.goal ?? '')
   const rebuiltConstraints = Array.isArray(rebuilt?.constraints) ? rebuilt.constraints.map(String) : []
   /**
-   * Name WHICH input moved, because "digest differs" is the message the old code produced and it told
-   * the reader nothing actionable. Constraints get their own sentence: re-preparing fixes them, whereas
-   * a moved goal usually means the user should re-read the review.
+   * ── W1-7b: THE COMPARISON MUST BE THE ARRAY, BECAUSE THE DIGEST IS THE ARRAY ──────────────────
+   *
+   * The first version of this check turned both lists into `Set`s and compared MEMBERSHIP. That is a
+   * different question from the one `digestOfPlan` asks: it hashes `JSON.stringify(constraints)`, which
+   * is sensitive to ORDER and to REPEATS. So two reviews could disagree on the digest — the thing the
+   * user approved — and still pass the check, in exactly two shapes:
+   *
+   *   · the SAME constraints in a DIFFERENT ORDER (Sets equal, digest different);
+   *   · one constraint present TWICE (Sets equal, digest different).
+   *
+   * The review page also renders them in order (`slice(0, 10)` of the array), so 「第 3 条」 is a
+   * position a human can actually point at. Comparing positionally is therefore not pedantry — it is
+   * the same relation the digest certifies and the same one the user read.
+   *
+   * The Set delta is kept, but ONLY for the wording: "added N, removed M" is a useful sentence and it
+   * must never be the thing that decides whether the commit proceeds.
    */
   const constraintDelta = (() => {
     const a = new Set(reviewedConstraints)
@@ -7344,12 +7424,44 @@ export async function commitPreparedSlice(
     const removed = [...a].filter((item) => !b.has(item))
     return added.length === 0 && removed.length === 0 ? undefined : { added, removed }
   })()
-  if (constraintDelta !== undefined) {
+  /** The positional comparison. `undefined` means "identical arrays", which is what the digest needs. */
+  const constraintOrder = (() => {
+    if (reviewedConstraints.length !== rebuiltConstraints.length) {
+      return {
+        kind: 'length' as const,
+        detail: `长度 ${reviewedConstraints.length} → ${rebuiltConstraints.length}`,
+      }
+    }
+    for (let index = 0; index < reviewedConstraints.length; index += 1) {
+      const before = reviewedConstraints[index]
+      const after = rebuiltConstraints[index]
+      if (before === after) continue
+      /**
+       * Describe the rewrite in the terms a reader can act on:位置 + 两个短标签. The full texts can be
+       * hundreds of characters (a red line is a sentence), so an unbounded message would be unreadable
+       * in the tool result — the same reason the digest short-hash is truncated elsewhere.
+       */
+      const label = (text: string | undefined): string => String(text ?? '').slice(0, 40)
+      return {
+        kind: 'element' as const,
+        detail: `第 ${index + 1} 条由「${label(before)}」变成「${label(after)}」`,
+      }
+    }
+    return undefined
+  })()
+  if (constraintOrder !== undefined) {
+    const how =
+      constraintOrder.kind === 'length'
+        ? `the CONSTRAINT COUNT changed (${constraintOrder.detail})`
+        : `the CONSTRAINT ORDER changed (${constraintOrder.detail})`
+    const membership =
+      constraintDelta === undefined
+        ? '（成员集未变 —— 变的只有顺序或重复）'
+        : `（added ${constraintDelta.added.length}, removed ${constraintDelta.removed.length}）`
     throw graftError(
       'SLICE_DIGEST_MISMATCH',
-      `the CONSTRAINT SET changed while the review was open` +
-        ` (added ${constraintDelta.added.length}, removed ${constraintDelta.removed.length})` +
-        `; the approved digest covers constraints, so prepare again`,
+      `${how} while the review was open ${membership}` +
+        '; the approved digest covers the constraint ARRAY (order and repeats included), so prepare again',
     )
   }
   if (reviewedGoal !== rebuiltGoal) {
@@ -11848,12 +11960,29 @@ async function appendTransitionCard(
            * but "was the model warned at all". `nudgeDeliveredAt` answers THAT, and it survives the
            * escalation step's consumption.
            */
-          const warnedAtRatio = nudgeDeliveredAt.get(agentId)
+          const delivered = nudgeDeliveredAt.get(agentId)
+          /**
+           * `resetAfter` is asked from TWO places on purpose: the predictor sets it while the session keeps
+           * stepping (the common case), and this branch asks again because the jump that triggers a forced
+           * cut SKIPS the predictor entirely (measured — see `resetSinceLastNudgeSample`).
+           */
+          const resetAfterNudge =
+            delivered !== undefined && (delivered.resetAfter === true || resetSinceLastNudgeSample(stableCtx, agentId))
+          /**
+           * PERSIST the flag back into the delivery record, not just into the mark. The mark is consumed by
+           * `noteForcedCut`; the delivery record OUTLIVES it, and the panel reads the record. Without this
+           * line the panel kept saying 「delivered, no reset」 while the handoff already said otherwise —
+           * two surfaces disagreeing about one fact, which is the shape this project keeps finding.
+           */
+          if (resetAfterNudge && delivered !== undefined && delivered.resetAfter !== true) {
+            nudgeDeliveredAt.set(agentId, { ratio: delivered.ratio, resetAfter: true })
+          }
           forcedCutMarks.set(agentId, {
             ratio: watermark.ratio,
             at: Date.now(),
-            warned: warnedAtRatio !== undefined,
-            ...(warnedAtRatio === undefined ? {} : { warnedAtRatio }),
+            warned: delivered !== undefined,
+            ...(delivered === undefined ? {} : { warnedAtRatio: delivered.ratio }),
+            ...(resetAfterNudge ? { resetAfterNudge: true } : {}),
             ...(previousRatioOf(agentId, watermark.contextWindow) === undefined
               ? {}
               : { beforeRatio: previousRatioOf(agentId, watermark.contextWindow) as number }),

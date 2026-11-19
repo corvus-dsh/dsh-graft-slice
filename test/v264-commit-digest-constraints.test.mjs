@@ -22,12 +22,24 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { apply, resetRetiredSessions } from '../index.js'
 import { FakePersistence, makeCtx, makeSourceLog } from './fake-harness.mjs'
+
+/**
+ * The prepared store's filename, read from `store-layer.ts` instead of written twice — the rule `v261`
+ * learned when its first draft guessed `.prepared-slices.json` and every tampering assertion failed
+ * with ENOENT (a test that cannot find the file it means to attack proves nothing).
+ */
+const PREPARED_FILE = (() => {
+  const source = readFileSync(new URL('../src/core/store-layer.ts', import.meta.url), 'utf8')
+  const match = /prepared:\s*'([^']+)'/u.exec(source)
+  assert.ok(match, 'store-layer.ts must declare FILE_NAMES.prepared')
+  return match[1]
+})()
 
 function scaffold() {
   resetRetiredSessions()
@@ -70,7 +82,12 @@ test('v264 ①: a constraint ADDED after prepare makes commit refuse, and the me
     (error) => {
       const message = String(error?.message ?? error)
       assert.match(message, /SLICE_DIGEST_MISMATCH/u, `the commit must be refused; got: ${message}`)
-      assert.match(message, /CONSTRAINT SET changed/u, `and must NAME the cause; got: ${message}`)
+      /**
+       * W1-7b renamed the reason: 「CONSTRAINT SET changed」 became 「CONSTRAINT COUNT changed」 /
+       * 「CONSTRAINT ORDER changed」, because set-membership was the wrong relation (see ⑤⑥). The
+       * assertion tracks the NEW wording — and it still has to name constraints, not just "digest differs".
+       */
+      assert.match(message, /CONSTRAINT COUNT changed|CONSTRAINT ORDER changed|CONSTRAINT SET changed/u, `and must NAME the cause; got: ${message}`)
       assert.match(message, /added \d+/u, 'and say what moved (added/removed counts)')
       return true
     },
@@ -159,4 +176,99 @@ test('v264 ④: the digest itself still covers constraints — a prepare after a
   appendConstraint(log, '绝对禁止在切片里丢约束；这条用于证明 digest 覆盖约束集。')
   const second = await tool(ctx, 'graft_prepare').execute({ targetSessionId: 'session-digest-b' }, execOf(log))
   assert.notEqual(first.digest, second.digest, 'a different constraint set must produce a different digest')
+})
+
+/**
+ * ── W1-7b: SET MEMBERSHIP IS THE WRONG RELATION ─────────────────────────────────────────────────
+ *
+ * `v264 ①②` compared constraint LISTS through `Set`s. `digestOfPlan` hashes
+ * `JSON.stringify(constraints)` — order- and repeat-sensitive — and the review page renders the array
+ * in order. So two shapes slipped through with an IDENTICAL membership:
+ *
+ *   · the same constraints REORDERED  (Sets equal, digest different)
+ *   · one constraint DUPLICATED       (Sets equal, digest different)
+ *
+ * Both mean 「approved ≠ written」, which is the whole point of the comparison. ⑤ and ⑥ are those two
+ * shapes; ⑦ is the control that keeps the fix from being "reject every array that is not trivially
+ * equal" — an implementation that always refuses would pass ⑤⑥ and fail this one.
+ */
+function constraintBearing() {
+  /** Two DIFFERENT, order-sensitive hard constraints — the array is the thing under test. */
+  return [
+    '绝对禁止用 user/message 的壳子去装 developer 的灵魂。',
+    '必须遵守：不放宽任何门禁来换取通过。',
+  ]
+}
+
+test('v264 ⑤: REORDERED constraints are refused, and the message says the order moved', async () => {
+  const { dir, log, ctx } = scaffold()
+  const [first, second] = constraintBearing()
+  appendConstraint(log, first)
+  appendConstraint(log, second)
+  const staged = await tool(ctx, 'graft_prepare').execute({ targetSessionId: 'session-order-target' }, execOf(log))
+  const reviewed = staged.constraints
+  assert.ok(reviewed.length >= 2, `the fixture must yield at least 2 constraints; got ${JSON.stringify(reviewed)}`)
+
+  /**
+   * Rewrite the PREPARED ENTRY's constraint array in place to the reversed order. This is the honest way
+   * to simulate 「the review page showed one order and the rebuild produced another」 without depending on
+   * the extractor's own ordering being manipulable from the log.
+   */
+  const preparedFile = join(dir, PREPARED_FILE)
+  const onDisk = JSON.parse(readFileSync(preparedFile, 'utf8'))
+  onDisk[staged.preparedId].constraints = [...onDisk[staged.preparedId].constraints].reverse()
+  writeFileSync(preparedFile, JSON.stringify(onDisk, null, 2), 'utf8')
+
+  resetRetiredSessions()
+  const restarted = makeCtx({ sourceLog: log, persistence: undefined, paths: { data: dir } })
+  apply(restarted, { dataDir: dir })
+
+  await assert.rejects(
+    () => tool(restarted, 'graft_commit').execute({ preparedId: staged.preparedId, digest: staged.digest }, {}),
+    (error) => {
+      const message = String(error?.message ?? error)
+      assert.match(message, /SLICE_DIGEST_MISMATCH/u, `got: ${message}`)
+      assert.match(message, /CONSTRAINT ORDER changed/u, `the order must be named; got: ${message}`)
+      assert.match(message, /成员集未变/u, 'and it must say the membership did NOT change (that is the point)')
+      return true
+    },
+  )
+})
+
+test('v264 ⑥: a DUPLICATED constraint is refused (same membership, different array)', async () => {
+  const { dir, log, ctx } = scaffold()
+  appendConstraint(log, constraintBearing()[0])
+  const staged = await tool(ctx, 'graft_prepare').execute({ targetSessionId: 'session-dupe-target' }, execOf(log))
+  assert.ok(staged.constraints.length >= 1)
+
+  const preparedFile = join(dir, PREPARED_FILE)
+  const onDisk = JSON.parse(readFileSync(preparedFile, 'utf8'))
+  onDisk[staged.preparedId].constraints = [...onDisk[staged.preparedId].constraints, ...onDisk[staged.preparedId].constraints]
+  writeFileSync(preparedFile, JSON.stringify(onDisk, null, 2), 'utf8')
+
+  resetRetiredSessions()
+  const restarted = makeCtx({ sourceLog: log, persistence: undefined, paths: { data: dir } })
+  apply(restarted, { dataDir: dir })
+
+  await assert.rejects(
+    () => tool(restarted, 'graft_commit').execute({ preparedId: staged.preparedId, digest: staged.digest }, {}),
+    (error) => {
+      const message = String(error?.message ?? error)
+      assert.match(message, /SLICE_DIGEST_MISMATCH/u, `got: ${message}`)
+      assert.match(message, /CONSTRAINT COUNT changed|CONSTRAINT ORDER changed/u, `got: ${message}`)
+      return true
+    },
+  )
+})
+
+test('v264 ⑦: identical constraints still commit — the positional check is not a blanket refusal', async () => {
+  const { log, ctx } = scaffold()
+  appendConstraint(log, constraintBearing()[0])
+  appendConstraint(log, constraintBearing()[1])
+  const staged = await tool(ctx, 'graft_prepare').execute({ targetSessionId: 'session-identical-target' }, execOf(log))
+  const committed = await tool(ctx, 'graft_commit').execute(
+    { preparedId: staged.preparedId, digest: staged.digest },
+    {},
+  )
+  assert.equal(committed.ok, true, `an unchanged review must commit; got: ${JSON.stringify(committed.warnings ?? committed)}`)
 })

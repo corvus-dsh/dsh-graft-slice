@@ -357,7 +357,7 @@ export const watermarkEscalated = new Set<string>()
  */
 export const forcedCutMarks = new Map<
   string,
-  { ratio: number; at: number; warned: boolean; warnedAtRatio?: number; beforeRatio?: number }
+  { ratio: number; at: number; warned: boolean; warnedAtRatio?: number; beforeRatio?: number; resetAfterNudge?: boolean }
 >()
 
 /**
@@ -367,8 +367,18 @@ export const forcedCutMarks = new Map<
  * evidence of delivery the moment that step runs. This map is not consumed: it records "a nudge was
  * delivered to this session at ratio R" for the rest of the session, which is exactly what the forced
  * cut has to report.
+ *
+ * ── W0-2b: `resetAfter` IS THE DIFFERENCE BETWEEN DELIVERY AND AWARENESS ─────────────────────────
+ *
+ * The first version stored a bare ratio and never invalidated it. A compaction or restore between the
+ * nudge and the cut can remove the nudge from the context, and the forced-cut sentence then implied
+ * 「模型被告知了却继续」 — a claim about the model's knowledge that this process cannot observe.
+ *
+ * So the record keeps both facts: the ratio the nudge was delivered at, and whether a context reset
+ * happened afterwards. The SENTENCE appends the second fact rather than dropping the first, because
+ * both are true and only one of them was ever printable before.
  */
-export const nudgeDeliveredAt = new Map<string, number>()
+export const nudgeDeliveredAt = new Map<string, { ratio: number; resetAfter: boolean }>()
 
 /**
  * ── W0-2 layer 2: the growth predictor's per-session sample ring ─────────────────────────────────
