@@ -15961,18 +15961,16 @@ async function graftSliceAndInjectUnlocked(
       updatedAt: new Date().toISOString(),
     })
     if (!journaled) {
-      return {
-        ok: false,
-        stage: 'journal',
-        warnings: [],
-        error: {
-          code: 'JOURNAL_WRITE_FAILED',
-          stage: 'journal',
-          message:
-            `无法写入事务日志（${storePaths().txnDir}）：迁移在预留任何 id 之前中止。` +
-            '没有产生目标、没有退役源。修好该目录（磁盘空间 / 权限）之后重试即可。',
-        },
-      }
+      /**
+       * `GraftReport` is the SUCCESS shape (`ok: true` is a literal), so a refusal cannot be a report
+       * — it is thrown, like every other pre-write refusal in this function (`APPEND_COUNT_MISMATCH`
+       * just above does the same). `tsc` said so at 7587: `Type 'false' is not assignable to type 'true'`.
+       */
+      throw graftError(
+        'JOURNAL_WRITE_FAILED',
+        `无法写入事务日志（${storePaths().txnDir}）：迁移在预留任何 id 之前中止。` +
+          '没有产生目标、没有退役源。修好该目录（磁盘空间 / 权限）之后重试即可。',
+      )
     }
 
     /* ── the write itself: ONE call, through the layer OR through the gateway ── */
