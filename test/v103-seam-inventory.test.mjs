@@ -79,12 +79,17 @@ test('every seam-SHAPED export is registered (the convention cannot smuggle one 
 test('every test-only seam is still exported, and still callable', () => {
   for (const name of [...TEST_ONLY_SEAMS, ...DEAD_SEAMS_PENDING_REMOVAL]) {
     /**
-     * A seam is either a FUNCTION or an OBJECT of functions (the "fold a new function into an object
-     * already listed" rule). `backgroundWorkInternals` is the object form: the four event-name tables
-     * plus three predicates, exposed as one name so the foreign vocabulary has one home.
+     * A seam is a FUNCTION, or an OBJECT of functions **and constants** — the "fold a new function into
+     * an object already listed" rule. `backgroundWorkInternals` is the object form: four event-name
+     * tables, three predicates, and (since W1-5) the numeric relay budget. A constant is as much a fact
+     * a test needs to read as a predicate is, so refusing `number`/`string` here would push the next
+     * person to re-declare the constant in the test — the exact duplication this object prevents.
      */
     const value = entry[name]
-    const ok = typeof value === 'function' || (value !== null && typeof value === 'object' && Object.values(value).every((item) => typeof item === 'function' || Array.isArray(item)))
+    const isSeamLeaf = (item) =>
+      typeof item === 'function' || Array.isArray(item) || typeof item === 'string' || typeof item === 'number'
+    const ok =
+      isSeamLeaf(value) || (value !== null && typeof value === 'object' && Object.values(value).every(isSeamLeaf))
     assert.ok(ok, `${name} is pinned as a seam but is no longer exported (or is not a seam shape)`)
   }
 })
