@@ -25,7 +25,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 
 import { apply, recoverGraftTransactions, resetRetiredSessions } from '../index.js'
 import { FakePersistence, makeCtx, makeSourceLog } from './fake-harness.mjs'
@@ -49,12 +49,26 @@ function scaffold(dataDir) {
  * unless the string is published. It is now published (`transactions.store.dir`), so the assertion can
  * finally be about the thing the fix changes.
  */
-test('v257 ①: 四种写法必须解析成同一个 store 目录字符串（读 status 自己的 transactions.store.dir）', async () => {
+test('v257 ①: 三种写法必须解析成同一个 store 目录字符串（读 status 自己的 transactions.store.dir）', async () => {
   const base = mkdtempSync(join(tmpdir(), 'dsh-v257-'))
   const plain = join(base, 'store')
   mkdirSync(plain, { recursive: true })
 
-  const spellings = [plain, `${plain}/`, `${plain}\\`, join(base, 'noise', '..', 'store')]
+  /**
+   * ── MEASURED CI FAILURE: `\` IS A SEPARATOR ON WINDOWS AND A FILENAME CHARACTER EVERYWHERE ELSE ──
+   *
+   * The first version included `${plain}\\` as a spelling. On Windows that is "the same directory with
+   * a trailing separator"; on POSIX it is a DIFFERENT directory whose NAME ends in a backslash, so
+   * `resolve()` legitimately returns a different string and the "all four agree" assertion fails —
+   * CI red on 22.x and 24.x while the same command was green here.
+   *
+   * The fix is not to loosen the assertion; it is to stop claiming a platform-specific spelling is a
+   * spelling. `sep` gives the native separator, and the backslash form is exercised only where it IS a
+   * separator. What this test is really about — "noise that every platform agrees is noise (`..` and a
+   * trailing separator) collapses to one string" — survives intact.
+   */
+  const nativeTrailing = `${plain}${sep}`
+  const spellings = [plain, nativeTrailing, `${plain}/`, join(base, 'noise', '..', 'store')]
   const seen = []
   for (const spelling of spellings) {
     resetRetiredSessions()
@@ -66,7 +80,7 @@ test('v257 ①: 四种写法必须解析成同一个 store 目录字符串（读
   assert.ok(seen.every((dir) => dir.length > 0), `status 必须发布解析后的目录；实测 ${JSON.stringify(seen)}`)
   assert.equal(new Set(seen).size, 1, `四种写法必须归一到同一个字符串，实测 ${JSON.stringify(seen)}`)
   assert.equal(seen[0].replace(/[\\/]+$/u, ''), plain.replace(/[\\/]+$/u, ''), '归一到那个目录本身')
-  assert.doesNotMatch(seen[0], /[\\/]$/u, '归一结果不许带尾分隔符 —— 尾分隔符会进入日志、.layout.json 与比较')
+  assert.equal(/[\\/]$/u.test(seen[0]), false, '归一结果不许带尾分隔符 —— 尾分隔符会进入日志、.layout.json 与比较')
   assert.equal(seen[0].includes('noise'), false, '含 `..` 的写法必须被解析掉')
 })
 
