@@ -39,6 +39,7 @@ import {
   locateBoundary,
   resetRetiredSessions,
   rollbackFailedIgnition,
+  ROLLBACK_NOTICE_MARKER,
   takeRollbackNotice,
 } from '../index.js'
 import { FakePersistence, makeCtx, makeSourceLog } from './fake-harness.mjs'
@@ -87,7 +88,7 @@ test('v250 ①: 静态扫描 —— 凡 `source: { kind: \'user\' }` 的**消息
 
 // ── ② 行为判据：三个生产者各自的来源 ────────────────────────────────────────────────────────
 
-test(`v250 ②: 回滚通知的 source.kind 是插件 kind（先走真实生产者），且仍被 isGraftAuthored 认出`, async () => {
+test(`v250 ②: 回滚通知**经生产路径**送达，source.kind 是插件 kind，且仍被 isGraftAuthored 认出`, async () => {
   resetRetiredSessions()
   const dir = mkdtempSync(join(tmpdir(), 'dsh-v250-rollback-'))
   const log = makeSourceLog({ turns: 1 })
@@ -102,21 +103,45 @@ test(`v250 ②: 回滚通知的 source.kind 是插件 kind（先走真实生产�
   )
 
   /**
-   * ── 走真实生产者，而不是正则读源码 ──────────────────────────────────────────────────────────
+   * ── 必须走**生产路径**，不许在测试里自己把常量传进去 ────────────────────────────────────────────
    *
-   * 第一版只断言「源码里写着 `source: { kind: GRAFT_REPLAY_SOURCE_KIND }`」。B4-0a① 的第二个修法把
-   * 常量改成**参数注入**（`ignition.ts` 不认识 `host-shape.ts`，`v136` 的模块依赖门禁就是这么要求的），
-   * 那条正则随即变成「断言一个已经不存在的事实」。断言应当钉**行为**：真的排一次回滚，真的取一次通知，
-   * 看它署名给谁。
+   * 第一版是「排一次回滚，然后自己调 `takeRollbackNotice(id, GRAFT_REPLAY_SOURCE_KIND)`」。它能证明
+   * 函数怎么处理**收到**的 kind，却证明不了 `index.ts` 那个调用点**传了**什么：把调用点改成 `'user'`
+   * 之后四条全绿（本轮实测）。那正是「测试全绿、生产路径没接」的形状，与 v243 那条同族。
+   *
+   * 所以这里只做一件事：真的排一条回滚，然后**驱动真实注册的 `agent/pre-step` 监听器**，看它投影出
+   * 来的那条消息署名给谁。调用点传错常量，这里立刻红。
    */
   await rollbackFailedIgnition(ctx, log.session.id, 'v250-rollback-target', 'no channel')
-  const notice = takeRollbackNotice(log.session.id, GRAFT_REPLAY_SOURCE_KIND)
-  assert.ok(notice !== undefined, '回滚必须排下一条通知')
-  assert.equal(notice.source.kind, GRAFT_REPLAY_SOURCE_KIND, '来源必须点名插件')
-  assert.equal(isGraftAuthored(notice.source), true, '插件消息必须被认作插件写的')
-  assert.equal(isHumanAuthored(notice.source), false, '绝不能被认作人类说的')
 
-  /** 静态兜底：生产者不得再硬编码 'user'，也不得自己造一个 kind 字面量。 */
+  const listeners = ctx._listeners.get('agent/pre-step') ?? []
+  assert.ok(listeners.length > 0, 'pre-step 监听器必须已注册')
+  const dispatch = async () => {
+    const produced = []
+    for (const listener of listeners) {
+      produced.push(
+        await listener({ agent: { id: log.session.id }, messages: [], turn: 1, step: 1 }, () => ({ kind: 'enter', messages: [] })),
+      )
+    }
+    return produced
+      .flatMap((result) => (result !== null && typeof result === 'object' && Array.isArray(result.messages) ? result.messages : []))
+      .filter((message) => JSON.stringify(message).includes(ROLLBACK_NOTICE_MARKER))
+  }
+
+  const delivered = await dispatch()
+  assert.ok(
+    delivered.length > 0,
+    '回滚通知必须真的经 pre-step 送达 —— 否则这条测试测的是一个空集合',
+  )
+  for (const message of delivered) {
+    assert.equal(message.source?.kind, GRAFT_REPLAY_SOURCE_KIND, '生产路径必须把来源署名成插件')
+    assert.equal(isGraftAuthored(message.source), true, '插件消息必须被认作插件写的')
+    assert.equal(isHumanAuthored(message.source), false, '绝不能被认作人类说的')
+  }
+  /** TAKE 语义：同一个 source 只送一次，否则每步都会重提「刚才失败了」。 */
+  assert.deepEqual(await dispatch(), [], '第二次 pre-step 不许再送一条')
+
+  /** 静态兜底：生产者不得硬编码 'user'，来源必须由调用方注入。 */
   const source = readFileSync(join(SRC, 'core', 'ignition.ts'), 'utf8')
   const producer = source.slice(
     source.indexOf('export function takeRollbackNotice'),
