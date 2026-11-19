@@ -16277,6 +16277,57 @@ export async function commitPreparedSlice(
         ` (reviewed: ${describe(before)}; rebuilt: ${describe(after)}); prepare again`,
     )
   }
+  /**
+   * ── W1-7: THE CHUNK COMPARISON IS NOT THE WHOLE REVIEW ────────────────────────────────────────
+   *
+   * `prepareSlice` digests `{ goal, constraints, chunks, handover }` (see `digestOfPlan`). `commit`
+   * compared ONLY `chunks` — so a constraint set that changed while the review was open (one added to
+   * the store, one deleted from it) produced a DIFFERENT digest than the one the user approved, and the
+   * commit went through as if nothing had happened.
+   *
+   * That is the worst shape of this bug class: the digest exists precisely to certify "what you approved
+   * is what will be written", and the comparison was chosen from the parts that rarely move.
+   *
+   * The rebuild below recomputes the review's inputs from the plan `commit` is about to write and
+   * compares them to `entry`'s, naming the input that moved. Chunks are excluded on purpose: the TAIL is
+   * allowed to move (that is the whole v7.4 design above), and re-hashing the tail would refuse every
+   * self-slice. So the comparison is "the parts that must not move" — goal, constraints — which is
+   * exactly the promise the digest made.
+   *
+   * `handover` is not re-derivable (it came from the model, not from the log) and is NOT compared here:
+   * the entry carries only its counts, and a digest comparison cannot invent the original text. That
+   * limit is stated rather than papered over — `handover*Count` is what a reader can check.
+   */
+  const reviewedGoal = String(entry.goal ?? '')
+  const reviewedConstraints = Array.isArray(entry.constraints) ? entry.constraints.map(String) : []
+  const rebuiltGoal = String(rebuilt?.goal ?? '')
+  const rebuiltConstraints = Array.isArray(rebuilt?.constraints) ? rebuilt.constraints.map(String) : []
+  /**
+   * Name WHICH input moved, because "digest differs" is the message the old code produced and it told
+   * the reader nothing actionable. Constraints get their own sentence: re-preparing fixes them, whereas
+   * a moved goal usually means the user should re-read the review.
+   */
+  const constraintDelta = (() => {
+    const a = new Set(reviewedConstraints)
+    const b = new Set(rebuiltConstraints)
+    const added = [...b].filter((item) => !a.has(item))
+    const removed = [...a].filter((item) => !b.has(item))
+    return added.length === 0 && removed.length === 0 ? undefined : { added, removed }
+  })()
+  if (constraintDelta !== undefined) {
+    throw graftError(
+      'SLICE_DIGEST_MISMATCH',
+      `the CONSTRAINT SET changed while the review was open` +
+        ` (added ${constraintDelta.added.length}, removed ${constraintDelta.removed.length})` +
+        `; the approved digest covers constraints, so prepare again`,
+    )
+  }
+  if (reviewedGoal !== rebuiltGoal) {
+    throw graftError(
+      'SLICE_DIGEST_MISMATCH',
+      'the GOAL changed while the review was open; the approved slice described a different objective — prepare again',
+    )
+  }
   const tailRefreshed = changed.length > 0
   // v7.4b: the review approved a specific tape; a refreshed tail means we wrote
   // something newer. That has to reach the CALLER (the model/UI reading the tool
