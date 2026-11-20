@@ -87,6 +87,7 @@
     "deriveAutoTapeBudget",
     "describePromptFailure",
     "describeUnavailableTool",
+    "digestTextOfChunk",
     "effectiveWatermarks",
     "ensureParadiseWrite",
     "estimateGraftCost",
@@ -130,6 +131,7 @@
     "inheritedConstraintAnchor",
     "inject",
     "injectionSource",
+    "isClockBearingChunkKind",
     "isGraftAuthored",
     "isHumanAuthored",
     "isIgnitionText",
@@ -216,6 +218,6 @@
     "writeLayoutManifest",
     "writeManualConstraints"
   ],
-  "count": 215,
-  "note": "baseline updated by a declared [export-change] (COMMIT fc8447b \"﻿fix(graft): 跨窗分类拆成三态；digest 剔除天数（W1-8 + §17.2）\" (tree clean over src, index.js))"
+  "count": 217,
+  "note": "baseline updated by a declared [export-change] (COMMIT 30a1f60 \"fix(graft): 归一化收窄到唯一产出那句话的 chunk（W1-8b）\" (tree clean over src, index.js))"
 }
