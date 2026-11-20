@@ -231,3 +231,11 @@ jobs:
         # Was a `node -e` that wrote /tmp/refs.json — which does not exist on Windows, so the step
         # could not be reproduced locally at all. Now a script, called here and by `npm run check`.
         run: node scripts/check-symbol-lookup.mjs
+
+      # ── B4-0b-2 W1-11: no hand-written path separators in tests ──────────────
+      #
+      # This one CANNOT be caught on Windows, which is why it is a gate: `${dir}\` is a legal sibling path
+      # there and a filename containing a backslash on POSIX. It shipped once (v257) and the only symptom
+      # was a red `Test` job after a green local run.
+      - name: Test separators
+        run: node scripts/check-test-separators.mjs

@@ -76,6 +76,7 @@ const KINDS = new Map([
   ['check-readme-counts.mjs', 'GATE'],
   ['check-readme-tally.mjs', 'GATE'],
   ['check-symbol-lookup.mjs', 'GATE'],
+  ['check-test-separators.mjs', 'GATE'],
   ['verify-bundle.mjs', 'GATE'],
   ['run-gate.mjs', 'GATE'],
   ['v140-audit', 'GATE'],
