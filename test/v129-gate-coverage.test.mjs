@@ -102,6 +102,15 @@ const KINDS = new Map([
    * NOT_A_CI_STEP below; the classification lives here.
    */
   ['burn-in.mjs', 'INSTRUMENT'],
+  /**
+   * ── W4-1: A LIBRARY MODULE, NOT A GATE ──────────────────────────────────────────────────────────
+   *
+   * `suite-observation.mjs` runs the suite once and hands the raw TAP to every gate that asks. It
+   * asserts nothing itself — classifying it as a GATE would claim it can refuse a push, and as an
+   * INSTRUMENT would put it in the "must be a CI step or exempt" bucket, where the honest answer is
+   * that it is IMPORTED by gates rather than run. TOOLING is that bucket.
+   */
+  ['suite-observation.mjs', 'TOOLING'],
   ['who-references.mjs', 'INSTRUMENT'],
   ['calibrate-who-references.mjs', 'INSTRUMENT'],
   ['inventory-source-guards.mjs', 'INSTRUMENT'],
@@ -130,6 +139,14 @@ const KINDS = new Map([
 const NOT_A_CI_STEP = new Map([
   ['build.mjs', 'THE build step: it runs as `npm run build` inside the job, not as a separate check'],
   ['bundle.mjs', 'library module imported by build.mjs and check-docs.mjs, not a standalone script'],
+  /**
+   * ── W4-1: THE MODULE THAT RUNS THE SUITE ONCE FOR EVERY GATE ───────────────────────────────────
+   *
+   * Not a CI step because it is not a step at all: it exports `observeSuite()`, which the three
+   * count/docs/tally gates import. Running it directly would measure the suite and print nothing,
+   * which is a tool, not a check.
+   */
+  ['suite-observation.mjs', 'library module imported by check-readme-counts / check-docs / check-readme-tally to share ONE suite run; it asserts nothing itself, so running it as a CI step would check nothing (B4-0b-2 W4-1)'],
   ['publish.mjs', 'release path; it publishes to npm and must never run on a push'],
   ['demo.mjs', 'demonstration script for humans; asserts nothing'],
   /**

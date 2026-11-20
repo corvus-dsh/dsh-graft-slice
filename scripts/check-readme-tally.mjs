@@ -31,9 +31,9 @@
  *
  * Usage:  node scripts/check-readme-tally.mjs [--json]
  */
-import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { observeSuite } from './suite-observation.mjs'
 
 const REPO = fileURLToPath(new URL('..', import.meta.url))
 
@@ -115,24 +115,20 @@ export function classifySkipLines(tapOutput) {
 
 /** Run the suite once and read the tally from its summary. */
 export function measureSuite() {
-  let output = ''
   /**
-   * ── TAP, NOT THE DEFAULT REPORTER, BECAUSE ONLY TAP PRINTS THE SKIP REASON ─────────────────────
+   * ── W4-1: THE OBSERVATION IS SHARED, THE JUDGEMENT IS NOT ────────────────────────────────────
    *
-   * Measured: the default reporter prints `- test name # SKIP ...` only sometimes, and the `# SKIP`
-   * text is absent for `t.skip()` calls entirely — so a classifier keyed on `# SKIP` counted
-   * `pending=0 resource=0` against a real `skipped=2`. TAP prints the reason on every skip line:
+   * This function used to spawn `node --test --test-reporter=tap` itself. So did `check-docs`, and so
+   * did `check-readme-counts`, and then the final `node --test` step ran the suite a fourth time —
+   * measured 2026-11-20 on this repo: 79.8 + 79.1 + 78.1 + 77.2 s ≈ 314 s of a ~313 s `check`.
    *
-   *     ok 369 - D2 control: … # SKIP TD-17 ruled to KEEP this behaviour: …
-   *
-   * Only the reason lets the gate tell a DECLARED pending test from a MACHINE-missing resource, which is
-   * the entire distinction this file rests on.
+   * `suite-observation.mjs` now runs it ONCE and caches the raw TAP against a digest of every test
+   * file (path+size+mtime) plus the Node version and the package's `test` script. This gate keeps
+   * its own CLASSIFIER — the pending/resource split below is exactly what must NOT be shared with
+   * the other two gates, because they answer different questions and one must not be able to
+   * silence another.
    */
-  try {
-    output = execFileSync('node', ['--test', '--test-reporter=tap', 'test/*.test.mjs'], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
-  } catch (error) {
-    output = String(error.stdout ?? '')
-  }
+  const output = observeSuite().tap
   const read = (label) => {
     const match = new RegExp(`^# ${label} (\\d+)$`, 'mu').exec(output)
     return match === null ? undefined : Number(match[1])

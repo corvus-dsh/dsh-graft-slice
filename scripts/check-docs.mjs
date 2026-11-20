@@ -15,6 +15,7 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { stripTypeScriptTypes } from 'node:module'
 import { composeBundle } from './bundle.mjs'
+import { observeSuite } from './suite-observation.mjs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
@@ -117,20 +118,18 @@ check(
 
 // 4. Every test-count claim equals the real count ---------------------------
 function actualTestCount() {
-  const files = readdirSync(join(root, 'test'))
-    .filter((name) => name.endsWith('.test.mjs'))
-    .map((name) => join('test', name))
-  const list = execFileSync('node', ['--test', ...files], {
-    cwd: root,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    // v1.0.2: the suite's ✔-per-test report crossed execFileSync's default 1 MB cap, so
-    // the checker threw ENOBUFS instead of reporting a count. The buffer is the checker's
-    // problem, not the suite's.
-    maxBuffer: 64 * 1024 * 1024,
-  })
-  const match = /tests (\d+)/u.exec(list)
-  return match === null ? undefined : Number(match[1])
+  /**
+   * ── W4-1: READ THE SHARED OBSERVATION INSTEAD OF RE-RUNNING THE SUITE ─────────────────────────
+   *
+   * This function used to spawn `node --test` over every test file. Together with
+   * `check-readme-counts`, `check-readme-tally` and the final `node --test` step that was FOUR full
+   * suite runs per `check` (measured: ~314 s of a ~313 s run).
+   *
+   * `suite-observation.mjs` serves all of them from ONE TAP run, cached on a digest of every test
+   * file (path+size+mtime) plus the Node version and the `test` script. The gates keep their own
+   * judgements; they share only the observation, so a bug in one cannot hide behind another's answer.
+   */
+  return observeSuite().index.tests
 }
 const count = actualTestCount()
 check(
