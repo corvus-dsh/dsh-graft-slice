@@ -93,6 +93,15 @@ const KINDS = new Map([
   ['verify-bundle-purity.mjs', 'INSTRUMENT'],
   ['measure-efficiency.mjs', 'INSTRUMENT'],
   ['measure-move.mjs', 'INSTRUMENT'],
+  /**
+   * ── B4-0b-2 W1-13: BURN-IN IS AN INSTRUMENT, AND A DELIBERATELY UNWIRED ONE ──────────────────
+   *
+   * It answers a question `check` cannot: 「这套测试稳不稳」 rather than 「这个 commit 对不对」.
+   * Its output is a RATE over N runs, so wiring it into CI (which runs each file once) would produce
+   * a boolean that means nothing — and slow every push by minutes to produce it. The reason lives in
+   * NOT_A_CI_STEP below; the classification lives here.
+   */
+  ['burn-in.mjs', 'INSTRUMENT'],
   ['who-references.mjs', 'INSTRUMENT'],
   ['calibrate-who-references.mjs', 'INSTRUMENT'],
   ['inventory-source-guards.mjs', 'INSTRUMENT'],
@@ -123,6 +132,18 @@ const NOT_A_CI_STEP = new Map([
   ['bundle.mjs', 'library module imported by build.mjs and check-docs.mjs, not a standalone script'],
   ['publish.mjs', 'release path; it publishes to npm and must never run on a push'],
   ['demo.mjs', 'demonstration script for humans; asserts nothing'],
+  /**
+   * ── WHY BURN-IN IS NOT A CI STEP (W1-13) ────────────────────────────────────────────────────────
+   *
+   * `check` answers "is this commit correct"; burn-in answers "is this SUITE trustworthy". The second
+   * question needs the same file run 5–10 times, and its answer is a rate (`5/5`, `4/5`) — not a
+   * boolean a gate can consume. CI runs each file ONCE per push, which is exactly why the rate has to
+   * be measured somewhere else.
+   *
+   * The measurement is not optional: paradise was signed off at 「399/399, check exit 0」 and was red
+   * on the next full run (397/399), then 4 red in 12 concurrent runs. A single green run is a READING.
+   */
+  ['burn-in.mjs', 'runs the same test file N times and reports a RATE; CI runs each file once, so wiring it in would slow every push and yield a boolean that cannot express stability (B4-0b-2 W1-13)'],
   ['_del.mjs', 'scratch helper kept for a one-off cleanup; prefixed with _ so it is not mistaken for a gate'],
   ['cleanup-graft-targets.mjs', 'mutates the live DSH session store; running it on CI has no store to clean and would mask a real failure'],
   ['debug-status.mjs', 'calls the graft_debug_status tool through a live host; there is no host in CI'],
