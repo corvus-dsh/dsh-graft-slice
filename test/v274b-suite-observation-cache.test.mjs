@@ -5,6 +5,23 @@
  * (measured 2026-11-20: `check-readme-counts` 79.8 s + `check-docs` 79.1 s + `check-readme-tally`
  * 78.1 s + the final `node --test` 77.2 s ≈ 314 s of a ~313 s run). One run now serves all of them.
  *
+ * ── THIS FILE SHIPS TO ALL FOUR REPOSITORIES, ON PURPOSE (W4-1b) ────────────────────────────────
+ *
+ * The module it tests is byte-identical in all four, and so is this file. That is not tidiness — it
+ * is the fix for a measured mistake: the `tapDigest`/`scripts-in-digest` corrections landed in graft
+ * alone, so for a while THREE repositories ran the production cache with NO tests covering it, while
+ * this document said 「four repos, byte-identical」. One claim standing in for four unequal facts.
+ *
+ * WHERE THE COUNT MATTERS DIFFERS BY REPO, AND THAT IS FINE:
+ *
+ *   graft    · three consumers (readme-counts, check-docs, readme-tally) — the 314 s→104 s case
+ *   memory   · ONE consumer (check-readme-counts); no check-docs / check-readme-tally in its chain
+ *   observer · ONE consumer
+ *   paradise · ONE consumer, and its `check` chain is already fast (54 s measured)
+ *
+ * In the single-consumer repositories the cache saves one suite run rather than three, so the same
+ * properties still have to hold — a smaller win does not make a wrong answer acceptable.
+ *
  * A cache in front of a MEASUREMENT is dangerous in a very specific way, and it is the way this batch
  * has been documenting all along: a cache that cannot tell 「the same tree」 from 「a different tree」
  * answers confidently about a world that no longer exists. The count-baseline defect, in a new home.
