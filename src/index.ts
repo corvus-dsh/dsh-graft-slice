@@ -7082,9 +7082,6 @@ function sliceDigest(_input: {
  * text therefore made the digest change at midnight — a review opened at 23:58 and committed at 00:02
  * would differ for a reason that has nothing to do with what the user approved.
  *
- * Measured shape of the failure: `digestOfPlan` hashes `chunk.text`, so ANY time-derived text inside ANY
- * chunk is a source of drift. Only one chunk does that today, and it is this one.
- *
  * ── WHY NORMALISE RATHER THAN EXCLUDE THE CHUNK ────────────────────────────────────────────────
  *
  * The dispatch allows either "drop the day count from the digest inputs" or "make task-position a tail
@@ -7093,11 +7090,38 @@ function sliceDigest(_input: {
  * chunk stays IN the digest and only its volatile part is normalised: the day count is replaced with a
  * placeholder while the DATE — which is data — is kept.
  *
- * The same normalisation runs on both sides (prepare and the commit re-check), so the comparison stays
- * apples-to-apples.
+ * ── W1-8b: THE NORMALISER IS SCOPED TO THE ONE CHUNK THAT PRODUCES THAT SENTENCE ────────────────
+ *
+ * The first version ran this over EVERY chunk's text before hashing. That was wider than its reason: it
+ * also rewrote user messages and tool results QUOTED INTO THE TAPE, so two tapes whose quoted text
+ * differed only in 「（已 30 天）」 vs 「（已 31 天）」 hashed the same — and the digest's whole job is
+ * 「用户审过的那一份」. Letting it edit quoted text before hashing is the digest quietly changing a
+ * character and then reporting that it matches.
+ *
+ * 「（已 N 天）」 has exactly ONE producer in this tree — `task-position.ts`'s staleness line, which lands
+ * in the `kind: 'task-position'` chunk (`index.ts` step 6). So the scope is that kind and nothing else;
+ * every other chunk is hashed verbatim.
  */
+const CLOCK_BEARING_CHUNK_KIND = 'task-position'
+
+/** Only `task-position` carries a freshly-read clock; see the block comment above. */
+export function isClockBearingChunkKind(kind: unknown): boolean {
+  return String(kind ?? '') === CLOCK_BEARING_CHUNK_KIND
+}
+
 export function normalizeDigestText(text: string): string {
   return String(text ?? '').replace(/（已 \d+ 天）/gu, '（已 N 天）')
+}
+
+/**
+ * The digest form of one chunk: normalised for `task-position`, BYTE-IDENTICAL for everything else.
+ *
+ * A single function so the digest and the commit re-check cannot disagree about the scope — the same
+ * "two surfaces, one fact" rule that `normalizeDigestText` was introduced under.
+ */
+export function digestTextOfChunk(chunk: { kind?: unknown; text?: unknown }): string {
+  const text = String(chunk?.text ?? '')
+  return isClockBearingChunkKind(chunk?.kind) ? normalizeDigestText(text) : text
 }
 
 function digestOfPlan(plan: any, handover?: ModelHandover): string {
@@ -7112,9 +7136,10 @@ function digestOfPlan(plan: any, handover?: ModelHandover): string {
   // says 「模型提供」. The digest is the fingerprint of what the user approved, provenance
   // included, so provenance is hashed.
   //
-  // W1-8: `normalizeDigestText` strips the day count (a clock reading) and keeps the date (data).
+  // W1-8/W1-8b: `digestTextOfChunk` strips the day count from the ONE clock-bearing chunk and leaves
+  // every other chunk verbatim — quoted user text included.
   const chunks = Array.isArray(plan?.chunks)
-    ? plan.chunks.map((chunk: any) => [String(chunk?.kind ?? ''), normalizeDigestText(String(chunk?.text ?? ''))])
+    ? plan.chunks.map((chunk: any) => [String(chunk?.kind ?? ''), digestTextOfChunk(chunk)])
     : []
   const constraints: string[] = Array.isArray(plan?.constraints) ? plan.constraints.map(String) : []
   const handoverDigest = {
@@ -7381,11 +7406,15 @@ export async function commitPreparedSlice(
     const a = stableBefore[index]
     const b = stableAfter[index]
     /**
-     * W1-8: compared through the SAME normalisation the digest uses. Comparing raw text here would make
-     * 「已 30 天」 vs 「已 31 天」 a `SLICE_DIGEST_MISMATCH` at midnight — the check would refuse a commit
-     * for exactly the drift the digest was changed to ignore, and the two would contradict each other.
+     * W1-8/W1-8b: compared through the SAME function the digest uses — scoped to the clock-bearing
+     * chunk. Comparing raw text here would make 「已 30 天」 vs 「已 31 天」 a `SLICE_DIGEST_MISMATCH` at
+     * midnight (the digest was changed to ignore exactly that drift); normalising BROADLY would excuse a
+     * day-boundary difference in QUOTED text, which is not drift, it is a different tape.
      */
-    if (String(a.kind) !== String(b.kind) || normalizeDigestText(String(a.text)) !== normalizeDigestText(String(b.text))) {
+    if (
+      String(a.kind) !== String(b.kind)
+      || digestTextOfChunk(a) !== digestTextOfChunk(b)
+    ) {
       changed.push(String(b.kind))
     }
   }
