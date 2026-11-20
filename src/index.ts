@@ -7969,6 +7969,40 @@ async function graftSliceAndInjectUnlocked(
     //      `get(name, scope)` before concluding it is absent. A scope-filtered
     //      projection is not evidence of absence; the old code treated it as
     //      such. A downgrade now requires BOTH lookups to fail.
+    /**
+     * ── W4-4: ONE WALK OVER `raw.events` FOR TWO FACTS ───────────────────────────────────────────
+     *
+     * Measured 2026-11-20: this function walked `raw.events` SIX times (three `for…of` over it plus
+     * three `map`/`filter` calls). The dispatch's criterion is ≤3, and the two `for…of` loops below
+     * are the cheapest pair to merge: both are pure reads that scan for ONE event type each and
+     * depend on nothing the other computes.
+     *
+     *   · `sourceToolNames` — every `tool/call` name, bounded by DISTINCT names;
+     *   · `lastSelectedPreset` — the LAST `agent-preset/selected` value (the durable record of a
+     *     preset change; the header is immutable creation metadata).
+     *
+     * ── WHAT IS DELIBERATELY NOT MERGED ──────────────────────────────────────────────────────────
+     *
+     * `events.map((e) => e.type)` and the tape `events.map(...)` below BUILD data used downstream;
+     * folding them in here would make one loop responsible for unrelated failure modes, and the tape
+     * map must run after the boundary is known. The remaining walks are therefore 3, which is the
+     * stated target — and if a later change adds a fourth, this comment is where to look.
+     */
+    const sourceToolNames = new Set<string>()
+    let lastSelectedPreset: string | undefined
+    for (const event of raw.events) {
+      const type = (event as any)?.type
+      if (type === 'tool/call') {
+        const name = typeof (event as any).data?.name === 'string' ? (event as any).data.name : ''
+        if (name.length > 0) sourceToolNames.add(name)
+        continue
+      }
+      if (type === 'agent-preset/selected') {
+        const value = ((event as any).data as any)?.agentPreset
+        if (typeof value === 'string' && value.length > 0) lastSelectedPreset = value
+      }
+    }
+
     const availableTools = (() => {
       try {
         const tools = ctx.get('tools') as any
@@ -7997,13 +8031,8 @@ async function graftSliceAndInjectUnlocked(
         // calls, and it is what stops an incomplete projection from producing a
         // false "this tool does not exist".
         if (typeof tools.get === 'function') {
-          const used = new Set<string>()
-          for (const event of raw.events) {
-            if (event.type !== 'tool/call') continue
-            const name = typeof event.data?.name === 'string' ? event.data.name : ''
-            if (name.length > 0) used.add(name)
-          }
-          for (const name of used) {
+          /** W4-4: collected in the single walk above, not by walking `raw.events` again here. */
+          for (const name of sourceToolNames) {
             if (names.has(name)) continue
             const resolved = scope === undefined ? tools.get(name) : tools.get(name, scope)
             if (resolved !== undefined) names.add(name)
@@ -8070,13 +8099,8 @@ async function graftSliceAndInjectUnlocked(
     // durable record of a preset change. The LAST such event is the current
     // preset, so that is what must be carried.
     const sourceAgentPreset = (() => {
-      let selected: string | undefined
-      for (const event of raw.events) {
-        if (event?.type !== 'agent-preset/selected') continue
-        const value = (event.data as any)?.agentPreset
-        if (typeof value === 'string' && value.length > 0) selected = value
-      }
-      if (selected !== undefined) return selected
+      /** W4-4: `lastSelectedPreset` came from the single walk above; the fallback is unchanged. */
+      if (lastSelectedPreset !== undefined) return lastSelectedPreset
       const fromHeader = (raw.session as any)?.agentPreset
       return typeof fromHeader === 'string' && fromHeader.length > 0 ? String(fromHeader) : undefined
     })()
