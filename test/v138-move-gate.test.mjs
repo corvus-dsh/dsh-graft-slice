@@ -18,8 +18,9 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { cpSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
@@ -44,9 +45,60 @@ after(() => rmSync(SANDBOX, { recursive: true, force: true }))
 
 const gateEnv = { ...process.env, GRAFT_MOVE_GATE_SRC: SANDBOX_SRC }
 
-const gateJson = (cluster) => JSON.parse(execFileSync(process.execPath, [GATE, '--cluster', cluster, '--json'], {
-  cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: gateEnv,
-}))
+/**
+ * ── W4-2: THE GATE IS RUN ONCE PER (CLUSTER, SANDBOX STATE), NOT ONCE PER ASSERTION ─────────────
+ *
+ * Measured 2026-11-20: this file took **48.4 s** — the single largest file in a 105 s suite. The
+ * cause is not many calls (there are four `execFileSync` sites) but the COST of each: `move-gate.mjs`
+ * re-parses the whole `src/` copy every invocation (~2 s), and the file asks for the SAME two clusters
+ * repeatedly — `GraftConfig` 7 times, `buildTape` 3 times, all against an unchanged sandbox.
+ *
+ * Same question + same tree ⇒ same answer, so the answer is memoised.
+ *
+ * ── THE KEY IS THE SANDBOX'S IDENTITY, AND I MUST BE HONEST ABOUT WHY ────────────────────────
+ *
+ * The first draft of this comment said the digest is REQUIRED because `v138 ④` writes a probe into the
+ * sandbox and expects the gate to see it. That was a claim, not a measurement, and when I checked it
+ * the claim was FALSE: ④ asks for a cluster name (`v138ProbeReadsContainerLocal`) that appears nowhere
+ * else, so it never shared a cache entry with the pre-probe answer. Dropping the digest from the key
+ * and re-running left all 11 tests green.
+ *
+ * So the digest is DEFENSIVE, not load-bearing TODAY. It stays because the failure it prevents is the
+ * one this batch keeps finding — a cache that cannot tell 「same tree」 from 「different tree」 answers
+ * confidently about a world that no longer exists — and because the next person to add a case that
+ * edits the sandbox and re-asks an existing cluster should not have to notice this.
+ *
+ * Stated plainly rather than dressed up: **the key is right for the shape of the problem; no current
+ * test depends on it, and this comment must not claim otherwise.**
+ */
+const SANDBOX_DIGEST = () => {
+  const parts = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(full)
+        continue
+      }
+      const stat = statSync(full)
+      parts.push(`${relative(SANDBOX_SRC, full)}:${stat.size}:${Math.trunc(stat.mtimeMs)}`)
+    }
+  }
+  walk(SANDBOX_SRC)
+  return createHash('sha256').update(parts.sort().join('\n')).digest('hex')
+}
+
+const gateCache = new Map()
+const gateJson = (cluster) => {
+  const key = `${cluster}\u0000${SANDBOX_DIGEST()}`
+  const cached = gateCache.get(key)
+  if (cached !== undefined) return cached
+  const value = JSON.parse(execFileSync(process.execPath, [GATE, '--cluster', cluster, '--json'], {
+    cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env: gateEnv,
+  }))
+  gateCache.set(key, value)
+  return value
+}
 
 /**
  * ── THE GATE NEEDS closure.mjs, AND closure.mjs NEEDS TYPESCRIPT ───────────────────────────────

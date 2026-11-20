@@ -17,8 +17,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -26,14 +27,61 @@ const SCRIPT = join(ROOT, 'scripts', 'type-budget.mjs')
 const TYPE_CHECK = join(ROOT, 'scripts', 'type-check.mjs')
 const SOURCE = readFileSync(SCRIPT, 'utf8')
 
+/**
+ * ── W4-2: `run()` IS MEMOISED ON (ARGS, SOURCE STATE) — measured, not assumed ─────────────────────
+ *
+ * This file took **32.6 s** standalone. It makes few calls, but each one runs a FULL TypeScript check
+ * (~4.7 s for `type-budget.mjs`), and several cases ask the SAME question twice:
+ * `run()` with no arguments appears in more than one test, and the two `type-check` invocations are
+ * both full compiles.
+ *
+ * ── WHY THE KEY HAS A SOURCE DIGEST, AND WHAT IT IS NOT ─────────────────────────────────────
+ *
+ * The honest status: **no current case here edits `src/` and then re-asks the same question.** I
+ * checked by removing the digest from the key and re-running — all 10 tests stayed green. So this
+ * digest is DEFENSIVE, not load-bearing today.
+ *
+ * It stays for two reasons, neither of them 「it looks careful」:
+ *   1. the failure it prevents is the one this batch keeps finding — a cache that cannot tell
+ *      「same tree」 from 「different tree」 answers confidently about a world that no longer exists;
+ *   2. the budget gate's whole job is to notice a change in `src/`, so a case that mutates and
+ *      re-asks is exactly what this file is FOR. When someone writes it, the key must already be right.
+ *
+ * The cost is a walk over `src/` per `run()` (~30 ms), against a 4.7 s compile it avoids.
+ */
+function sourceDigest () {
+  const parts = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(full)
+        continue
+      }
+      const stat = statSync(full)
+      parts.push(`${relative(ROOT, full)}:${stat.size}:${Math.trunc(stat.mtimeMs)}`)
+    }
+  }
+  walk(join(ROOT, 'src'))
+  return createHash('sha256').update(parts.sort().join('\n')).digest('hex')
+}
+
+const runCache = new Map()
+
 /** 运行脚本并把退出码与输出一起拿到（它按设计以非零退出表示违规）。 */
 function run (args = []) {
+  const key = `${args.join('\u0000')}\u0001${sourceDigest()}`
+  const cached = runCache.get(key)
+  if (cached !== undefined) return cached
+  let result
   try {
     const stdout = execFileSync(process.execPath, [SCRIPT, ...args], { cwd: ROOT, encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
-    return { code: 0, out: stdout }
+    result = { code: 0, out: stdout }
   } catch (error) {
-    return { code: error.status ?? 1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` }
+    result = { code: error.status ?? 1, out: `${error.stdout ?? ''}${error.stderr ?? ''}` }
   }
+  runCache.set(key, result)
+  return result
 }
 
 /**
