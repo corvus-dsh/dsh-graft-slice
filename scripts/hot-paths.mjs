@@ -28,7 +28,7 @@
  *   node scripts/hot-paths.mjs --json          # machine-readable, for diffing two runs
  */
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir, cpus } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -178,6 +178,7 @@ const args = process.argv.slice(2)
 let samples = 7
 let only
 let asJson = false
+let writePath
 for (let index = 0; index < args.length; index += 1) {
   if (args[index] === '--samples') {
     samples = Number(args[index + 1])
@@ -191,6 +192,11 @@ for (let index = 0; index < args.length; index += 1) {
   }
   if (args[index] === '--json') {
     asJson = true
+    continue
+  }
+  if (args[index] === '--write') {
+    writePath = args[index + 1]
+    index += 1
     continue
   }
 }
@@ -233,37 +239,61 @@ if (asJson) {
   process.exit(0)
 }
 
-console.log('# 热路径读数（W4-5）')
-console.log('')
-console.log('> 基线，不是门禁。判据在别处；这里只回答「一轮大概花多少」。')
-console.log('')
-console.log('## 环境')
-console.log('')
-console.log('| 项 | 值 |')
-console.log('|---|---|')
-console.log(`| Node | ${env.node} |`)
-console.log(`| 平台 | ${env.platform} |`)
-console.log(`| CPU | ${env.cpu} |`)
-console.log(`| 采样 | 每项 ${samples} 次，取中位（丢弃第 1 次：模块初始化） |`)
-console.log(`| 时间 | ${env.at} |`)
-console.log('')
-console.log('## 读数（ms）')
-console.log('')
-console.log('| 热路径 | 中位 | min | max | 样本 | 备注 |')
-console.log('|---|---|---|---|---|---|')
+/**
+ * ── THE TABLE IS BUILT AS TEXT, THEN EMITTED ONE WAY ───────────────────────────────────────────
+ *
+ * `--write <path>` exists because of a measured defect in how this document was first produced:
+ * it was created with a PowerShell redirection (`node … > docs/PERF-HOT-PATHS.md`), which writes
+ * **UTF-16 LE**. Two consequences, both bad: `read`/`edit` tools treat the file as binary, and a
+ * later Node read-as-utf8 turned every Chinese character into U+FFFD — the document was destroyed and
+ * had to be restored from git.
+ *
+ * So the script owns its own output encoding. `--write` uses `writeFileSync(..., 'utf8')`, which is
+ * what every other file in this repository is.
+ */
+const lines = []
+const say = (line = '') => lines.push(line)
+
+say('# 热路径读数（W4-5）')
+say('')
+say('> 基线，不是门禁。判据在别处；这里只回答「一轮大概花多少」。')
+say('')
+say('## 环境')
+say('')
+say('| 项 | 值 |')
+say('|---|---|')
+say(`| Node | ${env.node} |`)
+say(`| 平台 | ${env.platform} |`)
+say(`| CPU | ${env.cpu} |`)
+say(`| 采样 | 每项 ${samples} 次，取中位（丢弃第 1 次：模块初始化） |`)
+say(`| 时间 | ${env.at} |`)
+say('')
+say('## 读数（ms）')
+say('')
+say('| 热路径 | 中位 | min | max | 样本 | 备注 |')
+say('|---|---|---|---|---|---|')
 for (const row of rows) {
   if (row.skipped !== undefined) {
-    console.log(`| \`${row.path}\` | — | — | — | — | **SKIPPED**：${row.skipped} |`)
+    say(`| \`${row.path}\` | — | — | — | — | **SKIPPED**：${row.skipped} |`)
     continue
   }
-  console.log(
+  say(
     `| \`${row.path}\` | ${row.median.toFixed(3)} | ${row.min === undefined ? '—' : row.min.toFixed(3)} | ` +
       `${row.max === undefined ? '—' : row.max.toFixed(3)} | ${row.samples ?? '—'} | ${row.note ?? ''} |`,
   )
 }
-console.log('')
-console.log('## 怎么用这张表')
-console.log('')
-console.log('1. **两次读数才有意义**：一次基线不说明快慢，只说明当时是多少。改动前后各跑一次，比较中位。')
-console.log('2. **看 max，不只盯中位**：中位 0.3 ms 而 max 40 ms 说明偶发停顿，那是另一类问题。')
-console.log('3. **SKIPPED 不是 0**：跳过说明本次没测到，写进报告时必须写「未测」，不许写「很快」。')
+say('')
+say('## 怎么用这张表')
+say('')
+say('1. **两次读数才有意义**：一次基线不说明快慢，只说明当时是多少。改动前后各跑一次，比较中位。')
+say('2. **看 max，不只盯中位**：中位 0.3 ms 而 max 40 ms 说明偶发停顿，那是另一类问题。')
+say('3. **SKIPPED 不是 0**：跳过说明本次没测到，写进报告时必须写「未测」，不许写「很快」。')
+say('4. **这张表由脚本生成**：`npm run hot-paths -- --write docs/PERF-HOT-PATHS.md`，不要手改数字。')
+
+const document = `${lines.join('\n')}\n`
+if (writePath !== undefined) {
+  writeFileSync(writePath, document, 'utf8')
+  console.log(`wrote ${writePath} (${Buffer.byteLength(document, 'utf8')} bytes, utf-8)`)
+  process.exit(0)
+}
+process.stdout.write(document)

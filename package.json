@@ -32,6 +32,7 @@
     "test": "node --test test/*.test.mjs",
     "burn-in": "node scripts/burn-in.mjs",
     "hot-paths": "node scripts/hot-paths.mjs",
+    "hot-paths:write": "node scripts/hot-paths.mjs --samples 7 --write docs/PERF-HOT-PATHS.md",
     "demo": "node scripts/demo.mjs",
     "publish": "node scripts/publish.mjs",
     "verify": "node scripts/verify-bundle.mjs",
