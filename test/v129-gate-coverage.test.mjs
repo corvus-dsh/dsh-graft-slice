@@ -111,6 +111,14 @@ const KINDS = new Map([
    * that it is IMPORTED by gates rather than run. TOOLING is that bucket.
    */
   ['suite-observation.mjs', 'TOOLING'],
+  /**
+   * ── W4-5: A MEASUREMENT TOOL, NOT A CHECK ──────────────────────────────────────────────────────
+   *
+   * `hot-paths.mjs` prints the per-turn hot-path table into `docs/PERF-HOT-PATHS.md`. It asserts
+   * nothing and sets no threshold — **a baseline is not a gate** — so a CI step would either check
+   * nothing or turn every normal slowdown into a red build.
+   */
+  ['hot-paths.mjs', 'TOOLING'],
   ['who-references.mjs', 'INSTRUMENT'],
   ['calibrate-who-references.mjs', 'INSTRUMENT'],
   ['inventory-source-guards.mjs', 'INSTRUMENT'],
@@ -147,6 +155,7 @@ const NOT_A_CI_STEP = new Map([
    * which is a tool, not a check.
    */
   ['suite-observation.mjs', 'library module imported by check-readme-counts / check-docs / check-readme-tally to share ONE suite run; it asserts nothing itself, so running it as a CI step would check nothing (B4-0b-2 W4-1)'],
+  ['hot-paths.mjs', 'prints the per-turn hot-path table into docs/PERF-HOT-PATHS.md; asserts nothing and has no threshold, because a baseline is not a gate (B4-0b-2 W4-5)'],
   ['publish.mjs', 'release path; it publishes to npm and must never run on a push'],
   ['demo.mjs', 'demonstration script for humans; asserts nothing'],
   /**

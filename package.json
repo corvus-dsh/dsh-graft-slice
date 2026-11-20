@@ -31,6 +31,7 @@
     "check:docs": "node scripts/check-docs.mjs",
     "test": "node --test test/*.test.mjs",
     "burn-in": "node scripts/burn-in.mjs",
+    "hot-paths": "node scripts/hot-paths.mjs",
     "demo": "node scripts/demo.mjs",
     "publish": "node scripts/publish.mjs",
     "verify": "node scripts/verify-bundle.mjs",
