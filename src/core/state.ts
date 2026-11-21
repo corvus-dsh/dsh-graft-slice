@@ -427,6 +427,30 @@ export interface PreparedSlice {
   handoverPendingCount?: number
   /** TD-11: how many `handover.notes` items the review carried (0 = none supplied). */
   handoverNoteCount?: number
+  /**
+   * ── B4-B B1: THE CONTENT, NOT JUST THE COUNTS ────────────────────────────────────────────────
+   *
+   * The two counts above were the ONLY thing ever persisted, so the model's text never left
+   * `prepareSlice`'s local scope. Commit therefore could not write it even if it had wanted to:
+   * there was nothing to pass. Measured consequence — `:4271` always fell through to `openTodos`
+   * and `:4797`'s notes block was always empty, i.e. **the content the user approved reached the
+   * target session as zero characters.**
+   *
+   * OPTIONAL ON PURPOSE: `persistPrepared` serialises the whole object, so an entry written by an
+   * older build simply has no `handover` key and reads back as `undefined`. A non-zero count with no
+   * content is a LEGACY entry, and commit refuses it (B4-B B1 judgement 4) rather than writing a
+   * session that claims a provenance it cannot honour.
+   */
+  handover?: { readonly pending?: readonly string[]; readonly notes?: readonly string[] }
+  /**
+   * B4-B B1 (judgement 5): did the caller SUPPLY a `handover` object at all?
+   *
+   * `undefined` vs 「supplied but every line was blank」 are different facts: both write nothing into
+   * the tape, but only the second may say 「本段由模型提供」 in the review. Collapsing them (which
+   * the old `count === 0 && count === 0` test did) makes the review claim a provenance that did not
+   * happen.
+   */
+  handoverSupplied?: boolean
   /** v7.4: the reviewed chunk bodies, for tail-vs-history comparison at commit. */
   chunks?: Array<{ kind: string; text: string }>
 }

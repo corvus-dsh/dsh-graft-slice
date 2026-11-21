@@ -47,6 +47,13 @@ const TEST_ONLY_SEAMS = [
   'getRetiredSessions',
   'getTransferredSessions',
   'hasIgnitionAdmission',
+  /**
+   * B4-B B1: the legacy-handover predicate, driven directly by `v295 ⑥` with the three shapes it must
+   * distinguish. Registered here for the reason this list exists — a `…ForTest` export is a widening
+   * of the public surface, and it has to be a deliberate act rather than something the convention
+   * smuggles in.
+   */
+  'isLegacyHandoverEntryForTest',
   'markIgnitionAdmission',
 ]
 

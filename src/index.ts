@@ -6816,8 +6816,21 @@ export function getGraftTargets(): ReadonlyMap<string, GraftTargetMark> {
  * reset, where a leaked mark makes the next case behave differently from an isolated
  * run and hides a real regression.
  */
-export function clearGraftTargetsForTest(): void {
-  graftTargets.clear()
+/**
+ * B4-B B1: the legacy-entry predicate, reachable so it can be driven with the three shapes it must
+ * distinguish. `v295 ④` proves commit REFUSES a legacy entry; this seam proves the predicate itself
+ * answers `false` for the two shapes that are not legacy — a predicate that said `true` for
+ * everything would pass ④ and refuse every commit in the product.
+ */
+export function isLegacyHandoverEntryForTest(entry: {
+  handover?: unknown
+  handoverPendingCount?: number
+  handoverNoteCount?: number
+}): boolean {
+  return isLegacyHandoverEntry(entry)
+}
+
+export function clearGraftTargetsForTest(): void {  graftTargets.clear()
 }
 
 /**
@@ -7232,6 +7245,18 @@ export async function prepareSlice(
   // `buildInjectionPlan`; here we only need the counts, to state WHAT the user is approving.
   const handoverPendingCount = (handover?.pending ?? []).filter((item) => String(item).trim().length > 0).length
   const handoverNoteCount = (handover?.notes ?? []).filter((item) => String(item).trim().length > 0).length
+  /**
+   * ── B4-B B1 JUDGEMENT 5: 「not supplied」 ≠ 「supplied but blank」 ──────────────────────────────
+   *
+   * The old review line keyed on `count === 0 && count === 0`, which is true for BOTH:
+   *   · the caller passed no `handover` at all          (nothing was approved from the model)
+   *   · the caller passed `{ notes: ['', '  '] }`       (the model DID supply, and it was empty)
+   *
+   * Both write nothing into the tape — but only the second may say 「本段由模型提供」. Saying it in
+   * the first case is **claiming a provenance that did not happen**, which is the same family as
+   * writing a count and calling it content.
+   */
+  const handoverSupplied = handover !== undefined
 
   const preparedId = `prep-${digest.slice(0, 12)}-${Date.now().toString(36)}`
   const target = requestedTarget ?? autoTargetId(settings)
@@ -7251,7 +7276,11 @@ export async function prepareSlice(
     '',
     // TD-11: the review must SAY that part of it came from the model. The user approves a digest,
     // so the provenance of what they are approving has to be on screen, not only in the data.
-    ...(handoverPendingCount === 0 && handoverNoteCount === 0
+    //
+    // B4-B B1 judgement 5: gated on `handoverSupplied` (not on the counts). A supplied-but-blank
+    // handover DID come from the model, and saying so is accurate; an absent one did not, and
+    // saying so would be claiming a provenance that never happened.
+    ...(handoverSupplied !== true
       ? []
       : ['', `【本段由模型提供】待开始 ${handoverPendingCount} 条、备注 ${handoverNoteCount} 条（不是工具测量的事实）`]),
     constraints.length > 0 ? `【约束 ${constraints.length} 条】\n- ${constraints.slice(0, 10).join('\n- ')}` : '【约束】无',
@@ -7280,6 +7309,19 @@ export async function prepareSlice(
     // model-supplied content, and which kind. The digest already covers it structurally.
     handoverPendingCount,
     handoverNoteCount,
+    /**
+     * ── B4-B B1: THE CONTENT GOES IN THE RECORD NOW ─────────────────────────────────────────────
+     *
+     * Before this line the entry held two INTEGERS and nothing else, so `graft_commit` had no source
+     * for the model's text — the write path could not carry it even in principle. That is why the
+     * symptom was 「用户批准的内容一个字都没进目标会话」 and not 「比较时漏了一项」.
+     *
+     * Stored verbatim (not trimmed, not filtered) so commit writes exactly what was reviewed; the
+     * blank-line filtering happens at RENDER time, where the same input always produces the same
+     * output.
+     */
+    handover: handover === undefined ? undefined : { pending: handover.pending, notes: handover.notes },
+    handoverSupplied,
     // v7.4: keep the chunk bodies so commit can tell a stale TAIL (expected while
     // the session slices itself) from a changed HISTORY (a real reason to refuse).
     chunks: (Array.isArray(plan?.chunks) ? plan.chunks : []).map((chunk: any) => ({
@@ -7292,8 +7334,28 @@ export async function prepareSlice(
   return entry
 }
 
-export async function commitPreparedSlice(
-  ctx: PluginContextLike,
+/**
+ * B4-B B1: is this entry from a build that stored the handover COUNTS but not the CONTENT?
+ *
+ * The signature is precise and there is only one way to have it:
+ *
+ *   · `handover` is absent            (no content was persisted)
+ *   · AND a count says non-zero       (a handover WAS supplied at prepare time)
+ *
+ * Both conditions are needed. A non-zero count with content is a normal entry; a zero count with no
+ * content is a normal entry that never had a handover. Only the combination means 「we know text
+ * existed and we cannot reproduce it」.
+ *
+ * Deliberately NOT using `handoverSupplied`: an entry written before that field existed has it
+ * `undefined`, and inferring from it would make every such entry look legacy even when it had no
+ * handover — refusing commits that were always fine.
+ */
+function isLegacyHandoverEntry(entry: { handover?: unknown; handoverPendingCount?: number; handoverNoteCount?: number }): boolean {
+  if (entry.handover !== undefined) return false
+  return Number(entry.handoverPendingCount ?? 0) > 0 || Number(entry.handoverNoteCount ?? 0) > 0
+}
+
+export async function commitPreparedSlice(  ctx: PluginContextLike,
   config: GraftConfig,
   preparedId: string,
   expectedDigest: string,
@@ -7319,6 +7381,32 @@ export async function commitPreparedSlice(
     preparedSlices.delete(preparedId)
     persistPrepared([preparedId])
     throw graftError('PREPARED_EXPIRED', `prepared slice "${preparedId}" is older than 30 minutes; prepare again`)
+  }
+  /**
+   * ── B4-B B1 JUDGEMENT 4: A LEGACY ENTRY MUST NOT BE COMMITTED ────────────────────────────────
+   *
+   * A prepared entry from a build before content persistence carries COUNTS but no `handover`
+   * content. Committing it writes a target session that says 「本段由模型提供」 (or worse, silently
+   * omits it) while the text the user approved is not in the record at all — exactly the defect
+   * this batch exists to remove.
+   *
+   * WHY REFUSE RATHER THAN WARN (the user's ruling, and its reason is stronger than mine): the
+   * prepared TTL is 30 minutes, so a legacy entry can only exist in the window where the user has
+   * JUST read the review and is about to approve it. A warning there lowers the standard precisely
+   * at the moment the standard exists for. Refusing costs one `graft_prepare`; approving costs a
+   * session whose provenance is a lie.
+   *
+   * THE ENTRY IS KEPT, NOT DELETED. The user needs to be able to read the message, see which
+   * preparedId it was, and decide — and a silent cleanup would look identical to 「never prepared」.
+   */
+  if (isLegacyHandoverEntry(entry)) {
+    throw graftError(
+      'PREPARED_LEGACY_HANDOVER_LOST',
+      `prepared slice "${preparedId}" was created by an older build that stored only the handover ` +
+        `COUNTS (待开始 ${entry.handoverPendingCount ?? 0} 条 / 备注 ${entry.handoverNoteCount ?? 0} 条) ` +
+        'and not the text, so committing it would hand the target session a provenance it cannot honour. ' +
+        '请重新 graft_prepare（本次会保存内容）。这条记录未被删除，你可以用它的 preparedId 对照。',
+    )
   }
   if (typeof expectedDigest !== 'string' || expectedDigest.length === 0) {
     throw graftError('SLICE_DIGEST_REQUIRED', 'graft_commit needs the digest shown by graft_prepare')
@@ -7369,8 +7457,24 @@ export async function commitPreparedSlice(
    * the same refusal `SOURCE_DRIFT` makes one line above for a moved boundary.
    */
   const rebuiltPosition = readTaskPosition(settings, entry.sourceSessionId)
+  /**
+   * ── B4-B B1: THE REBUILD MUST CARRY THE SAME HANDOVER ────────────────────────────────────────
+   *
+   * `rebuilt` exists to compare its STABLE chunks against `entry.chunks`. If it is built WITHOUT the
+   * handover, the chunks that render the model's content exist on only one side, and the comparison
+   * either reports a phantom mismatch or — worse, because it looks like success — agrees while the
+   * write path drops the content.
+   *
+   * So both sides of the comparison are built from the same three inputs: the log, the task
+   * position, and the handover the user reviewed.
+   */
   const rebuilt = buildInjectionPlan(raw, settings, undefined, 'regex-fallback', undefined,
-    rebuiltPosition.position === undefined ? undefined : { taskPosition: rebuiltPosition.position })
+    rebuiltPosition.position === undefined && entry.handover === undefined
+      ? undefined
+      : {
+          ...(rebuiltPosition.position === undefined ? {} : { taskPosition: rebuiltPosition.position }),
+          ...(entry.handover === undefined ? {} : { handover: entry.handover as ModelHandover }),
+        })
   // The tail may have grown while the user was reading. Name what changed rather
   // than pretending it did not.
   //
@@ -7562,7 +7666,17 @@ export async function commitPreparedSlice(
   try {
     refreshMigrationLedgers()
     assertResliceAllowed(entry.sourceSessionId, false)
-    report = await graftSliceAndInjectUnlocked(ctx, config, entry.sourceSessionId, entry.targetSessionId)
+    report = await graftSliceAndInjectUnlocked(ctx, config, entry.sourceSessionId, entry.targetSessionId, undefined, {
+      /**
+       * ── B4-B B1: THE CONTENT THE USER APPROVED, ALL THE WAY TO THE TAPE ──────────────────────
+       *
+       * This is the line whose absence made B1 a P0. Without it `buildInjectionPlan` inside the write
+       * path never received the handover, so the target session's 待开始 column fell back to
+       * `openTodos` and the notes block was always empty — regardless of what `prepareSlice` had
+       * echoed back in the review the user approved.
+       */
+      ...(entry.handover === undefined ? {} : { handover: entry.handover as ModelHandover }),
+    })
     preparedSlices.delete(preparedId)
     persistPrepared([preparedId])
   } finally {
@@ -7643,6 +7757,33 @@ function loadPrepared(): void {
               .filter((chunk: any) => isRecord(chunk))
               .map((chunk: any) => ({ kind: String(chunk.kind ?? ''), text: String(chunk.text ?? '') }))
           : undefined,
+        /**
+         * ── B4-B B1: THE SAME TRAP, A SECOND TIME (measured while implementing B1) ─────────────
+         *
+         * The comment above already warns that a field missing from this list is silently dropped —
+         * and then `handover` was added to `PreparedSlice` WITHOUT being added here. The result:
+         * `graft_prepare` wrote the content to disk, the file on disk contained it, and `commit` still
+         * saw `undefined`, because `commitPreparedSlice` calls `loadPrepared()` first and this loader
+         * rebuilt the entry without the new field.
+         *
+         * That is worse than a plain omission, because the defect LOOKS fixed from both ends: the
+         * prepared file has the data, the write path has the parameter, and only the thing in between
+         * throws it away. `v295 ①` caught it — the test read the TARGET session, not the prepared entry.
+         *
+         * `handover` is re-validated shallowly: a hand-edited file could carry anything, and this value
+         * ends up in the target's context.
+         */
+        handover: isRecord(value.handover)
+          ? {
+              ...(Array.isArray(value.handover.pending) ? { pending: value.handover.pending.map(String) } : {}),
+              ...(Array.isArray(value.handover.notes) ? { notes: value.handover.notes.map(String) } : {}),
+            }
+          : undefined,
+        handoverSupplied: value.handoverSupplied === true ? true : undefined,
+        handoverPendingCount: Number.isFinite(Number(value.handoverPendingCount))
+          ? Number(value.handoverPendingCount)
+          : undefined,
+        handoverNoteCount: Number.isFinite(Number(value.handoverNoteCount)) ? Number(value.handoverNoteCount) : undefined,
       })
     }
     /**
@@ -7781,6 +7922,15 @@ export interface SliceOptions {
   callingAgent?: unknown
   /** v7.7: the caller passed the reslice gate; the wrapper re-checks it under the lock. */
   allowReslice?: boolean
+  /**
+   * ── B4-B B1: MODEL-SUPPLIED HANDOVER CONTENT, CARRIED THROUGH TO THE TAPE ────────────────────
+   *
+   * `graft_commit` reads it from the reviewed `PreparedSlice` and passes it here, so the write path
+   * builds the same plan the user approved. Without it the injection plan has no source for
+   * `handover.pending` / `handover.notes`, and `:4271` silently falls back to `openTodos` — a target
+   * session that looks normal and contains none of the content that was approved.
+   */
+  handover?: ModelHandover
   /**
    * v7.7: run the already-migrated gate inside the lock. Tool callers set this;
    * internal callers (auto-graft, overflow recovery) retire the source themselves
@@ -8075,7 +8225,13 @@ async function graftSliceAndInjectUnlocked(
       fastConstraints,
       'regex-fallback',
       availableTools,
-      writePosition.position === undefined ? undefined : { taskPosition: writePosition.position },
+      writePosition.position === undefined && options?.handover === undefined
+        ? undefined
+        : {
+            ...(writePosition.position === undefined ? {} : { taskPosition: writePosition.position }),
+            /** B4-B B1: the approved content, so the tape matches the review. */
+            ...(options?.handover === undefined ? {} : { handover: options.handover }),
+          },
     )
     const runtimeIntent = options?.runtimeIntent ?? extractRuntimeIntent(raw.events)
     const events = buildInjectionEvents(plan, settings, newId, sourceId, runtimeIntent, raw.events)
