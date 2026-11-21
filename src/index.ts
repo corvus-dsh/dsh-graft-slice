@@ -8917,6 +8917,87 @@ export function extractToolResultText(event: SessionEventLike): string | undefin
 }
 
 /**
+ * ── B4-B B8: WHOSE LOG IS THIS, AND MAY THE CALLER READ IT? ──────────────────────────────────
+ *
+ * `graft_read_result` and `graft_search_history` take a `sourceSessionId` from the CALLER and call
+ * `ctx.sessionQuery.readSession(id)` on it. Their own description used to say the quiet part out loud —
+ * 「This bypasses cross-session tool authorization and reads the source log directly」 — so any caller
+ * holding any session id could read that session's whole log: user messages, tool output, diffs.
+ *
+ * The dispatch's remedy is a visibility rule. This layer already knows the one relationship it is
+ * entitled to use: a target's mark records the session it was sliced FROM (`sourceSessionId`), and a
+ * chain of moves records each hop. So 「may I read X」 is answered from the graft record, not from a
+ * claim in the arguments.
+ *
+ * THE ALLOWED SET, and why each entry is there:
+ *
+ *   - SELF. A session was itself the source of nothing, but its own log is obviously its own. This is
+ *     the case that keeps ordinary use working: a session reading its own earlier turns.
+ *   - ANCESTORS. `X` is the session this one was sliced from, or the source this one was cut from is
+ *     itself reachable transitively. A target's whole PURPOSE is to continue an earlier conversation;
+ *     refusing the lineage would break every slice that ever ran.
+ *
+ * EVERYTHING ELSE is refused. Not "refused with an audit line and allowed" — refused. The dispatch
+ * offered `allowCrossSession: true` as the softer option; it is not taken here because a boolean the
+ * caller supplies is the same self-signed permission the confirmation gate removed in v2.1.0: the
+ * party asking decides whether to ask.
+ *
+ * `generation` is bounded so a cycle in a corrupted store cannot hang the tool: the walk stops after a
+ * fixed number of hops and reports the refusal rather than looping.
+ */
+function graftLogVisibility(
+  callerSessionId: string,
+  claimedSourceId: string,
+): { ok: true; attributed: false; reason: 'unattributed'; detail: string } | { ok: true; attributed: true; reason: 'self' | 'ancestor'; detail: string } | { ok: false; reason: string; detail: string } {
+  if (claimedSourceId.length === 0) return { ok: false, reason: 'sourceSessionId is empty', detail: '' }
+  /**
+   * ── THE UNATTRIBUTABLE CASE, AND WHY IT PASSES — 用户裁定 2026-11-21 ─────────────────────────
+   *
+   * A host that does not populate `exec.agent.id` cannot say who is calling. Refusing there would
+   * switch the read-back feature off for that host entirely — measured: both existing tool-path tests
+   * call `execute(args, {})`, which is exactly that shape, and the dispatched `graft_read_result`
+   * would stop working for every legitimate reader on such a host.
+   *
+   * So it is ADMITTED and LABELLED, never silently equivalent to 「verified」: the result carries
+   * `logVisibility: 'unattributed'` and the text says the ownership was not checked. That is the same
+   * trade as the confirmation gate's `ownership: 'unattributed'` (B4-B B6), for the same reason —
+   * 「cannot check」 must be visible as its own state rather than collapsed into 「checked and fine」.
+   *
+   * What it does NOT do is pretend the id was validated: the caller still had to name it, and the
+   * refusal text below is what a host WITH an identity gets.
+   */
+  if (callerSessionId.length === 0) {
+    return {
+      ok: true,
+      attributed: false,
+      reason: 'unattributed',
+      detail: '宿主未提供调用方身份（exec.agent.id 缺失），无法证明这个会话 id 属于本会话；已放行，但归属未核实。',
+    }
+  }
+  if (claimedSourceId === callerSessionId) return { ok: true, attributed: true, reason: 'self', detail: '' }
+
+  const MAX_HOPS = 32
+  let current = callerSessionId
+  for (let hop = 0; hop < MAX_HOPS; hop += 1) {
+    const mark = graftTargets.get(current)
+    if (mark === undefined) break
+    const parent = typeof mark.sourceSessionId === 'string' ? mark.sourceSessionId : ''
+    if (parent.length === 0) break
+    if (parent === claimedSourceId) return { ok: true, attributed: true, reason: 'ancestor', detail: '' }
+    current = parent
+  }
+  return {
+    ok: false,
+    reason:
+      `拒绝读会话 ${claimedSourceId} 的日志：它不是本会话（${callerSessionId}）` +
+      '自己的会话，也不是本会话的切片来源链上的任何一个。graft 的读取只覆盖「我自己的历史」与' +
+      '「我的上游」——一份别人的会话日志里有它自己的用户原话与工具输出，不是本项目可以代读的东西。' +
+      '要在那个会话里回读，请在那个会话里调用。',
+    detail: '',
+  }
+}
+
+/**
  * v7.3: search a source session's log by substring or regular expression.
  *
  * Why this is the missing half of the "read it back by seq" design:
@@ -13443,6 +13524,15 @@ async function appendTransitionCard(
               additionalProperties: false,
             },
           },
+          /**
+           * B4-B B8: WHOSE LOG THIS WAS, as far as the layer could establish. `self` / `ancestor` are
+           * proven from the graft record; `unattributed` means the host did not name the caller, so the
+           * id was accepted without proof. The schema declares it because the tool output is
+           * `additionalProperties: false` — an undeclared field would be rejected by the host's own
+           * validator, which is how this project has lost diagnostics before.
+           */
+          logVisibility: { type: 'string' },
+          logVisibilityNote: { type: 'string' },
         },
         required: ['found', 'query', 'regex', 'totalMatches', 'totalHits', 'truncated', 'hits'],
         additionalProperties: false,
@@ -13475,16 +13565,35 @@ async function appendTransitionCard(
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
-    execute: async (args: any) => {
+    execute: async (args: any, exec: any) => {
       if (!isRecord(args)) throw graftError('INVALID_ARGUMENT', 'arguments must be an object')
       const rawLimit = args.limit === undefined ? 10 : args.limit
-      return graftSearchHistory(
+      /**
+       * B4-B B8 — the visibility rule runs BEFORE the read, so a refusal costs no log access and the
+       * caller learns whose log it could not open.
+       */
+      const visible = graftLogVisibility(
+        typeof exec?.agent?.id === 'string' ? exec.agent.id : '',
+        asNonEmptyString(args.sourceSessionId, 'sourceSessionId'),
+      )
+      if (!visible.ok) return { found: false, query: String(args.query ?? ''), regex: args.regex === true, totalMatches: 0, totalHits: 0, truncated: false, hits: [], error: visible.reason }
+      const searched = await graftSearchHistory(
         ctx,
         asNonEmptyString(args.sourceSessionId, 'sourceSessionId'),
         asNonEmptyString(args.query, 'query'),
         asSafeInteger(rawLimit, 'limit'),
         args.regex === true,
       )
+      /**
+       * B4-B B8 — CARRY THE ATTRIBUTION OUT. The search always returns a hit list; what it could not
+       * always do is prove the log was the caller's. That fact travels with the result so a reader is
+       * never told 「searched (and it was yours)」 when only the first half was established.
+       */
+      return {
+        ...searched,
+        logVisibility: visible.attributed ? visible.reason : 'unattributed',
+        ...(visible.attributed ? {} : { logVisibilityNote: visible.detail }),
+      }
     },
   })
 
@@ -13494,7 +13603,8 @@ async function appendTransitionCard(
       'Read one payload from a source session log by seq. Two pointer kinds are supported: a tool pointer ' +
       '(`[tool name=xx seq=YY ...]`) reads a tool/result, and a codeblock pointer (`[codeblock seq=YY lines=A-B]`) ' +
       'reads an assistant message. Pass `lineRange` for 1-based inclusive line access to an oversized body. ' +
-      'This bypasses cross-session tool authorization and reads the source log directly.',
+      'Only the calling session\'s OWN log and the sessions it was sliced from are readable: a log ' +
+      'carries its own user messages and tool output, so it is not another project\'s to read.',
     parameters: {
       type: 'object',
       properties: {
@@ -13541,6 +13651,9 @@ async function appendTransitionCard(
             required: ['start', 'end', 'totalLines'],
             additionalProperties: false,
           },
+          /** B4-B B8: same attribution report as `graft_search_history` — see the comment there. */
+          logVisibility: { type: 'string' },
+          logVisibilityNote: { type: 'string' },
         },
         required: ['found', 'seq', 'text', 'truncated', 'totalChars'],
         additionalProperties: false,
@@ -13568,21 +13681,46 @@ async function appendTransitionCard(
         ]
       },
     },
-    execute: async (args: any) => {
+    execute: async (args: any, exec: any) => {
       if (!isRecord(args)) throw graftError('INVALID_ARGUMENT', 'arguments must be an object')
+      /**
+       * B4-B B8 — SAME RULE AS `graft_search_history`, and it must be here rather than in the shared
+       * reader: `graftReadResult` is also called in-process by paths that legitimately hold a wider
+       * view (the harness reads any session it owns), so the boundary belongs to the TOOL, where the
+       * caller is a model rather than this layer.
+       */
+      const visible = graftLogVisibility(
+        typeof exec?.agent?.id === 'string' ? exec.agent.id : '',
+        asNonEmptyString(args.sourceSessionId, 'sourceSessionId'),
+      )
+      if (!visible.ok) {
+        /**
+         * `GraftReadResult` has no error channel, and that is a real constraint rather than an
+         * inconvenience: the renderer prints `text`. So a refusal answers `found: false` (the payload
+         * was NOT read) with the reason in `text` (why). Returning `text: null` would say 「nothing is
+         * there」, which is a different — and false — claim about a log this caller may not open.
+         */
+        return { found: false, seq: asSafeInteger(args.seq, 'seq'), text: visible.reason, truncated: false, totalChars: 0 }
+      }
       const range = isRecord(args.lineRange)
         ? {
             start: asSafeInteger(args.lineRange.start, 'lineRange.start'),
             end: asSafeInteger(args.lineRange.end, 'lineRange.end'),
           }
         : undefined
-      return graftReadResult(
+      const read = await graftReadResult(
         ctx,
         asNonEmptyString(args.sourceSessionId, 'sourceSessionId'),
         asSafeInteger(args.seq, 'seq'),
         100000,
         range,
       )
+      /** B4-B B8: same attribution report as the search tool — see the comment there. */
+      return {
+        ...read,
+        logVisibility: visible.attributed ? visible.reason : 'unattributed',
+        ...(visible.attributed ? {} : { logVisibilityNote: visible.detail }),
+      }
     },
   })
 
