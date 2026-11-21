@@ -713,6 +713,17 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 | **为什么 `pending` 可以覆盖日志** | 这是**唯一**一处「模型压过日志」的写入，且它是有理由的：`openTodos` 读的是模型**自己上一轮写的 `todo_write`** —— 那正是它此刻想更正的东西。压制**不静默**：列头标出来源，digest 覆盖 provenance，`review` 明说。 |
 | 退出条件（可验收） | ① 提供 `handover` 时，review 与 digest **都**反映它（且提供与不提供的 digest 不同）；② 不提供时行为**不变**（测试数字不变）；③ 一条能红测试：把 `pending` 写进 `handover`，断言看板「待开始」列出现它，且该条的来源标注为「模型提供」；④ 一条**反向**测试：`handover` 里不得存在能写进 `constraints` 的路径（结构性断言：schema 里没有该字段）。 |
 
+## TD-26 `sourceAgentPreset` 只判 `undefined`，值从未被使用（P1，2026-11-21 登记；跨仓契约）
+
+| 项 | 内容 |
+|---|---|
+| 现状 | `src/index.ts:8101` 定义 `sourceAgentPreset`，`:8276` 的唯一用法是 `...(sourceAgentPreset === undefined ? {} : { inheritFrom: sourceId })` —— **判的是「有没有」，传的是 `sourceId`，不是 preset**。 |
+| 同一个断言的另一半 | paradise `session-writer.ts:227-229` 确实用 `options.inheritFrom` 去 `readSourceRuntime`，所以 `inheritFrom` 这个通道是活的；活的是「按 id 读运行时」，而不是「按 preset 建目标」。 |
+| 后果（机制，不是猜测） | 目标会话**读不到源会话最后选中的 preset**。`sourceAgentPreset` 存在与否都不改变传给 paradise 的值 —— 也就是说「算过了」被当成了「用上了」。这与本批 §〇 第 16 条同族。 |
+| 为什么现在不动 | 它是**跨仓契约**：要改就得同时改 paradise 的 `readSourceRuntime` 接受 preset、改 header 写入、并新增一条断言「值真的进了目标 header」。一次改动跨两个仓，不属于任何单仓的「顺路」。 |
+| 退出条件（可验收） | ① 目标会话能读到「源会话最后选中的 preset」；② 一条测试断言**值真的进了目标 header**（不是「函数收到了参数」）；③ 两仓测试数字变化有说明。 |
+| 为什么用 `=== undefined` 而不是真值判断 | 这一条要说准：`inheritFrom` 的**存在性**由它决定，preset 的**内容**由别处决定。所以缺陷不是「写错了条件」，而是「这个字段算出来之后没有去处」。修法不是改条件，是给它一个去处。 |
+
 ## 本次发版（v0.22）**不做**的事
 
 - 不搬迁 `index.ts` 的任何大段代码（TD-1 / TD-2 / TD-6）。
