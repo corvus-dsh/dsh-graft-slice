@@ -77,6 +77,16 @@ const KINDS = new Map([
   ['check-readme-tally.mjs', 'GATE'],
   ['check-symbol-lookup.mjs', 'GATE'],
   ['check-test-separators.mjs', 'GATE'],
+  /**
+   * ── B4-0b-2 W5-1: TEST NUMBERS ARE A GATE, NOT A TIDINESS PREFERENCE ────────────────────────
+   *
+   * The dispatch reported two collisions (`v249`, `v253`). Measured across `test/`, there are 18
+   * shared numbers, `v74` twelve times among them — so 「make them all unique」 is a mass rename of
+   * filenames cited in commit messages and TD entries, and the rename would cause more error than
+   * the collision. The gate therefore BASELINES the stock and refuses growth, which is exactly the
+   * shape of `check-readme-counts`. It asserts (exit 1), so it is a GATE and must be a CI step.
+   */
+  ['check-test-numbers.mjs', 'GATE'],
   ['verify-bundle.mjs', 'GATE'],
   ['run-gate.mjs', 'GATE'],
   ['v140-audit', 'GATE'],

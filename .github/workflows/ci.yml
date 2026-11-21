@@ -137,6 +137,19 @@ jobs:
       - name: Documentation counts match the code
         run: node scripts/check-readme-counts.mjs
 
+      # ── TEST NUMBERS ARE UNIQUE WITHIN A REPOSITORY ──────────────────────────────────────────────
+      #
+      # Measured 2026-11-21 (B4-0b-2 W5-1): this repository already shares 18 numbers between files
+      # (`v74` twelve times, `v73` four, `v018` four, `v249` twice, `v253` twice …). Renaming them all
+      # would be a mass rename of filenames that commit messages, reports and TD entries cite, so the
+      # gate BASELINES what exists and refuses any NEW collision — the same shape as the count gates
+      # above: the stock is recorded, the growth is refused.
+      #
+      # It also refuses a baseline that is LARGER than reality, because that leaves silent headroom in
+      # which the next file can join an already-shared number and stay under the ceiling.
+      - name: Test numbers unique within this repository (no NEW collision)
+        run: node scripts/check-test-numbers.mjs
+
       # ── check-docs WAS THE ONE GATE NOBODY RAN ───────────────────────────────────────────────────
       #
       # Measured on N2: moving the command policy layer into `core/command-policy.ts` made
