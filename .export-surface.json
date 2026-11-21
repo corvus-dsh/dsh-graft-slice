@@ -135,6 +135,7 @@
     "isGraftAuthored",
     "isHumanAuthored",
     "isIgnitionText",
+    "isLegacyHandoverEntryForTest",
     "isProcessAlive",
     "isRetired",
     "ledgerDefectOf",
@@ -218,6 +219,6 @@
     "writeLayoutManifest",
     "writeManualConstraints"
   ],
-  "count": 217,
-  "note": "baseline updated by a declared [export-change] (COMMIT 30a1f60 \"fix(graft): 归一化收窄到唯一产出那句话的 chunk（W1-8b）\" (tree clean over src, index.js))"
+  "count": 218,
+  "note": "baseline updated by a declared [export-change] (COMMIT 04bf922 \"fix(graft): the approved handover now reaches the tape — it was never persisted\" (tree clean over src, index.js))"
 }
