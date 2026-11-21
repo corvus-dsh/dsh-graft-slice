@@ -150,6 +150,19 @@ jobs:
       - name: Test numbers unique within this repository (no NEW collision)
         run: node scripts/check-test-numbers.mjs
 
+      # ── THE TWO LISTS MUST NOT DRIFT ────────────────────────────────────────────────────────────
+      #
+      # `package.json`'s `check` and this file are two lists maintained separately. Measured 2026-11-21
+      # across the four repositories, the drift had already happened three times (memory's
+      # `check-cycles` and `check-frontmatter-reads`, observer's `preflight`). The gate compares them;
+      # build steps are exempt BY NAME.
+      #
+      # It also refuses to be satisfied by a COMMENT: the first version expanded `npm run <script>`
+      # through package.json without stripping comments, and a comment in memory's ci.yml mentioning
+      # `npm run check` made the whole chain look wired. Measured both ways before and after.
+      - name: check parity (every local gate is also a CI step)
+        run: node scripts/check-check-parity.mjs
+
       # ── check-docs WAS THE ONE GATE NOBODY RAN ───────────────────────────────────────────────────
       #
       # Measured on N2: moving the command policy layer into `core/command-policy.ts` made

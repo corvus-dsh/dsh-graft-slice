@@ -87,6 +87,16 @@ const KINDS = new Map([
    * shape of `check-readme-counts`. It asserts (exit 1), so it is a GATE and must be a CI step.
    */
   ['check-test-numbers.mjs', 'GATE'],
+  /**
+   * ── B4-0b-2 五形态之二「门禁不咬」: THE TWO LISTS MUST NOT DRIFT ────────────────────────────
+   *
+   * `package.json`'s `check` and `ci.yml` are two lists kept separately, and the drift had already
+   * happened: measured 2026-11-21 across the four repositories, memory's `check-cycles` and
+   * `check-frontmatter-reads` and observer's `preflight` all ran locally and never on a push. It
+   * asserts (exit 1), so it is a GATE and must be a CI step — which is what it checks about others,
+   * so the rule is applied to itself with no exemption.
+   */
+  ['check-check-parity.mjs', 'GATE'],
   ['verify-bundle.mjs', 'GATE'],
   ['run-gate.mjs', 'GATE'],
   ['v140-audit', 'GATE'],
