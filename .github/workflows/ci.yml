@@ -150,6 +150,19 @@ jobs:
       - name: Test numbers unique within this repository (no NEW collision)
         run: node scripts/check-test-numbers.mjs
 
+      # ── EVERY `PreparedSlice` FIELD MUST SURVIVE `loadPrepared` ────────────────────────────────
+      #
+      # B4-B B1b. The same defect happened TWICE: `chunks` (v7.4) and `handover` (B4-B B1) were both
+      # declared on the interface, written to disk, and then dropped by the field-by-field
+      # reconstruction in `loadPrepared`. Between the two, the loader's own comment acquired a warning
+      # about exactly this — and `handover` was still missed, because a comment must be read by the
+      # person adding a field, in a file they are not editing.
+      #
+      # The gate compares `interface PreparedSlice` against `preparedSlices.set(id, { … })` and names
+      # any field the loader would throw away.
+      - name: PreparedSlice fields all survive the loader
+        run: node scripts/check-prepared-slice-fields.mjs
+
       # ── THE TWO LISTS MUST NOT DRIFT ────────────────────────────────────────────────────────────
       #
       # `package.json`'s `check` and this file are two lists maintained separately. Measured 2026-11-21

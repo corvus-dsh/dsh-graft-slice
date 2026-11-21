@@ -97,6 +97,15 @@ const KINDS = new Map([
    * so the rule is applied to itself with no exemption.
    */
   ['check-check-parity.mjs', 'GATE'],
+  /**
+   * ── B4-B B1b: A FIELD DECLARED AND THEN THROWN AWAY ─────────────────────────────────────────
+   *
+   * The same defect twice: `chunks` (v7.4) and `handover` (B4-B B1) were declared on `PreparedSlice`,
+   * written to disk, and dropped by `loadPrepared`'s field-by-field reconstruction. The second one
+   * shipped WITH a comment warning about the first — which is why this is a check and not a comment.
+   * It asserts (exit 1), so it is a GATE.
+   */
+  ['check-prepared-slice-fields.mjs', 'GATE'],
   ['verify-bundle.mjs', 'GATE'],
   ['run-gate.mjs', 'GATE'],
   ['v140-audit', 'GATE'],
