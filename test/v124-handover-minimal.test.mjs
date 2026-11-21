@@ -104,10 +104,19 @@ test('TD-11: the digest covers handover EXPLICITLY, not only through the chunks'
 test('TD-11: the schema declares pending and notes, and NEITHER constraints NOR goal', () => {
   // The structural half of the ruling: a future edit that adds `constraints` to the schema has to
   // change this test, i.e. it cannot be a quiet addition.
-  const at = SRC.indexOf('        handover: {')
-  assert.ok(at > 0, 'the graft_prepare schema must declare handover')
-  const propsAt = SRC.indexOf('          properties: {', at)
-  const propsEnd = SRC.indexOf('          additionalProperties: false,', propsAt)
+  //
+  // ANCHORED TO THE TOOL, NOT TO INDENTATION. This used to search for `'        handover: {'` — eight
+  // spaces — and `indexOf` matches that as a SUBSTRING of a ten-space line too. When B0 made the
+  // prepare reply spread `handover: {` at ten spaces (7353), the search started matching THERE and the
+  // extracted region became the `ignition`/`review` schema instead, so the test failed while the
+  // schema was perfectly intact. Anchoring on `name: 'graft_prepare'` makes the extraction depend on
+  // WHERE the tool is, which is what the assertion is actually about.
+  const toolAt = SRC.indexOf("name: 'graft_prepare'")
+  assert.ok(toolAt > 0, 'graft_prepare must be registered')
+  const at = SRC.indexOf('handover: {', toolAt)
+  assert.ok(at > toolAt, 'the graft_prepare schema must declare handover')
+  const propsAt = SRC.indexOf('properties: {', at)
+  const propsEnd = SRC.indexOf('additionalProperties: false,', propsAt)
   const props = SRC.slice(propsAt, propsEnd)
   assert.match(props, /^\s*pending:\s*\{/mu, 'pending must be declared')
   assert.match(props, /^\s*notes:\s*\{/mu, 'notes must be declared')

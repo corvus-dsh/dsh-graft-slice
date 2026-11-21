@@ -7320,7 +7320,41 @@ export async function prepareSlice(
      * blank-line filtering happens at RENDER time, where the same input always produces the same
      * output.
      */
-    handover: handover === undefined ? undefined : { pending: handover.pending, notes: handover.notes },
+    /**
+     * ── B4-B B0: AN OWN `undefined` KEY IS NOT LOSSLESS JSON ────────────────────────────────────
+     *
+     * Two ways this shape broke the tool, both found by the same probe:
+     *
+     *   1. `handover === undefined ? undefined : …` — the ordinary call (no handover) produced an own
+     *      `undefined` key. `JSON.stringify` DROPS such a property, so it looked fine everywhere a
+     *      test could see it, but the host validates tool return values as LOSSLESS JSON and
+     *      `undefined` is an unrepresentable node ⇒ the whole reply was rejected.
+     *   2. `{ pending: handover.pending, notes: handover.notes }` — even WITH a handover, a call that
+     *      supplied only one of the two lists rebuilt the other as an own `undefined`
+     *      (measured: `$.handover.notes = undefined`).
+     *
+     * MEASURED before/after (real apply + real execute, then the host's own rule applied):
+     *
+     *     without handover -> own key, typeof undefined, $.handover = undefined          ← ILLEGAL
+     *     with `{pending}` -> $.handover.notes = undefined                               ← ILLEGAL
+     *
+     * CONSEQUENCE, and why this outranks the security items: `graft_prepare` is the only legal exit
+     * after a nudge. With it failing, the model's only remaining route is `graft_slice_and_inject` —
+     * so a non-security bug silently BYPASSED the entire two-stage approval.
+     *
+     * THE FIX IS THE SPREAD, NOT A NULL: `handover: null` would be legal JSON and would also be a lie —
+     * it says 「a handover was supplied and its content is null」, which `handoverSupplied` exists
+     * precisely to distinguish. Absence must be an ABSENT KEY, and each inner list must be absent
+     * rather than present-and-undefined.
+     */
+    ...(handover === undefined
+      ? {}
+      : {
+          handover: {
+            ...(handover.pending === undefined ? {} : { pending: handover.pending }),
+            ...(handover.notes === undefined ? {} : { notes: handover.notes }),
+          },
+        }),
     handoverSupplied,
     // v7.4: keep the chunk bodies so commit can tell a stale TAIL (expected while
     // the session slices itself) from a changed HISTORY (a real reason to refuse).
