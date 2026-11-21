@@ -1630,6 +1630,28 @@ window.__ModuleLoader__.load({
             onChange: (next) => write('growthTokensPerTurn', next),
             disabled: !canWrite,
           }),
+          /**
+           * ── W6-1: `growthReserveTurns` WAS IN THE WRITABLE SET AND ABSENT FROM THIS PANEL ─────
+           *
+           * Measured 2026-11-21: `CONSOLE_INTEGER_KEYS` declares `growthReserveTurns` (0–50) and the
+           * Host reports it in `config`, but this file had **one** occurrence of the name — inside
+           * `fallbackState`'s defaults. So it was displayed nowhere and adjustable only by typing
+           * `/graft-console-set growthReserveTurns N`. That is worse than a missing feature: the panel
+           * showed a threshold derived FROM this number without showing the number.
+           *
+           * The hint names what it changes, because the two knobs multiply into the same decision:
+           * predicted growth per turn × turns of reserve is the headroom the watermark reserves.
+           */
+          h(NumberRow, {
+            key: 'gr',
+            label: '预留轮数（growthReserveTurns）',
+            hint: '按几轮的增量预留余量；与「增长预测」相乘决定切点前要留出的空间',
+            value: config ? config.growthReserveTurns : 3,
+            min: 0,
+            max: 50,
+            onChange: (next) => write('growthReserveTurns', next),
+            disabled: !canWrite,
+          }),
           h('p', { key: 'derived', className: 'gc-sub', style: { margin: '10px 0 0' } },
             thresholds
               ? `当前推导：强制线 ${(num(thresholds.hardAt, 0.75) * 100).toFixed(2)}% · 提示线 ${(num(thresholds.warnAt, 0.7) * 100).toFixed(2)}%` +
