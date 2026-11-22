@@ -122,6 +122,9 @@ export interface GraftConfig {
    * of is not "late", it is impossible.
    */
   watermarkMode?: 'fixed' | 'dynamic'
+  /** USER-REQUESTED: the band `dynamic` derives within (absent ⇒ the module constants, unchanged). */
+  watermarkFloor?: number
+  watermarkCeiling?: number
   /** v0.18: measured turns used to predict growth. Default 6. */
   growthSampleTurns?: number
   /** v0.18: how many turns of growth headroom `dynamic` reserves. Default 2. */

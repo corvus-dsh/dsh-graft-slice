@@ -890,6 +890,18 @@ export interface GraftReadResult {
  * learn what happens when a field is omitted), so they should be testable without
  * constructing a whole migration.
  */
+/**
+ * A ratio that must land strictly inside (0, 1); anything else falls back to `fallback`.
+ *
+ * Distinct from `clampRatio` on purpose: clamping 「1.5」 to 1 would turn a typo into a legal-but-absurd
+ * threshold. A value the operator typed wrong is better replaced by the default than honoured.
+ */
+function asRatioInRange(value: unknown, fallback: number): number {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 1) return fallback
+  return Math.round(parsed * 100) / 100
+}
+
 export function normalizeConfig(config: GraftConfig | undefined): Required<GraftConfig> {
   const input = isRecord(config) ? config : {}
   return {
@@ -942,6 +954,16 @@ export function normalizeConfig(config: GraftConfig | undefined): Required<Graft
     safetyMode:
       input.safetyMode === 'strict' || input.safetyMode === 'autonomous' ? input.safetyMode : 'balanced',
     watermarkMode: input.watermarkMode === 'fixed' ? 'fixed' : 'dynamic',
+    /**
+     * USER-REQUESTED: the band `dynamic` derives within, now selectable instead of hard-coded.
+     *
+     * Defaults are materialised HERE because `normalizeConfig` promises `Required<GraftConfig>` — the
+     * signature already decided that 「absent」 and 「the default」 are the same value by the time a caller
+     * sees it. The numbers are the constants `calculateSafeWatermark` used before this key existed, so
+     * an operator who never touches them gets byte-identical behaviour.
+     */
+    watermarkFloor: asRatioInRange(input.watermarkFloor, 0.5),
+    watermarkCeiling: asRatioInRange(input.watermarkCeiling, 0.75),
     growthSampleTurns: asFiniteInteger(input.growthSampleTurns, 6, 'growthSampleTurns'),
     growthReserveTurns: asFiniteInteger(input.growthReserveTurns, 2, 'growthReserveTurns'),
     growthTokensPerTurn: asFiniteInteger(input.growthTokensPerTurn, DEFAULT_GROWTH_TOKENS_PER_TURN, 'growthTokensPerTurn'),
@@ -11388,7 +11410,17 @@ export const CONSOLE_BOOLEAN_KEYS = ['modelDrivenGraft', 'autoGraft', 'workspace
  * write to the wrong row — the exact failure this batch keeps finding.
  */
 export const CONSOLE_HOST_COMPACTION_KEY = 'hostAutoCompaction'
-export const CONSOLE_RATIO_KEYS = ['modelDrivenGraftAtRatio', 'autoGraftAtRatio'] as const
+/**
+ * USER-REQUESTED: `watermarkFloor` / `watermarkCeiling` are the dynamic band. They are ratios, so they
+ * belong in this list and get the same (0,1) validation — including the refusal of the two ends, which is
+ * what keeps 「0」 from meaning 「cut immediately」 and 「1」 from meaning 「never」.
+ */
+export const CONSOLE_RATIO_KEYS = [
+  'modelDrivenGraftAtRatio',
+  'autoGraftAtRatio',
+  'watermarkFloor',
+  'watermarkCeiling',
+] as const
 /**
  * v0.18: the enumerated knobs. Adding them here is what keeps the v0.18 policy and
  * watermark modes switchable from the panel — a mode that can only be changed by

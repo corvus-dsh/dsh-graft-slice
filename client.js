@@ -1619,6 +1619,33 @@ window.__ModuleLoader__.load({
             onChange: (next) => write('autoGraftAtRatio', next),
             disabled: !canWrite,
           }),
+          /**
+           * ── USER-REQUESTED: THE DYNAMIC BAND, ADJUSTABLE ───────────────────────────────────────────
+           *
+           * `dynamic` mode ignores the two ratios above and derives its cutoff from the window and the
+           * handoff cost — but it derived it inside `[0.5, 0.75]`, constants nothing could move, while the
+           * panel offered sliders for the fixed pair only. These two are that band.
+           *
+           * The hint says WHICH mode they apply to, because the four sliders now look alike and only two
+           * of them matter in any given mode. A control whose effect depends on another control's value,
+           * with nothing on screen saying so, is how an operator concludes the slider is broken.
+           */
+          h(Ratio, {
+            key: 'floor',
+            label: '动态下限（watermarkFloor）',
+            hint: '仅动态模式生效：推导出的强制线不会低于此值。默认 0.50',
+            value: config && typeof config.watermarkFloor === 'number' ? config.watermarkFloor : 0.5,
+            onChange: (next) => write('watermarkFloor', next),
+            disabled: !canWrite || (config !== null && config.watermarkMode === 'fixed'),
+          }),
+          h(Ratio, {
+            key: 'ceiling',
+            label: '动态上限（watermarkCeiling）',
+            hint: '仅动态模式生效：推导出的强制线不会高于此值。默认 0.75',
+            value: config && typeof config.watermarkCeiling === 'number' ? config.watermarkCeiling : 0.75,
+            onChange: (next) => write('watermarkCeiling', next),
+            disabled: !canWrite || (config !== null && config.watermarkMode === 'fixed'),
+          }),
         ]),
         h('div', { key: 'modes', className: 'gc-card' }, [
           h('h3', { key: 'h', className: 'gc-h' }, '模式与容量（v0.18）'),

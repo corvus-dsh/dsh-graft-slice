@@ -29,6 +29,14 @@ export interface WatermarkSettings {
   contextWindowTokens: number
   growthTokensPerTurn: number
   growthReserveTurns: number
+  /**
+   * USER-REQUESTED: the band `dynamic` mode derives within.
+   *
+   * Optional so every existing caller (and every test that builds a settings object by hand) keeps
+   * working — absent means the module constants, which is exactly the behaviour that shipped.
+   */
+  watermarkFloor?: number
+  watermarkCeiling?: number
 }
 
 export function deriveAutoTapeBudget(contextWindow: number, ratio = 0.5): number {
@@ -258,7 +266,23 @@ export function effectiveWatermarks(
       reserveTurns: settings.growthReserveTurns,
     },
   )
-  const thresholds = calculateSafeWatermark(cost.windowLimit, cost.totalTokens)
+  /**
+   * ── USER-REQUESTED (P0): THE DYNAMIC RANGE MUST BE SELECTABLE FROM THE PANEL ────────────────────
+   *
+   * `calculateSafeWatermark` has accepted `hardFloor` / `hardCeiling` since it was written, and NOTHING
+   * ever passed them: both fell through to the module constants (0.5 / 0.75). So 「动态水位」 was derived
+   * inside a fixed band the operator could not see, let alone move — while the panel offered sliders for
+   * the FIXED pair and nothing for this one.
+   *
+   * The two settings below are the band itself. They are passed through verbatim; the clamp inside
+   * `calculateSafeWatermark` still applies, so an inverted pair cannot produce `warnAt > hardAt` — it
+   * produces the floor/ceiling the clamp enforces, and the panel shows the resulting pair so the operator
+   * can see that their band was impossible rather than silently ignored.
+   */
+  const thresholds = calculateSafeWatermark(cost.windowLimit, cost.totalTokens, {
+    hardFloor: settings.watermarkFloor,
+    hardCeiling: settings.watermarkCeiling,
+  })
   return { ...thresholds, growthReserveTokens: cost.growthReserveTokens }
 }
 

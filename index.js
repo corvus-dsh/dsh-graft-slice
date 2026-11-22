@@ -199,6 +199,14 @@ function formatAuditLine(entry                 , pid        )         {
                              
                              
                             
+     
+                                                            
+    
+                                                                                                   
+                                                                                              
+     
+                         
+                           
  
 
 function deriveAutoTapeBudget(contextWindow        , ratio = 0.5)         {
@@ -428,7 +436,23 @@ function effectiveWatermarks(
       reserveTurns: settings.growthReserveTurns,
     },
   )
-  const thresholds = calculateSafeWatermark(cost.windowLimit, cost.totalTokens)
+  /**
+   * ── USER-REQUESTED (P0): THE DYNAMIC RANGE MUST BE SELECTABLE FROM THE PANEL ────────────────────
+   *
+   * `calculateSafeWatermark` has accepted `hardFloor` / `hardCeiling` since it was written, and NOTHING
+   * ever passed them: both fell through to the module constants (0.5 / 0.75). So 「动态水位」 was derived
+   * inside a fixed band the operator could not see, let alone move — while the panel offered sliders for
+   * the FIXED pair and nothing for this one.
+   *
+   * The two settings below are the band itself. They are passed through verbatim; the clamp inside
+   * `calculateSafeWatermark` still applies, so an inverted pair cannot produce `warnAt > hardAt` — it
+   * produces the floor/ceiling the clamp enforces, and the panel shows the resulting pair so the operator
+   * can see that their band was impossible rather than silently ignored.
+   */
+  const thresholds = calculateSafeWatermark(cost.windowLimit, cost.totalTokens, {
+    hardFloor: settings.watermarkFloor,
+    hardCeiling: settings.watermarkCeiling,
+  })
   return { ...thresholds, growthReserveTokens: cost.growthReserveTokens }
 }
 
@@ -10031,6 +10055,18 @@ export { isGraftAuthored, isHumanAuthored }
  * learn what happens when a field is omitted), so they should be testable without
  * constructing a whole migration.
  */
+/**
+ * A ratio that must land strictly inside (0, 1); anything else falls back to `fallback`.
+ *
+ * Distinct from `clampRatio` on purpose: clamping 「1.5」 to 1 would turn a typo into a legal-but-absurd
+ * threshold. A value the operator typed wrong is better replaced by the default than honoured.
+ */
+function asRatioInRange(value         , fallback        )         {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed >= 1) return fallback
+  return Math.round(parsed * 100) / 100
+}
+
 export function normalizeConfig(config                         )                        {
   const input = isRecord(config) ? config : {}
   return {
@@ -10083,6 +10119,16 @@ export function normalizeConfig(config                         )                
     safetyMode:
       input.safetyMode === 'strict' || input.safetyMode === 'autonomous' ? input.safetyMode : 'balanced',
     watermarkMode: input.watermarkMode === 'fixed' ? 'fixed' : 'dynamic',
+    /**
+     * USER-REQUESTED: the band `dynamic` derives within, now selectable instead of hard-coded.
+     *
+     * Defaults are materialised HERE because `normalizeConfig` promises `Required<GraftConfig>` — the
+     * signature already decided that 「absent」 and 「the default」 are the same value by the time a caller
+     * sees it. The numbers are the constants `calculateSafeWatermark` used before this key existed, so
+     * an operator who never touches them gets byte-identical behaviour.
+     */
+    watermarkFloor: asRatioInRange(input.watermarkFloor, 0.5),
+    watermarkCeiling: asRatioInRange(input.watermarkCeiling, 0.75),
     growthSampleTurns: asFiniteInteger(input.growthSampleTurns, 6, 'growthSampleTurns'),
     growthReserveTurns: asFiniteInteger(input.growthReserveTurns, 2, 'growthReserveTurns'),
     growthTokensPerTurn: asFiniteInteger(input.growthTokensPerTurn, DEFAULT_GROWTH_TOKENS_PER_TURN, 'growthTokensPerTurn'),
@@ -20513,7 +20559,17 @@ export const CONSOLE_BOOLEAN_KEYS = ['modelDrivenGraft', 'autoGraft', 'workspace
  * write to the wrong row — the exact failure this batch keeps finding.
  */
 export const CONSOLE_HOST_COMPACTION_KEY = 'hostAutoCompaction'
-export const CONSOLE_RATIO_KEYS = ['modelDrivenGraftAtRatio', 'autoGraftAtRatio']         
+/**
+ * USER-REQUESTED: `watermarkFloor` / `watermarkCeiling` are the dynamic band. They are ratios, so they
+ * belong in this list and get the same (0,1) validation — including the refusal of the two ends, which is
+ * what keeps 「0」 from meaning 「cut immediately」 and 「1」 from meaning 「never」.
+ */
+export const CONSOLE_RATIO_KEYS = [
+  'modelDrivenGraftAtRatio',
+  'autoGraftAtRatio',
+  'watermarkFloor',
+  'watermarkCeiling',
+]         
 /**
  * v0.18: the enumerated knobs. Adding them here is what keeps the v0.18 policy and
  * watermark modes switchable from the panel — a mode that can only be changed by

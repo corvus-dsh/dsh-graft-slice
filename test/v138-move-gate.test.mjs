@@ -293,7 +293,14 @@ test('v138: the declaration parser reproduces independently-known spans', (t) =>
   const report = gateJson('GraftConfig')
   const config = report.A.measured.declarations.find((entry) => entry.name === 'GraftConfig')
   assert.ok(config !== undefined, 'GraftConfig must be FOUND — the first bug made it vanish')
-  assert.equal(config.lines, 288, 'the cluster is 288 lines wherever it lives')
+  /**
+   * 291, MEASURED BY THE GATE ITSELF (`node scripts/move-gate.mjs --cluster GraftConfig`), not counted by
+   * hand. It was 288 before the two `watermarkFloor` / `watermarkCeiling` fields were added (the dynamic
+   * band the user asked to make selectable). The number is an ANCHOR, not a target: its job is to prove the
+   * parser found the same span the compiler reports, so it must be updated from the parser's own output —
+   * editing it to whatever makes the test green would destroy exactly that property.
+   */
+  assert.equal(config.lines, 291, 'the cluster is 291 lines wherever it lives')
   assert.equal(config.kind, 'InterfaceDeclaration',
     'the compiler names the kind; a type still compiles to nothing, which is why the move is artifact-zero')
 
@@ -352,7 +359,7 @@ test('v138: tier A really measures against 800 — and refuses what it cannot fi
   const small = gateJson('GraftConfig')
   assert.equal(small.A.verdict, 'YES')
   assert.equal(small.A.measured.cap, 800, 'the cap must be reported, not assumed')
-  assert.equal(small.A.measured.moduleLines, 288)
+  assert.equal(small.A.measured.moduleLines, 291)
 
   const gateSource = readFileSync(GATE, 'utf8')
   assert.match(gateSource, /const aVerdict = spans\.length > 0 && moduleLines <= 800/u,
@@ -392,7 +399,7 @@ test('v138: a cluster that already moved is still found — in its own module, b
   const span = report.A.measured.declarations.find((entry) => entry.name === 'GraftConfig')
   assert.ok(span !== undefined)
   assert.equal(span.file, 'core/graft-config.ts', 'the gate must report WHERE it found the cluster')
-  assert.equal(span.lines, 288)
+  assert.equal(span.lines, 291)
   assert.equal(report.A.verdict, 'YES')
 })
 
