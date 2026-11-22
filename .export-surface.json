@@ -3,6 +3,7 @@
     "BOARD_TRAILER",
     "CONSOLE_BOOLEAN_KEYS",
     "CONSOLE_ENUM_KEYS",
+    "CONSOLE_HOST_COMPACTION_KEY",
     "CONSOLE_INTEGER_KEYS",
     "CONSOLE_PATCH_ID",
     "CONSOLE_RATIO_KEYS",
@@ -219,6 +220,6 @@
     "writeLayoutManifest",
     "writeManualConstraints"
   ],
-  "count": 218,
-  "note": "baseline updated by a declared [export-change] (COMMIT 04bf922 \"fix(graft): the approved handover now reaches the tape — it was never persisted\" (tree clean over src, index.js))"
+  "count": 219,
+  "note": "baseline updated by a declared [export-change] (COMMIT b326f7f \"chore(export): declare the new CONSOLE_HOST_COMPACTION_KEY export [export-change]\" (tree clean over src, index.js))"
 }
