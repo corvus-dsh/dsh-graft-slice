@@ -19315,6 +19315,48 @@ function isConfirmAffirmative(text        )          {
   return /^(确认|确定|同意|好|可以|是|yes|y|ok|sure|go|proceed|continue|doit)$/iu.test(normalized)
 }
 
+/**
+ * ── v8.x B11b (P0): ONE PLACE DECIDES 「IS THIS SESSION SUPPRESSED」 ─────────────────────────────
+ *
+ * The window used to be read in THREE places with three different conclusions:
+ *
+ *   · `autoGraftIfNeeded`      read it and returned `undefined` — the same `undefined` it returns for
+ *                              「no watermark」, 「in flight」, 「chain guard」, 「deferred」, 「open turn」
+ *                              and 「autoGraft off」. Eight different outcomes, one value.
+ *   · the confirm branch       read it (B11) and returned `undefined` on its own.
+ *   · the force-cut branch     did NOT read it, and treated `autoGraftIfNeeded`'s `undefined` as
+ *                              「auto graft produced no target」 ⇒ throw ⇒ rollback ⇒ a WARN saying
+ *                              「failed and rolled back」, EVERY STEP, for as long as the window held.
+ *
+ * The user-visible result was a session reporting failure after failure while nothing had been
+ * attempted: `INFO suppressed` immediately followed by `WARN failed and rolled back`, every step, with
+ * a ledger write each time. The window was working; the CALLER could not tell 「not tried」 from
+ * 「tried and failed」, because the return type said they were the same thing.
+ *
+ * So the decision is one function, and it is asked BEFORE anything is retired:
+ * `isAutoGraftSuppressed` answers yes/no and is the only reader. Expiry deletes the record here too,
+ * so the two former readers cannot drift on when the window is over.
+ */
+function autoGraftSuppression(
+  ctx                   ,
+  sessionId        ,
+)                                         {
+  const until = autoGraftSuppressedUntil.get(sessionId)
+  if (until === undefined) return { suppressed: false, until: 0 }
+  if (Date.now() < until) return { suppressed: true, until }
+  autoGraftSuppressedUntil.delete(sessionId)
+  try {
+    persistAutoGraftSuppression(ctx, [sessionId])
+  } catch {
+    // A stale record only suppresses one more attempt; not worth failing a step over.
+  }
+  return { suppressed: false, until }
+}
+
+function isAutoGraftSuppressed(ctx                   , sessionId        )          {
+  return autoGraftSuppression(ctx, sessionId).suppressed
+}
+
 async function autoGraftIfNeeded(
   ctx                   ,
   settings                       ,
@@ -19383,20 +19425,15 @@ async function autoGraftIfNeeded(
   // the user says one sentence, and the watermark — still ≥0.75 because the log
   // never shrank — grafts it straight back into a NEW target and retires it
   // again. From the user's side the undo simply does not work.
-  const suppressedUntil = autoGraftSuppressedUntil.get(sourceSessionId)
-  if (suppressedUntil !== undefined) {
-    if (Date.now() < suppressedUntil) {
-      ctx.logger?.info?.(
-        `[dsh-graft-slice] auto-graft suppressed for a resumed session ${sourceSessionId} until ${new Date(suppressedUntil).toISOString()}`,
-      )
-      return undefined
-    }
-    autoGraftSuppressedUntil.delete(sourceSessionId)
-    try {
-      persistAutoGraftSuppression(ctx, [sourceSessionId])
-    } catch {
-      // A stale record only suppresses once more; it is not worth failing here.
-    }
+  //
+  // v8.x B11b: the decision (and the expiry) lives in `isAutoGraftSuppressed`, so this reader and the
+  // force-cut caller cannot disagree about when the window is over.
+  const suppression = autoGraftSuppression(ctx, sourceSessionId)
+  if (suppression.suppressed) {
+    ctx.logger?.info?.(
+      `[dsh-graft-slice] auto-graft suppressed for a resumed session ${sourceSessionId} until ${new Date(suppression.until).toISOString()}`,
+    )
+    return undefined
   }
   autoGraftInFlight.add(sourceSessionId)
   try {
@@ -20081,6 +20118,45 @@ async function governedWatermarks(
  
 
 /**
+ * ── v8.x TD-27 / TD-28 (P1): A ONE-LINE EXPLANATION OF WHERE THIS ROW'S THRESHOLD CAME FROM ─────
+ *
+ * The panel printed two numbers (`warnAt` / `hardAt`) that are NOT configuration: each session's
+ * window is its own, and the compaction ceiling can pull both down further. Two rows with different
+ * numbers therefore looked like an arithmetic bug instead of what they are.
+ *
+ * Pure and passed-in, like `collectDebugStatus`: the caller owns the derivation, this only states it.
+ * The strings are deliberately distinguishable — `conservative` must never read like `computed`,
+ * which is TD-27's criterion ②.
+ */
+function summariseThresholdReason(
+  thresholds                                                             ,
+  compaction                               ,
+)         {
+  const parts           = []
+  if (thresholds.warnMargin !== undefined) {
+    parts.push(
+      thresholds.warnMargin.source === 'tokens'
+        ? `warn 边距由 token 预算得出（${thresholds.warnMargin.marginTokens ?? '?'} tokens）`
+        : `warn 边距回落到比例常量${
+            thresholds.warnMargin.fallbackReason === undefined
+              ? ''
+              : `（${thresholds.warnMargin.fallbackReason === 'window-unreadable' ? '窗口读不出' : '边距超过窗口'}）`
+          }`,
+    )
+  }
+  if (compaction !== undefined && compaction.present) {
+    parts.push(
+      compaction.source === 'computed'
+        ? `压缩阈值 ${compaction.thresholdRatio === undefined ? '?' : compaction.thresholdRatio.toFixed(3)} 可读，硬阈值被压到 ${compaction.effectiveHardAt.toFixed(3)}`
+        : compaction.source === 'conservative'
+          ? `压缩阈值算不出来 ⇒ 落到保守值 ${compaction.effectiveHardAt.toFixed(3)}（RESOURCE 条件，不是通过）`
+          : `宿主压缩关闭 ⇒ 硬阈值 ${compaction.effectiveHardAt.toFixed(3)}`,
+    )
+  }
+  return parts.length === 0 ? '本窗仅由配置推导（无压缩天花板信息）' : parts.join('；')
+}
+
+/**
  * v0.14: the debug panel payload. Pure: every fact is passed in, so the same
  * function serves the tool (live data) and `scripts/debug-status.mjs` (disk only).
  */
@@ -20483,6 +20559,17 @@ export const CONSOLE_PATCH_ID = 'dsh-graft-slice'
                                                                             
                 
                 
+     
+                                                                                                   
+    
+                                                                                                    
+                                                                                                      
+                                                                                              
+     
+                         
+                            
+                                 
+                                   
  
 
                                     
@@ -21413,38 +21500,44 @@ async function appendTransitionCard(
             ? undefined
             : await governedWatermarks(stableCtx, settings, agentId, watermark, ctx.logger)
         if (watermark !== undefined && thresholds !== undefined && watermark.ratio >= thresholds.hardAt) {
+          /**
+           * ── v8.x B11b (P0): ASK BEFORE RETIRING, NOT AFTER FAILING ───────────────────────────────
+           *
+           * The force-cut path used to retire the session, call `autoGraftIfNeeded`, and treat its
+           * `undefined` as 「auto graft produced no target」 — a THROW. When the suppression window
+           * held, that `undefined` meant 「suppressed by policy」, so every step produced
+           *
+           *     INFO  auto-graft suppressed for a resumed session …
+           *     WARN  auto-graft failed and rolled back: auto graft produced no target
+           *
+           * with a retire → rollback → ledger write each time. The user reads failure after failure
+           * while nothing was ever attempted, and the ledger churns for no reason.
+           *
+           * The window is now consulted BEFORE the retirement, with the same function the other
+           * readers use, so 「not tried」 never reaches the rollback path. A suppressed step is a
+           * quiet `undefined` — the same shape as every other 「nothing to do」 outcome, which is what
+           * it is.
+           */
+          if (isAutoGraftSuppressed(stableCtx, agentId)) {
+            ctx.logger?.info?.(
+              `[dsh-graft-slice] force-cut withheld for ${agentId}: a suppression window is in force ` +
+                '(a resume or a failed confirmed graft); nothing was retired',
+            )
+            return undefined
+          }
           // v6.3 module 4: confirm mode asks here; the answer arrives next step.
           if (settings.graftMode === 'confirm' && !pendingConfirms.has(agentId)) {
             /**
-             * ── v8.x B11 (P1): THE WINDOW HAS TO BE READ WHERE THE QUESTION IS ASKED ────────────────
+             * ── v8.x B11b (P0): THE SECOND READER IS GONE, ON PURPOSE ───────────────────────────────
              *
-             * `autoGraftIfNeeded` consults `autoGraftSuppressedUntil` (the resume grace), but THIS is
-             * the site that actually asks, and it did not. So a window written by a failed confirmed
-             * graft — or by `graft_resume_session` — was written and never read on this path: the
-             * question came back in the very next step. Fixing only the write side would have produced
-             * exactly the shape this batch keeps finding: a rule stated in one place, enforced by
-             * nobody.
+             * B11 added a suppression read HERE, inside the confirm branch. It worked, and it was
+             * still the wrong shape: two readers of one rule, each with its own expiry handling, is
+             * how the two modes came to disagree in the first place.
              *
-             * Expiry deletes the record the same way `autoGraftIfNeeded` does, so the two readers agree
-             * on when the window is over rather than each running its own timer.
+             * The read now happens ONCE above, before any mode-specific branch, so confirm/force-cut
+             * cannot drift. The `withheld` log line lives there and says why; this branch has nothing
+             * left to decide.
              */
-            const suppressedUntil = autoGraftSuppressedUntil.get(agentId)
-            if (suppressedUntil !== undefined) {
-              if (Date.now() < suppressedUntil) {
-                ctx.logger?.info?.(
-                  `[dsh-graft-slice] confirm prompt withheld for ${agentId} until ${new Date(suppressedUntil).toISOString()} (a previous confirmed graft failed)`,
-                )
-                return undefined
-              }
-              autoGraftSuppressedUntil.delete(agentId)
-              try {
-                persistAutoGraftSuppression(stableCtx, [agentId])
-              } catch {
-                // A stale record only withholds one more prompt; not worth failing the step.
-              }
-            }
-          }
-          if (settings.graftMode === 'confirm' && !pendingConfirms.has(agentId)) {
             pendingConfirms.set(agentId, {
               targetId: autoTargetId(settings),
               askedAt: Date.now(),
@@ -22129,6 +22222,32 @@ async function appendTransitionCard(
                 : 'below-warn-line',
           warnAt: rowThresholds.warnAt,
           hardAt: rowThresholds.hardAt,
+          /**
+           * ── v8.x TD-27 / TD-28 (P1): EVERY ROW CARRIES ITS OWN 「WHY」 ────────────────────────────
+           *
+           * The panel showed `warnAt` / `hardAt` per row but not the two derivations behind them, so
+           * two rows with DIFFERENT thresholds looked like a bug in the arithmetic rather than what
+           * they are: each session's own window and compaction ceiling. The values were already
+           * computed one line above (`governedWatermarks`) and thrown away.
+           *
+           * Both fields are PASSED THROUGH, never recomputed here: the client renders, the plugin
+           * decides. `nudgeReason` in particular is the field the dispatch names, and it is read from
+           * the same `nudgePanelState` the aggregate panel uses — one producer, two readers.
+           */
+          thresholdReason: summariseThresholdReason(rowThresholds, rowThresholds.compaction),
+          nudgeReason: (() => {
+            /**
+             * `nudgePanelState` returns `Record<string, unknown> | undefined`, so `nudgeReason` comes
+             * back as `unknown`. Narrowed HERE rather than cast, because the row type says
+             * `string | null` and a cast would let a future shape change through silently.
+             */
+            const reason = nudgePanelState(sessionId, watermark, rowThresholds, rowThresholds.hardAt)?.nudgeReason
+            return typeof reason === 'string' ? reason : null
+          })(),
+          warnMarginSource: rowThresholds.warnMargin?.source ?? null,
+          ...(rowThresholds.warnMargin?.fallbackReason === undefined
+            ? {}
+            : { warnMarginFallbackReason: rowThresholds.warnMargin.fallbackReason }),
           generation: mark?.generation ?? 0,
           graceTurnsRemaining:
             completed === undefined || mark === undefined ? 0 : Math.max(0, settings.graftTargetGraceTurns - completed),

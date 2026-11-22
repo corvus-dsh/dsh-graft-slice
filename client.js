@@ -900,6 +900,25 @@ window.__ModuleLoader__.load({
         h('td', { key: 'd' }, [
           h('div', { key: 'a' }, `→提示线 ${Math.round(warnAt * 100)}% 还差 ${n(data.toWarnTokens, 0).toLocaleString()} tok`),
           h('div', { key: 'b', className: 'gc-hint' }, `→强制线 ${Math.round(hardAt * 100)}% 还差 ${n(data.toHardTokens, 0).toLocaleString()} tok`),
+          /**
+           * ── v8.x TD-28 (P1): WHY THIS ROW'S TWO NUMBERS ARE THESE NUMBERS ───────────────────────
+           *
+           * `warnAt` / `hardAt` are not configuration: each session has its own window and the
+           * compaction ceiling can pull both down. Two rows with different percentages therefore
+           * looked like an arithmetic bug rather than what they are. These strings are computed by the
+           * PLUGIN (`thresholdReason` on the row, `nudgeReason` from the same `nudgePanelState` the
+           * aggregate panel uses) and are only rendered here — no recomputation on this side.
+           *
+           * Absent fields render nothing rather than a placeholder: a fabricated 「未知」 would read as
+           * a fact, and the point of this line is that the reader can tell a real derivation from a
+           * missing one.
+           */
+          typeof data.thresholdReason === 'string' && data.thresholdReason.length > 0
+            ? h('div', { key: 'c', className: 'gc-hint' }, `阈值来源：${data.thresholdReason}`)
+            : null,
+          typeof data.nudgeReason === 'string' && data.nudgeReason.length > 0
+            ? h('div', { key: 'd', className: 'gc-hint' }, `提醒状态：${data.nudgeReason}${typeof data.warnMarginSource === 'string' ? ` · warn 边距=${data.warnMarginSource}` : ''}`)
+            : null,
         ]),
         h('td', { key: 's' }, [
           h('span', { key: 'a', className: `gc-badge ${cls}` }, state),
@@ -1298,6 +1317,24 @@ window.__ModuleLoader__.load({
       const config = state === null || state === undefined ? null : state.config || null
       const rows = state !== null && state !== undefined && Array.isArray(state.rows) ? state.rows : []
       const thresholds = state !== null && state !== undefined && state.thresholds ? state.thresholds : null
+      /**
+       * ── v8.x TD-27 (P1): THE CEILING WAS PRODUCED AND NEVER DISPLAYED ──────────────────────────
+       *
+       * `graft_debug_status` has shipped `compaction` since v0.37 — `source`, `reason`,
+       * `effectiveHardAt` / `effectiveWarnAt` — and this file contained ZERO occurrences of the word.
+       * So an operator reading the panel saw the numbers the ceiling produced and none of the evidence
+       * that it had constrained them: `conservative` (the window was unreadable, so the value is a
+       * FALLBACK) was indistinguishable from `computed` (the window was read).
+       *
+       * That is B4's sibling in the other direction — not 「the fixed function has no caller」 but
+       * 「the computed field has no reader」. The render below is the reader; it does not recompute
+       * anything and it does not fall back to a default when the field is missing (a fabricated
+       * ceiling is worse than an absent one).
+       */
+      const compaction =
+        state !== null && state !== undefined && state.compaction && typeof state.compaction === 'object'
+          ? state.compaction
+          : null
       const pending = state !== null && state !== undefined && Array.isArray(state.pendingIgnitions) ? state.pendingIgnitions : []
       const num = (value, fallback) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback)
 
@@ -1661,6 +1698,54 @@ window.__ModuleLoader__.load({
               // the line says so, instead of spinning forever with no explanation.
               : busy ? '当前推导：读取中…' : '当前推导：读取失败（原因见下方红卡），开关显示的是默认值。'),
         ]),
+        /**
+         * ── v8.x TD-27: THE COMPACTION CEILING, WITH ITS PROVENANCE ────────────────────────────────
+         *
+         * Three states must not be collapsible (criterion ②: `computed` must NOT render fallback
+         * wording, or the two readings become one sentence):
+         *
+         *   computed      阈值可读 ⇒ 说出生效值，且说明硬阈值被它压下去了
+         *   conservative  算不出来 ⇒ 保守值 + 「RESOURCE 条件，不是通过」 + reason
+         *   off           宿主压缩关闭 ⇒ 天花板不参与
+         *
+         * `effectiveHardAt !== thresholds.hardAt` is shown as an explicit 「生效值 ≠ 设置值」 line,
+         * because that inequality is the whole reason this card exists.
+         */
+        compaction === null
+          ? null
+          : h('div', { key: 'ceiling', className: 'gc-card' }, [
+              h('h3', { key: 'h', className: 'gc-h' }, '压缩天花板（compaction）'),
+              h('p', { key: 'present', className: 'gc-sub', style: { margin: 0 } },
+                compaction.present === true
+                  ? (compaction.auto === true ? '宿主已挂载且 auto=true' : '宿主已挂载但 auto=false（不会自动压缩）')
+                  : '本部署没有挂载压缩插件 ⇒ 天花板不参与'),
+              compaction.present === true
+                ? h('p', { key: 'src', className: 'gc-sub', style: { margin: '6px 0 0' } },
+                    compaction.source === 'computed'
+                      ? `来源 computed：压缩阈值 ${Number.isFinite(num(compaction.thresholdRatio, NaN)) ? num(compaction.thresholdRatio, 0).toFixed(3) : '?'} 可读，生效硬阈值 ${num(compaction.effectiveHardAt, 0).toFixed(3)}`
+                      : compaction.source === 'conservative'
+                        ? `来源 conservative：阈值算不出来 ⇒ 落到保守值 ${num(compaction.effectiveHardAt, 0).toFixed(3)}（RESOURCE 条件，不是通过）`
+                        : `来源 off：宿主压缩关闭，生效硬阈值 ${num(compaction.effectiveHardAt, 0).toFixed(3)}`,
+                    // ② the negative half: fallback wording appears ONLY for `conservative`.
+                    compaction.source === 'conservative' && typeof compaction.reason === 'string'
+                      ? h('span', { key: 'why' }, ` · 原因：${compaction.reason}`)
+                      : null,
+                  )
+                : null,
+              compaction.present === true && thresholds !== null
+                ? (() => {
+                    const effective = num(compaction.effectiveHardAt, NaN)
+                    const configured = num(thresholds.hardAt, NaN)
+                    if (!Number.isFinite(effective) || !Number.isFinite(configured)) return null
+                    if (Math.abs(effective - configured) < 1e-9) {
+                      return h('p', { key: 'eq', className: 'gc-sub', style: { margin: '6px 0 0' } },
+                        `生效值 = 设置值（${configured.toFixed(3)}）`)
+                    }
+                    return h('p', { key: 'ne', className: 'gc-sub', style: { margin: '6px 0 0' } },
+                      `⚠ 生效值 ≠ 设置值：设置 ${configured.toFixed(3)}，天花板把硬阈值压到 ${effective.toFixed(3)}`)
+                  })()
+                : null,
+            ]),
         h('div', { key: 'guard', className: 'gc-card' }, [
           h('h3', { key: 'h', className: 'gc-h' }, '护栏'),
           h(Toggle, {
