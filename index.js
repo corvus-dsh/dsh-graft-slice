@@ -20783,6 +20783,27 @@ export const CONSOLE_PATCH_ID = 'dsh-graft-slice'
      
                                                                             
                      
+     
+                                                                                                   
+    
+                                                                                                 
+                                                                                
+                                                                                                      
+                                                               
+    
+                                                                                                        
+                                                                                                          
+     
+                   
+                                                                                                         
+                         
+     
+                                                                     
+    
+                                                                                                       
+                                   
+     
+                                
  
 
 /**
@@ -22498,7 +22519,54 @@ async function appendTransitionCard(
       growthPerTurnTokens: settings.growthTokensPerTurn,
       reserveTurns: settings.growthReserveTurns,
     })
+    /**
+     * ── §〇 24 的同族扫描（SAME-FAMILY）: A SIGNAL THE READER WAITS FOR AND THE PRODUCER NEVER SENDS ─
+     *
+     * `client.js` has a whole degraded channel — a red 「宿主通道降级」 card keyed on `state.degraded`,
+     * whose hint defaults to 「上面的数值是插件默认值，不是真实配置」 — and **this plugin never emitted the
+     * field**. `grep degraded src/` returned ZERO production hits (one comment in `pending-transfers.ts`
+     * about a different meaning). So the channel was dead in the specific way §〇 24 names: the reader
+     * is written, the writer is not, and every test passes because a fixture can always provide the field.
+     *
+     * WHAT IS GENUINELY DEGRADED HERE, and it is not 「an error happened」 — errors already surface
+     * through the bridge's `error` path. These are the cases where the payload is WELL-FORMED but the
+     * numbers in it are not this host's real configuration:
+     *
+     *   1. `configEditor` is unavailable  ⇒ every switch shows its plugin default, and pressing it does
+     *      nothing. The panel's own hint already promised to say this; nothing computed it.
+     *   2. no measurable session          ⇒ `thresholds` were derived from CONFIG, not from any real
+     *      window, so the two numbers describe a hypothetical session.
+     *
+     * Both are stated as REASONS, not as a boolean alone: 「degraded」 without 「because」 sends the reader
+     * to the wrong switch. And the negative half matters as much — a healthy host must NOT be marked
+     * degraded, or the red card becomes wallpaper.
+     */
+    const degradationReasons           = []
+    const editorAvailable = (() => {
+      try {
+        const editor = (stableCtx       ).get('configEditor')
+        return isRecord(editor) && typeof editor.edit === 'function' && typeof editor.entries === 'function'
+      } catch {
+        return false
+      }
+    })()
+    if (!editorAvailable) {
+      degradationReasons.push('configEditor 服务不可用：下面的开关显示的是插件默认值，点击不会落盘')
+    }
+    if (representative === undefined) {
+      degradationReasons.push('没有可测量的活动会话：阈值由配置推导，不代表任何真实窗口')
+    }
+    const degraded = degradationReasons.length > 0
     return {
+      /**
+       * The two fields the client's health badge has been keying on since v0.32, finally produced.
+       * `degraded: false` is emitted too, rather than the key being absent — see `v316 ②`: an absent key
+       * and an explicit 「not degraded」 are different claims, and the client's condition is
+       * `state.degraded === true`, so both work — but only one of them lets a test distinguish 「healthy」
+       * from 「producer forgot the field again」.
+       */
+      degraded,
+      ...(degraded ? { degradedReason: degradationReasons.join('；') } : {}),
       config: {
         modelDrivenGraft: settings.modelDrivenGraft,
         autoGraft: settings.autoGraft,

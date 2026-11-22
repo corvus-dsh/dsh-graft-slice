@@ -33,6 +33,16 @@ const DATA_DIR = join(import.meta.dirname, '.v314-data')
 /**
  * Run a REAL `apply()` against a host that mounts (or does not mount) compaction, then read
  * `graft-console-global` — the exact command the panel's bridge calls.
+ *
+ * `configEditor` IS PROVIDED, and that is not decoration: `v316` made the console report
+ * `degraded: true` when the editor is unavailable, because every switch would then be a default that
+ * cannot be saved. A fixture without an editor therefore produces a payload that is legitimately
+ * degraded — and the client renders the degraded state with the same 「读取失败」 headline it uses for a
+ * bridge error, which made this file's negative assertion (「没有这个后端」 is not 「读取失败」) fire for a
+ * reason that had nothing to do with compaction.
+ *
+ * That is the same lesson as the lead's §17.2: **check the fixture is a healthy host before believing a
+ * red that blames the feature under test.**
  */
 async function realConsolePayload({ mountCompaction }) {
   const commands = new Map()
@@ -41,6 +51,11 @@ async function realConsolePayload({ mountCompaction }) {
     get(name) {
       if (name === 'commands') return commandService
       if (name === 'paths') return { data: DATA_DIR }
+      /**
+       * A healthy editor: `entries()` reports no config rows (nothing to patch in a fixture) and
+       * `edit()` resolves. `consoleState` only asks whether the service CAN save.
+       */
+      if (name === 'configEditor') return { entries: () => [], edit: async () => undefined }
       if (name === 'tokenMeter') return { measure: () => ({ totalTokens: 723000 }) }
       if (name === 'sessions') {
         return {
