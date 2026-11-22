@@ -22,8 +22,12 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { apply, resetRetiredSessions } from '../index.js'
+
 const ROOT = join(import.meta.dirname, '..', '..')
 const BUNDLE = 'dsh-graft-slice/client.js'
+/** A data dir the real `apply()` will accept; the console only READS from it. */
+const DSH_DATA_DIR = join(import.meta.dirname, '.v307-data')
 
 /**
  * Load the real bundle and run its REAL `useEffect`, so the panel performs its own fetch.
@@ -240,41 +244,127 @@ function panelBody(text) {
   return dump >= 0 ? body.slice(0, dump) : body
 }
 
-const basePayload = (compaction) => ({
-  ok: true,
-  config: { warnAtRatio: 0.7, hardAtRatio: 0.75, autoGraft: true, graftMode: 'silent' },
-  thresholds: { warnAt: 0.7, hardAt: 0.75, estimatedGraftCost: 12000, feasible: true },
-  compaction,
-  rows: [
-    {
-      sessionId: 'session-alpha',
-      cwd: 'D:/work/alpha',
-      tokens: 900000,
-      contextWindow: 1000000,
-      percent: 90,
-      source: 'meter',
-      toWarnTokens: 200000,
-      toHardTokens: 350000,
-      state: 'over-warn-line',
-      warnAt: 0.7,
-      hardAt: 0.55,
-      /**
-       * Coherent with the ceiling passed in: a `computed` payload gets a `computed` row reason. An
-       * incoherent fixture would make criterion ② prove something about the fixture instead of the card.
-       */
-      thresholdReason:
-        compaction !== null && compaction !== undefined && compaction.source === 'conservative'
-          ? 'warn 边距由 token 预算得出（40000 tokens）；压缩阈值算不出来 ⇒ 落到保守值 0.550'
-          : 'warn 边距由 token 预算得出（40000 tokens）；压缩阈值可读，硬阈值被压到 0.600',
-      nudgeReason: 'already-nudged',
-      warnMarginSource: 'tokens',
-      generation: 0,
-      graceTurnsRemaining: 0,
+/**
+ * ── 17.4-A 判据④ (§〇 24): THE FIXTURE MUST COME FROM THE PRODUCT ──────────────────────────────────
+ *
+ * The old version of this file HAND-WROTE a top-level `compaction` into the payload. That is precisely
+ * the shape the client expected and the product NEVER produced: `consoleState` swallowed it into
+ * `thresholds`, so the card could not render on any real host — and 1079 passing tests could not see it,
+ * because the fixture had already supplied the missing step.
+ *
+ * So the payload is now what `graft-console-global` actually returns, obtained by running a REAL `apply()`
+ * against a host that mounts compaction. The per-case variation is applied at the EDGE (the ceiling
+ * object), never by inventing a top-level field: if the producer stops emitting it, `realPayload`
+ * produces a payload without it and these criteria go red — which is the whole point.
+ */
+async function realConsolePayload({ mountCompaction = true } = {}) {
+  const events = []
+  const tools = new Map()
+  const commands = new Map()
+  const commandService = {
+    register(definition) {
+      commands.set(definition.name, definition)
     },
-  ],
-  sessions: [],
-  pendingIgnitions: [],
+  }
+  /**
+   * A host minimal enough to be honest: one measurable session, and a loader entry that mounts
+   * `compaction-basic` with `auto: true` so `governedWatermarks` takes the ceiling path at all.
+   */
+  const ctx = {
+    get(name) {
+      if (name === 'commands') return commandService
+      if (name === 'sessions') {
+        return {
+          get: (id) => ({
+            id,
+            header: { id, cwd: 'D:/work/alpha' },
+            snapshotEvents: () => events.filter((event) => event.sessionId === id).map((event) => event.event),
+            /**
+             * `readTokenWatermark` reads the WINDOW from here and `readReservedOutputTokens` reads
+             * `maxTokens` from `requestHeader()`. Absent, the row has no window and the ceiling path is
+             * never taken — the fixture would then be testing 「no data」 while claiming to test the card.
+             */
+            requestContext: () => ({ contextWindow: 1048576 }),
+            requestHeader: () => ({ config: { maxTokens: 64000 } }),
+          }),
+          list: () => [{ id: 'session-alpha' }],
+        }
+      }
+      if (name === 'loader') {
+        /**
+         * THE SHAPE THE PRODUCT WALKS: `@deepseek-ai/dsh-agent-preset` with `options.config.plugins` as an
+         * ARRAY of `{ name, config }` rows (`addPresetRows` in `compaction-guard.ts`).
+         *
+         * Measured mistake in my first version: a `group.children` tree that no code path reads. The
+         * ceiling never engaged, `compaction` never appeared, and the payload looked like a product
+         * defect. Same lesson the lead recorded in §17.2: check the probe can pass before trusting its red.
+         */
+        return {
+          entries: () =>
+            mountCompaction
+              ? [
+                  {
+                    options: {
+                      name: '@deepseek-ai/dsh-agent-preset',
+                      config: {
+                        id: 'cordis',
+                        plugins: [
+                          {
+                            name: '@deepseek-ai/dsh-compaction-basic',
+                            config: { auto: true, thresholdRatio: 0.8, headroomTokens: 65536 },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                ]
+              : [],
+        }
+      }
+      if (name === 'tokenMeter') {
+        /**
+         * REQUIRED INPUT, not decoration: without a meter `readTokenWatermark` returns undefined, every
+         * row is skipped, and `consoleState` never reaches `governedWatermarks` — so the ceiling is never
+         * computed and `compaction` is absent for a reason that has nothing to do with the fix.
+         */
+        return { measure: () => ({ totalTokens: 723000 }) }
+      }
+      if (name === 'paths') return { data: DSH_DATA_DIR }
+      if (name === 'llm') return undefined
+      return undefined
+    },
+    logger: { info() {}, warn() {}, error() {} },
+    on() {},
+    tools: { register: (definition) => tools.set(definition.name, definition) },
+    commands: commandService,
+    sessions: undefined,
+  }
+  resetRetiredSessions()
+  apply(ctx, { autoGraft: true, autoGraftAtRatio: 0.75, modelDrivenGraftAtRatio: 0.7 })
+  const handler = commands.get('graft-console-global')
+  assert.ok(handler !== undefined, 'graft-console-global must be registered — the panel calls it')
+  const reply = await handler.handler({})
+  return JSON.parse(reply.text)
+}
+
+/** Replace the ceiling object on a REAL payload — the only thing a case is allowed to vary. */
+const withCeiling = (payload, compaction) => ({ ...payload, compaction })
+
+/**
+ * The real payload, captured ONCE before the tests run.
+ *
+ * `apply()` registers tools and commands; calling it per-test would re-register into the same maps and
+ * the second `apply` would throw `duplicate tool`. Capturing once also makes the point of §〇 24 concrete:
+ * every assertion below reads a payload the PRODUCT produced, and the only thing a case varies is the
+ * ceiling object.
+ */
+let REAL_BASE
+test.before(async () => {
+  REAL_BASE = await realConsolePayload({ mountCompaction: true })
+  assert.ok(REAL_BASE !== undefined, 'the real console payload must be obtainable')
 })
+
+const basePayload = (compaction) => withCeiling(REAL_BASE, compaction)
 
 test('v307 TD-27 ①: a CONSERVATIVE ceiling renders its reason AND 「生效值 ≠ 设置值」', async () => {
   const { draw, runEffects } = loadPanel()
@@ -330,15 +420,31 @@ test('v307 TD-27 ② (negative half): COMPUTED must NOT render fallback wording'
 })
 
 test('v307 TD-28 ③: every session row shows thresholdReason AND nudgeReason', async () => {
+  /**
+   * §〇 24: the expected strings come FROM THE PAYLOAD, not from what I imagine the producer emits.
+   *
+   * Measured: the previous version asserted the literal `already-nudged`, which the old hand-written
+   * fixture had put there. The real producer emits `below-both` for a session under both lines — so a
+   * criterion keyed to a value I invented would have gone red on the first genuine payload and told me
+   * nothing about the panel.
+   */
   const { draw, runEffects } = loadPanel()
   const payload = basePayload({ present: false, auto: false, source: 'off', effectiveHardAt: 0.75, effectiveWarnAt: 0.7, reason: '未挂载' })
+  const row = Array.isArray(payload.rows) ? payload.rows[0] : undefined
+  assert.ok(row !== undefined, '夹具自检：真实 payload 必须至少有一行（否则这条判据测的是空表）')
+  assert.equal(typeof row.thresholdReason, 'string', '真实 payload 的行必须带 thresholdReason')
+  assert.equal(typeof row.nudgeReason, 'string', '真实 payload 的行必须带 nudgeReason')
+
   draw(payload)
   await runEffects()
   const text = panelBody(textOf(draw(payload)).join(' '))
 
-  assert.match(text, /阈值来源：warn 边距由 token 预算得出/u,
+  assert.match(text, /阈值来源：/u,
     `会话行必须显示生产者算好的 thresholdReason；实测：${tail(text)}`)
-  assert.match(text, /提醒状态：already-nudged/u,
-    '会话行必须显示生产者算好的 nudgeReason')
+  // The producer's actual string, not a remembered one.
+  assert.equal(text.includes(row.thresholdReason), true,
+    `行里必须原样出现 payload 的 thresholdReason；期望包含：${row.thresholdReason}；实测：${tail(text)}`)
+  assert.equal(text.includes(row.nudgeReason), true,
+    `行里必须原样出现 payload 的 nudgeReason；期望包含：${row.nudgeReason}；实测：${tail(text)}`)
   assert.match(text, /session-alpha/u, '夹具自检：那一行确实画出来了')
 })

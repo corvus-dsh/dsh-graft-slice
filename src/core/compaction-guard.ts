@@ -206,12 +206,42 @@ export function applyCompactionCeiling(
   }
 
   const windowLimit = Number(contextWindow)
-  const outputReservation = reservedOutputTokens === undefined ? Number.NaN : Number(reservedOutputTokens)
-  const computable =
-    Number.isFinite(windowLimit) &&
-    windowLimit > 0 &&
-    Number.isFinite(outputReservation) &&
-    outputReservation >= 0
+  /**
+   * `reservedOutputTokens` is now an UNUSED parameter, kept deliberately rather than deleted.
+   *
+   * 17.4-C removed `O` from both the arithmetic (7502ba8) and the computability guard (this change). It
+   * stays in the signature because every caller passes it and the protocol still carries the fact — but
+   * nothing here reads it, and saying so is better than leaving a reader to wonder why a parameter is
+   * accepted and ignored.
+   *
+   * It is NOT re-exported to the ceiling object either: `CompactionCeiling` never published it, so the
+   * panel never displayed it, so there is no reader to break.
+   */
+  void reservedOutputTokens
+  /**
+   * ── 17.4-C (P0, lead-measured): `O` NO LONGER DECIDES WHETHER THE CEILING IS COMPUTABLE ──────────
+   *
+   * MEASURED BY THE LEAD, and it is the residue of my own `7502ba8`:
+   *
+   *     A. W=1M, O=64000 readable   computed      hardAt=0.75  warnAt=0.70   ← equals the setting
+   *     B. W=1M, O UNREADABLE       conservative  hardAt=0.55  warnAt=0.52   ← the screenshotted screen
+   *     C. W=1M, O=0 readable       computed      hardAt=0.75  warnAt=0.70
+   *
+   * I removed `O` from the ARITHMETIC (`1 − O/W − headroom/W`) but left it in the GUARD. So `O` became a
+   * pure dead input whose only remaining effect was to knock the whole derivation down to the
+   * conservative constant whenever it could not be read — the 55.00% / 52.00% that reappeared after the
+   * restart, digit for digit.
+   *
+   * WHY REMOVING IT IS SAFE, stated as the reasoning rather than as a preference: the ceiling exists to
+   * answer 「when does the compaction TOOL act」, and that answer is `mount.thresholdRatio`. `O` is the
+   * budget for the next completion; it says nothing about when compaction fires. A session whose output
+   * budget cannot be read is still perfectly able to know its compaction threshold.
+   *
+   * WHAT FAILS CLOSED INSTEAD: `W`. Without a window there is no ratio to compare anything against, so
+   * `W` unreadable still lands on `conservative` — and `v221 ⑤` keeps pinning exactly that. The two
+   * unreadable inputs must not collapse into one verdict.
+   */
+  const computable = Number.isFinite(windowLimit) && windowLimit > 0
 
   let thresholdRatio: number | undefined
   if (computable) {
@@ -264,9 +294,16 @@ export function applyCompactionCeiling(
     effectiveHardAt: hardAt,
     effectiveWarnAt: warnAt,
     reason: conservative
-      ? `RESOURCE — compaction-basic auto is ON (${where}) but the host threshold is not computable ` +
-        `(W=${Number.isFinite(windowLimit) && windowLimit > 0 ? windowLimit : 'unknown'}, ` +
-        `O=${reservedOutputTokens === undefined ? 'unreadable' : outputReservation}); ` +
+      ? /**
+         * 17.4-C 判据④: `O=` is GONE from this sentence, because the input it names no longer participates.
+         *
+         * A reason string that lists an input the derivation does not read is worse than no reason: a
+         * reader debugging 「why 0.55」 would go looking at the output reservation, find it irrelevant, and
+         * conclude the message is unreliable — while the actual cause (`W` unreadable) is stated two
+         * clauses earlier and gets skimmed past.
+         */
+        `RESOURCE — compaction-basic auto is ON (${where}) but the host threshold is not computable ` +
+        `(W=${Number.isFinite(windowLimit) && windowLimit > 0 ? windowLimit : 'unknown'}); ` +
         `conservative hardAt ${COMPACTION_CONSERVATIVE_HARD_AT} used so the slice still wins. ` +
         'This is a RESOURCE condition, not a pass.'
       : `compaction-basic auto is ON (${where}); host threshold ${roundTo4(thresholdRatio as number)}; ` +

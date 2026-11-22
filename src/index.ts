@@ -13267,12 +13267,47 @@ async function appendTransitionCard(
     // that governs the HIGHEST session and the cost model behind it, rather than
     // two constants the operator cannot reconcile with what the rows say.
     const representative = rows[0]
-    const thresholds =
+    /**
+     * ONE TYPE FOR BOTH BRANCHES, because only one of them carries `compaction`.
+     *
+     * `effectiveWatermarks` returns a plain `WatermarkThresholds` (no ceiling — it is the pre-governance
+     * pair), while `governedWatermarks` adds `compaction` and `warnMargin`. Without this annotation the
+     * union collapses to the narrower type and reading `thresholds.compaction` is a type error — measured:
+     * `index.ts [2339] Property 'compaction' does not exist on type 'WatermarkThresholds'`. The absence is
+     * REAL (the no-sessions branch has no ceiling to report), which is why the field stays optional.
+     */
+    const thresholds: WatermarkThresholds & {
+      compaction?: CompactionCeiling
+      warnMargin?: WarnMarginDerivation
+    } =
       representative === undefined
         ? effectiveWatermarks(settings, undefined)
         : await governedWatermarks(stableCtx, settings, representative.sessionId, {
             contextWindow: representative.contextWindow,
           }, ctx.logger)
+    /**
+     * ── 17.4-A (P0, lead-measured): `compaction` NEVER REACHED THE CONSOLE'S TOP LEVEL ──────────────
+     *
+     * MEASURED: a real `apply()` + real `graft-console-global` handler produced top-level keys
+     * `config, thresholds, rows, pendingIgnitions, sessions, generatedAt` — and NO `compaction`. The
+     * client reads `state.compaction` (top level), got `undefined`, and the whole ceiling card therefore
+     * never rendered. Not a styling problem: there was nothing to style.
+     *
+     * WHY IT VANISHED: `governedWatermarks` returns `{…, compaction}`, and the very next line spread that
+     * object into `thresholds: { …thresholds }`. So the value was produced, then SWALLOWED by a sibling
+     * field — the panel's producer was a field of a field.
+     *
+     * THE SHAPE OF THE BUG, stated because it recurs: `thresholds` looked complete. It had `warnAt`,
+     * `hardAt`, `source`, `reason` — a schema that says 「everything about thresholds is here」 — and the
+     * one thing the reader wanted was in it, one level down, under a name the client never looked at.
+     * Same family as a `user/message` shell carrying a developer instruction: the container is right, the
+     * contents are somewhere else.
+     *
+     * The value is the SAME one `graft_debug_status` puts at ITS top level (`compactionCeiling` there,
+     * `thresholds.compaction` here, both from `applyCompactionCeiling`) — one producer, two readers, and
+     * now the same address for both.
+     */
+    const compactionCeilingForConsole = thresholds.compaction
     const cost = estimateGraftCost(thresholds.windowLimit, {
       growthPerTurnTokens: settings.growthTokensPerTurn,
       reserveTurns: settings.growthReserveTurns,
@@ -13295,6 +13330,12 @@ async function appendTransitionCard(
         ignitionMode: settings.ignitionMode,
       },
       thresholds: { ...thresholds, estimate: thresholds.windowLimit > 0 ? cost : null },
+      /**
+       * 17.4-A: the ceiling at the address the client reads. `thresholds.compaction` still exists —
+       * removing it would break any caller that already walks the nested path — but the panel no longer
+       * has to know that a top-level-looking field is nested one level down.
+       */
+      ...(compactionCeilingForConsole === undefined ? {} : { compaction: compactionCeilingForConsole }),
       rows,
       // v0.19: "the target is durable but nobody started it" is a state the panel
       // has to be able to show, not a log line the operator has to go find.

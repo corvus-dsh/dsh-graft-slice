@@ -157,16 +157,49 @@ test('v221 ③ can-red: auto:false ⇒ 水位保持用户配置，且不报警',
   assert.equal(out.compaction.thresholdRatio, undefined)
 })
 
-test('v221 ④ can-red: O 不可读 ⇒ conservative 0.55，且 reason 必须说出来（不许静默降级）', () => {
+/**
+ * ── 17.4-C: THIS CRITERION WAS REWRITTEN, AND IT HAD TO BE ───────────────────────────────────────
+ *
+ * It used to assert 「O 不可读 ⇒ conservative 0.55，reason 里必须有 `O=unreadable`」. That is precisely the
+ * behaviour 17.4-C removes: `O` is the output budget for the NEXT completion, it no longer participates in
+ * `1 − O/W − headroom/W` (7502ba8), and leaving it in the GUARD made it a dead input whose only remaining
+ * effect was to force the conservative constant whenever it could not be read.
+ *
+ * The lead's screenshot is the evidence: `W=1M, O unreadable ⇒ hardAt 0.55, warnAt 0.52` — the 「提示线
+ * 52% · 强制线 55%」 screen, reappearing after my arithmetic fix because the guard still consulted O.
+ *
+ * Kept from the old version: the property that a RESOURCE degradation must SAY it is one. A `conservative`
+ * verdict that reads like a normal computation is the failure this criterion always guarded against.
+ *
+ * `v221 ⑤` is untouched and still pins the opposite half: `W` unreadable ⇒ `conservative`. The two
+ * unreadable inputs must NOT collapse into one verdict.
+ */
+test('v221 ④ (rewritten by 17.4-C): O unreadable but W readable ⇒ COMPUTED, not conservative', () => {
   const mounts = mountOfPreset(undefined)
   const out = applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, mounts, W, undefined)
+  assert.equal(out.compaction.source, 'computed',
+    'O 不可读但 W 可读 ⇒ 必须 computed —— O 已不参与任何计算，不该再决定能不能算')
+  assert.equal(out.compaction.thresholdRatio, 0.8, 'stays the tool’s own threshold')
+  assert.equal(out.hardAt, 0.75, '用户的 0.75 生效（不被 O 拖到 0.55）')
+  assert.equal(out.warnAt, 0.7, 'warn 也不再被压到 0.52')
+  assert.doesNotMatch(out.compaction.reason, /O=/u,
+    'reason 里不得再出现 O= —— 它陈述的输入已不参与')
+})
+
+test('v221 ④b: O unreadable must NOT lose the RESOURCE wording when W is ALSO unreadable', () => {
+  /**
+   * The negative half of ④, and the half that would be lost by a careless 「just delete the O checks」
+   * change: when nothing is computable, the ceiling must STILL announce itself as a RESOURCE condition.
+   * Without this, ④ could be satisfied by a code path that never says 「degraded」 at all.
+   */
+  const mounts = mountOfPreset(undefined)
+  const out = applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, mounts, 0, undefined)
   assert.equal(out.compaction.source, 'conservative')
-  assert.equal(out.compaction.thresholdRatio, undefined, '算不出来时不能报一个假阈值')
   assert.equal(out.hardAt, COMPACTION_CONSERVATIVE_HARD_AT)
-  assert.equal(out.warnAt, 0.52)
   assert.match(out.compaction.reason, /RESOURCE/u)
   assert.match(out.compaction.reason, /not a pass/u)
-  assert.match(out.compaction.reason, /O=unreadable/u)
+  assert.match(out.compaction.reason, /W=unknown/u)
+  assert.doesNotMatch(out.compaction.reason, /O=/u, 'O 无论在哪种结局里都不该被点名')
 })
 
 test('v221 ⑤: W 也不可读时同样落到 conservative（不是「W=0 所以安全」）', () => {

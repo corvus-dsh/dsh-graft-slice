@@ -875,12 +875,42 @@ function applyCompactionCeiling(
   }
 
   const windowLimit = Number(contextWindow)
-  const outputReservation = reservedOutputTokens === undefined ? Number.NaN : Number(reservedOutputTokens)
-  const computable =
-    Number.isFinite(windowLimit) &&
-    windowLimit > 0 &&
-    Number.isFinite(outputReservation) &&
-    outputReservation >= 0
+  /**
+   * `reservedOutputTokens` is now an UNUSED parameter, kept deliberately rather than deleted.
+   *
+   * 17.4-C removed `O` from both the arithmetic (7502ba8) and the computability guard (this change). It
+   * stays in the signature because every caller passes it and the protocol still carries the fact — but
+   * nothing here reads it, and saying so is better than leaving a reader to wonder why a parameter is
+   * accepted and ignored.
+   *
+   * It is NOT re-exported to the ceiling object either: `CompactionCeiling` never published it, so the
+   * panel never displayed it, so there is no reader to break.
+   */
+  void reservedOutputTokens
+  /**
+   * ── 17.4-C (P0, lead-measured): `O` NO LONGER DECIDES WHETHER THE CEILING IS COMPUTABLE ──────────
+   *
+   * MEASURED BY THE LEAD, and it is the residue of my own `7502ba8`:
+   *
+   *     A. W=1M, O=64000 readable   computed      hardAt=0.75  warnAt=0.70   ← equals the setting
+   *     B. W=1M, O UNREADABLE       conservative  hardAt=0.55  warnAt=0.52   ← the screenshotted screen
+   *     C. W=1M, O=0 readable       computed      hardAt=0.75  warnAt=0.70
+   *
+   * I removed `O` from the ARITHMETIC (`1 − O/W − headroom/W`) but left it in the GUARD. So `O` became a
+   * pure dead input whose only remaining effect was to knock the whole derivation down to the
+   * conservative constant whenever it could not be read — the 55.00% / 52.00% that reappeared after the
+   * restart, digit for digit.
+   *
+   * WHY REMOVING IT IS SAFE, stated as the reasoning rather than as a preference: the ceiling exists to
+   * answer 「when does the compaction TOOL act」, and that answer is `mount.thresholdRatio`. `O` is the
+   * budget for the next completion; it says nothing about when compaction fires. A session whose output
+   * budget cannot be read is still perfectly able to know its compaction threshold.
+   *
+   * WHAT FAILS CLOSED INSTEAD: `W`. Without a window there is no ratio to compare anything against, so
+   * `W` unreadable still lands on `conservative` — and `v221 ⑤` keeps pinning exactly that. The two
+   * unreadable inputs must not collapse into one verdict.
+   */
+  const computable = Number.isFinite(windowLimit) && windowLimit > 0
 
   let thresholdRatio                    
   if (computable) {
@@ -933,9 +963,16 @@ function applyCompactionCeiling(
     effectiveHardAt: hardAt,
     effectiveWarnAt: warnAt,
     reason: conservative
-      ? `RESOURCE — compaction-basic auto is ON (${where}) but the host threshold is not computable ` +
-        `(W=${Number.isFinite(windowLimit) && windowLimit > 0 ? windowLimit : 'unknown'}, ` +
-        `O=${reservedOutputTokens === undefined ? 'unreadable' : outputReservation}); ` +
+      ? /**
+         * 17.4-C 判据④: `O=` is GONE from this sentence, because the input it names no longer participates.
+         *
+         * A reason string that lists an input the derivation does not read is worse than no reason: a
+         * reader debugging 「why 0.55」 would go looking at the output reservation, find it irrelevant, and
+         * conclude the message is unreliable — while the actual cause (`W` unreadable) is stated two
+         * clauses earlier and gets skimmed past.
+         */
+        `RESOURCE — compaction-basic auto is ON (${where}) but the host threshold is not computable ` +
+        `(W=${Number.isFinite(windowLimit) && windowLimit > 0 ? windowLimit : 'unknown'}); ` +
         `conservative hardAt ${COMPACTION_CONSERVATIVE_HARD_AT} used so the slice still wins. ` +
         'This is a RESOURCE condition, not a pass.'
       : `compaction-basic auto is ON (${where}); host threshold ${roundTo4(thresholdRatio          )}; ` +
@@ -22416,12 +22453,47 @@ async function appendTransitionCard(
     // that governs the HIGHEST session and the cost model behind it, rather than
     // two constants the operator cannot reconcile with what the rows say.
     const representative = rows[0]
-    const thresholds =
+    /**
+     * ONE TYPE FOR BOTH BRANCHES, because only one of them carries `compaction`.
+     *
+     * `effectiveWatermarks` returns a plain `WatermarkThresholds` (no ceiling — it is the pre-governance
+     * pair), while `governedWatermarks` adds `compaction` and `warnMargin`. Without this annotation the
+     * union collapses to the narrower type and reading `thresholds.compaction` is a type error — measured:
+     * `index.ts [2339] Property 'compaction' does not exist on type 'WatermarkThresholds'`. The absence is
+     * REAL (the no-sessions branch has no ceiling to report), which is why the field stays optional.
+     */
+    const thresholds                         
+                                    
+                                       
+      =
       representative === undefined
         ? effectiveWatermarks(settings, undefined)
         : await governedWatermarks(stableCtx, settings, representative.sessionId, {
             contextWindow: representative.contextWindow,
           }, ctx.logger)
+    /**
+     * ── 17.4-A (P0, lead-measured): `compaction` NEVER REACHED THE CONSOLE'S TOP LEVEL ──────────────
+     *
+     * MEASURED: a real `apply()` + real `graft-console-global` handler produced top-level keys
+     * `config, thresholds, rows, pendingIgnitions, sessions, generatedAt` — and NO `compaction`. The
+     * client reads `state.compaction` (top level), got `undefined`, and the whole ceiling card therefore
+     * never rendered. Not a styling problem: there was nothing to style.
+     *
+     * WHY IT VANISHED: `governedWatermarks` returns `{…, compaction}`, and the very next line spread that
+     * object into `thresholds: { …thresholds }`. So the value was produced, then SWALLOWED by a sibling
+     * field — the panel's producer was a field of a field.
+     *
+     * THE SHAPE OF THE BUG, stated because it recurs: `thresholds` looked complete. It had `warnAt`,
+     * `hardAt`, `source`, `reason` — a schema that says 「everything about thresholds is here」 — and the
+     * one thing the reader wanted was in it, one level down, under a name the client never looked at.
+     * Same family as a `user/message` shell carrying a developer instruction: the container is right, the
+     * contents are somewhere else.
+     *
+     * The value is the SAME one `graft_debug_status` puts at ITS top level (`compactionCeiling` there,
+     * `thresholds.compaction` here, both from `applyCompactionCeiling`) — one producer, two readers, and
+     * now the same address for both.
+     */
+    const compactionCeilingForConsole = thresholds.compaction
     const cost = estimateGraftCost(thresholds.windowLimit, {
       growthPerTurnTokens: settings.growthTokensPerTurn,
       reserveTurns: settings.growthReserveTurns,
@@ -22444,6 +22516,12 @@ async function appendTransitionCard(
         ignitionMode: settings.ignitionMode,
       },
       thresholds: { ...thresholds, estimate: thresholds.windowLimit > 0 ? cost : null },
+      /**
+       * 17.4-A: the ceiling at the address the client reads. `thresholds.compaction` still exists —
+       * removing it would break any caller that already walks the nested path — but the panel no longer
+       * has to know that a top-level-looking field is nested one level down.
+       */
+      ...(compactionCeilingForConsole === undefined ? {} : { compaction: compactionCeilingForConsole }),
       rows,
       // v0.19: "the target is durable but nobody started it" is a state the panel
       // has to be able to show, not a log line the operator has to go find.
