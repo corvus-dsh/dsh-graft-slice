@@ -8463,7 +8463,30 @@ async function graftSliceAndInjectUnlocked(
         title: `[切片] ${sourceId}`,
         id: newId,
         tape,
-        ...(sourceAgentPreset === undefined ? {} : { inheritFrom: sourceId }),
+        /**
+         * ── v8.x TD-26 (P1): THE VALUE, NOT MERELY ITS PRESENCE ──────────────────────────────────
+         *
+         * This line used to read
+         *
+         *     ...(sourceAgentPreset === undefined ? {} : { inheritFrom: sourceId })
+         *
+         * i.e. it decided on `sourceAgentPreset` and then passed `sourceId`. The field was computed
+         * below/above with real care — the last `agent-preset/selected` event, falling back to the
+         * header — and then used only as a boolean: 「the source HAS a preset, so inherit from the
+         * source」.
+         *
+         * `inheritFrom: sourceId` is what makes the runtime reader work (`readSourceRuntime` reads the
+         * source's LAST preset event), so the target does inherit correctly today. What the dead value
+         * cost is the ability to TELL: nothing downstream ever sees the preset graft already resolved,
+         * so a mismatch between 「the preset graft decided on」 and 「the preset the reader picked」 is
+         * invisible, and the analysis that says 「the value is never used」 is literally true.
+         *
+         * The resolved preset is now carried alongside, and paradise writes it into the target header
+         * (`session-writer.ts`: `meta.agentPreset`), which is the durable record a reader can check.
+         */
+        ...(sourceAgentPreset === undefined
+          ? {}
+          : { inheritFrom: sourceId, inheritPreset: sourceAgentPreset }),
         publish: false,
       })
       return {
