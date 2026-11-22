@@ -12244,6 +12244,23 @@ async function appendTransitionCard(
             // reservation this rollback is undoing.
             persistRetiredStore(stableCtx, [agentId])
             persistTransferredStore(stableCtx, [agentId])
+            /**
+             * ── v8.x B11 (P1): A FAILURE IS NOT A REASON TO ASK TWICE ─────────────────────────────
+             *
+             * The confirmation was already consumed (`pendingConfirms.delete` above), the ledgers were
+             * rolled back, and the watermark is UNCHANGED — nothing shrank. Without a suppression
+             * window the very next pre-step reaches the ask at the top of this function with the same
+             * ratio, and the user is asked the same question again about a migration that just failed.
+             * Measured shape: confirm → fail → confirm → fail, with no way to stop except answering
+             * something else.
+             *
+             * The window is `AUTO_GRAFT_RESUME_GRACE_MS`, the SAME mechanism `resumeSession` uses, and
+             * for the same reason: a session that was just un-retired and a session whose confirmed
+             * graft just failed are in the same state — watermark over the threshold, nothing done.
+             * A second window type would be a second thing to keep in sync.
+             */
+            autoGraftSuppressedUntil.set(agentId, Date.now() + AUTO_GRAFT_RESUME_GRACE_MS)
+            persistAutoGraftSuppression(stableCtx)
             ctx.logger?.warn?.(`[dsh-graft-slice] confirmed graft failed: ${String((error as any)?.message ?? error)}`)
           }
         } else if (answer !== undefined && answer.trim().length > 0) {
@@ -12299,6 +12316,36 @@ async function appendTransitionCard(
             : await governedWatermarks(stableCtx, settings, agentId, watermark, ctx.logger)
         if (watermark !== undefined && thresholds !== undefined && watermark.ratio >= thresholds.hardAt) {
           // v6.3 module 4: confirm mode asks here; the answer arrives next step.
+          if (settings.graftMode === 'confirm' && !pendingConfirms.has(agentId)) {
+            /**
+             * ── v8.x B11 (P1): THE WINDOW HAS TO BE READ WHERE THE QUESTION IS ASKED ────────────────
+             *
+             * `autoGraftIfNeeded` consults `autoGraftSuppressedUntil` (the resume grace), but THIS is
+             * the site that actually asks, and it did not. So a window written by a failed confirmed
+             * graft — or by `graft_resume_session` — was written and never read on this path: the
+             * question came back in the very next step. Fixing only the write side would have produced
+             * exactly the shape this batch keeps finding: a rule stated in one place, enforced by
+             * nobody.
+             *
+             * Expiry deletes the record the same way `autoGraftIfNeeded` does, so the two readers agree
+             * on when the window is over rather than each running its own timer.
+             */
+            const suppressedUntil = autoGraftSuppressedUntil.get(agentId)
+            if (suppressedUntil !== undefined) {
+              if (Date.now() < suppressedUntil) {
+                ctx.logger?.info?.(
+                  `[dsh-graft-slice] confirm prompt withheld for ${agentId} until ${new Date(suppressedUntil).toISOString()} (a previous confirmed graft failed)`,
+                )
+                return undefined
+              }
+              autoGraftSuppressedUntil.delete(agentId)
+              try {
+                persistAutoGraftSuppression(stableCtx, [agentId])
+              } catch {
+                // A stale record only withholds one more prompt; not worth failing the step.
+              }
+            }
+          }
           if (settings.graftMode === 'confirm' && !pendingConfirms.has(agentId)) {
             pendingConfirms.set(agentId, {
               targetId: autoTargetId(settings),
