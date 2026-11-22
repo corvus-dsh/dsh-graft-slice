@@ -22306,11 +22306,39 @@ async function appendTransitionCard(
      * provider silent) vanished from the panel entirely.
      */
     const liveSessions                                                                   = []
+    /**
+     * ── USER-REPORTED (P0): 「读取转生控制台超时（3000ms 内宿主没有响应）」 ──────────────────────────
+     *
+     * MEASURED ON THE LIVE PANEL: the graft console showed a red 「读取失败」 card with
+     * `读取转生控制台超时（3000ms 内宿主没有响应）` while the memory console on the same host answered
+     * immediately. The panel then fell back to plugin defaults, so every switch read as OFF — which is
+     * how an operator concludes the plugin is broken rather than the read.
+     *
+     * CAUSE: this loop is SERIAL and per-session, and each iteration does a watermark read PLUS a
+     * `governedWatermarks` call that touches the filesystem (compaction mounts, reserved tokens). With
+     * ~15 live sessions on the audited machine that is 30+ awaits before the first row can be returned,
+     * and the client's budget is 3s.
+     *
+     * THE FIX IS THE WAITING, NOT THE WORK: the sessions are independent, so they are measured
+     * CONCURRENTLY. Same reads, same values, one round-trip instead of N. Nothing about what a row says
+     * changes — and the ordering of the returned array is restored by index afterwards, so a caller that
+     * relied on `sessions.list()` order still sees it.
+     */
     if (isRecord(sessions) && typeof sessions.list === 'function') {
-      for (const agent of sessions.list()         ) {
-        const sessionId = typeof agent?.id === 'string' ? agent.id : ''
-        if (sessionId.length === 0) continue
-        const watermark = await readTokenWatermark(stableCtx, sessionId, settings)
+      const agents = (sessions.list()         )
+        .map((agent) => (typeof agent?.id === 'string' ? agent.id : ''))
+        .filter((sessionId) => sessionId.length > 0)
+      const measured = await Promise.all(
+        agents.map(async (sessionId) => {
+          const watermark = await readTokenWatermark(stableCtx, sessionId, settings)
+          const rowThresholds =
+            watermark === undefined
+              ? undefined
+              : await governedWatermarks(stableCtx, settings, sessionId, watermark, ctx.logger)
+          return { sessionId, watermark, rowThresholds }
+        }),
+      )
+      for (const { sessionId, watermark, rowThresholds: measuredThresholds } of measured) {
         liveSessions.push({
           sessionId,
           cwd: workspaceOfAgent(stableCtx, sessionId),
@@ -22318,7 +22346,10 @@ async function appendTransitionCard(
         })
         // Only a measurable session gets a ROW; every session gets an ENTRY above.
         if (watermark === undefined) continue
-        const rowThresholds = await governedWatermarks(stableCtx, settings, sessionId, watermark, ctx.logger)
+        const rowThresholds = (measuredThresholds ?? (await governedWatermarks(stableCtx, settings, sessionId, watermark, ctx.logger)))                           
+                                        
+                                          
+         
         const mark = graftTargets.get(sessionId)
         const completed = (() => {
           const live = (stableCtx       ).sessions?.get?.(sessionId)       

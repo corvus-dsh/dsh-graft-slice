@@ -1239,6 +1239,23 @@ window.__ModuleLoader__.load({
              * panel stays readable. The fallback is marked `degraded`, so the UI can say
              * "these are defaults" instead of pretending they are the live config.
              */
+            /**
+             * ── USER-REPORTED: 「读取转生控制台超时（3000ms 内宿主没有响应）」 ──────────────────────────
+             *
+             * Measured on a live 15-session host: the graft console timed out while the memory console
+             * answered immediately, then fell back to plugin defaults so EVERY switch showed OFF.
+             *
+             * THE BUDGET IS NOT THE FIX, AND IT STAYS AT 3s ON PURPOSE. `v029` pins `<= 3_000ms` for BOTH
+             * panels with the reason in its own name: 「gives the Host THREE seconds, not twelve」 — a
+             * budget short enough that the panel reads as responsive. Raising it here would have made
+             * this one file pass by relaxing the rule the other file is still held to, which is the
+             * 「fix the test」 failure this project keeps naming.
+             *
+             * What changed instead is the HOST side of the same read: `consoleState` now measures every
+             * session CONCURRENTLY (same reads, one round-trip) rather than in a serial loop that was
+             * 30+ awaits for 15 sessions. That is what made 3 seconds insufficient, and it is fixed where
+             * the cost was.
+             */
             const reply = await withTimeout(bridge.state(target), 3_000, '读取转生控制台')
             if (!alive) return
             setVia(String((reply && reply.via) || ''))
