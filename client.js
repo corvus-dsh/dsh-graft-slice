@@ -1009,6 +1009,13 @@ window.__ModuleLoader__.load({
       return {
         degraded: true,
         degradedReason: reason,
+        /**
+         * 18.6-D ③: the bridge never answered, so the switches below ARE the plugin defaults and the
+         * footer's warning is TRUE here. Stated as an explicit `false` rather than left absent: this is
+         * the one path where the claim must never be dropped, and an absent field is indistinguishable
+         * from 「producer forgot」.
+         */
+        configWritable: false,
         config: {
           modelDrivenGraft: true,
           autoGraft: true,
@@ -1468,7 +1475,22 @@ window.__ModuleLoader__.load({
                 wordBreak: 'break-word',
               },
             }, [
-              h('div', { key: 't', style: { fontWeight: 600, marginBottom: '6px' } }, '读取失败'),
+              /**
+               * ── 18.6-D ① (P1, lead-measured): THE TITLE IS A CONDITION, NOT A LITERAL ───────────────
+               *
+               * It was the string `'读取失败'` for BOTH branches. So a degraded host — one that answered
+               * fine and told us its numbers are not this machine's real configuration — was announced as
+               * a READ FAILURE, while the panel's own comment two lines up insists 「『没有这个后端』不是
+               * 『读取失败』，两者不许压成一句」. `v314 ③` asserts exactly that for the compaction case;
+               * this path was outside that criterion's reach.
+               *
+               * Three states, three sentences:
+               *   error present        ⇒ 「读取失败」      we could not get an answer
+               *   error absent + degraded ⇒ 「宿主通道降级」  we got an answer, and it says 「do not trust
+               *                                              these numbers as configuration」
+               */
+              h('div', { key: 't', style: { fontWeight: 600, marginBottom: '6px' } },
+                error ? '读取失败' : '宿主通道降级'),
               h('div', { key: 'm' }, String(error || (state && state.degradedReason) || '(宿主没有返回可识别的错误信息)')),
               /**
                * v0.30: the RAW failure, as JSON. The user's rule is explicit — make the
@@ -1481,8 +1503,23 @@ window.__ModuleLoader__.load({
                   degradedReason: state && state.degradedReason ? String(state.degradedReason) : undefined,
                   via: via || undefined,
                 })),
-              h('div', { key: 'h', style: { marginTop: '8px', opacity: 0.8 } },
-                '以上开关显示的是插件默认值，不是宿主的真实配置。点击「刷新」重试。'),
+              /**
+               * ── 18.6-D ③ (P1, lead-measured): 「开关是默认值」 IS NOT ALWAYS TRUE ────────────────────
+               *
+               * The lead's field test: a console degraded because there was NO MEASURABLE SESSION put
+               * this line on screen — 「以上开关显示的是插件默认值」 — directly above a card saying
+               * 「当前没有可测量的活动会话」. Two sentences in one view contradicting each other, and the
+               * second one is the false one: those switches are REAL and writable.
+               *
+               * Only an unavailable `configEditor` makes the claim true, and the server now says so as a
+               * bit (`configWritable`). Read as `!== false` so an older payload — which has no such field
+               * — keeps the previous wording instead of silently dropping a warning that might be needed.
+               */
+              state !== null && state !== undefined && state.configWritable === false
+                ? h('div', { key: 'h', style: { marginTop: '8px', opacity: 0.8 } },
+                    '以上开关显示的是插件默认值，不是宿主的真实配置（configEditor 不可用，点击不会落盘）。点击「刷新」重试。')
+                : h('div', { key: 'h', style: { marginTop: '8px', opacity: 0.8 } },
+                    '点击「刷新」重试。'),
             ])
           : null,
         /** v0.30: the write confirmation, rendered next to the error card. */

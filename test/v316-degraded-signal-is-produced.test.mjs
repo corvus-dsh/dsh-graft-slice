@@ -154,10 +154,29 @@ function loadPanel() {
     clear: async () => ({ ok: true, via: 'test', text: '{"ok":true}' }),
   })
 
+  /**
+   * ── 18.6-D: THE OTHER WAY A RED CARD APPEARS ────────────────────────────────────────────────────
+   *
+   * `bridgeWith` always answers, so it can only ever produce the DEGRADED card. A card titled
+   * 「读取失败」 comes from the bridge not answering at all, which is a different branch (`setError` +
+   * `fallbackState`). Without this second drawer, 「the title follows the state」 cannot be tested — the
+   * old literal passed every assertion because only one of the two states was reachable.
+   */
+  const failingBridge = (reason) => ({
+    attach() {},
+    state: async () => ({ ok: false, via: 'test', text: reason }),
+    set: async () => ({ ok: true, via: 'test', text: '{"ok":true}' }),
+    clear: async () => ({ ok: true, via: 'test', text: '{"ok":true}' }),
+  })
+
   return {
     draw: (payload) => {
       React.__beginRender()
       return mod.__panelForTest({ bridge: bridgeWith(payload) })
+    },
+    drawFailing: (reason) => {
+      React.__beginRender()
+      return mod.__panelForTest({ bridge: failingBridge(reason) })
     },
     runEffects: async () => {
       for (const fn of effects) fn()
@@ -231,4 +250,98 @@ test('v316 ④ (end-to-end): the degraded payload renders the RED card; a health
   assert.doesNotMatch(healthyText, /宿主通道降级/u,
     `健康时不得出现降级卡（否则红卡变成壁纸）；实测：${healthyText.slice(0, 400)}`)
   assert.match(healthyText, /宿主通道正常/u, '健康时必须说正常')
+})
+
+/* ── 18.6-D ────────────────────────────────────────────────────────────────────────────────────────
+ * 「值到了」与「值被说成了什么」是两条判据（§〇 25）。上面四条证明 `degraded` 到了；下面三条管它
+ * 到了以后被说成了什么 —— 红卡标题、页脚，以及「通了」与「未连通」不许压成一句。
+ * ──────────────────────────────────────────────────────────────────────────────────────────────── */
+
+/** The red card's own text: from its title onward, so a badge match cannot satisfy a title assertion. */
+const cardText = (text) => {
+  const body = panelBody(text)
+  const at = body.lastIndexOf('错误详情：')
+  if (at < 0) return ''
+  const head = Math.max(body.lastIndexOf('读取失败', at), body.lastIndexOf('宿主通道降级', at))
+  return head >= 0 ? body.slice(head) : body.slice(at)
+}
+
+test('v316 ⑤: the red card TITLE follows the state — 「读取失败」 only when there WAS a read failure', async () => {
+  const { draw, drawFailing, runEffects } = loadPanel()
+
+  /**
+   * Half A — the bridge ANSWERED with a well-formed payload saying 「degraded」. Nothing failed to be read,
+   * so 「读取失败」 is a false statement and the title must be 「宿主通道降级」.
+   */
+  const degradedPayload = await realPayload({ editorAvailable: false })
+  draw(degradedPayload)
+  await runEffects()
+  const degradedCard = cardText(textOf(draw(degradedPayload)).join(' '))
+  assert.equal(degradedCard.includes('读取失败'), false,
+    `降级不是读取失败，标题不得说「读取失败」；实测红卡：${degradedCard.slice(0, 400)}`)
+  assert.match(degradedCard, /宿主通道降级/u,
+    `降级卡的标题必须是「宿主通道降级」；实测：${degradedCard.slice(0, 400)}`)
+
+  /**
+   * Half B (the other direction) — the bridge did NOT answer. Here 「读取失败」 is TRUE and must still
+   * appear. Without this half, deleting the branch outright would pass.
+   */
+  drawFailing('桥接超时（探针）')
+  await runEffects()
+  const failedCard = cardText(textOf(drawFailing('桥接超时（探针）')).join(' '))
+  assert.match(failedCard, /读取失败/u,
+    `真的没读到时必须说「读取失败」；实测红卡：${failedCard.slice(0, 400)}`)
+})
+
+test('v316 ⑥: the footer 「开关是默认值」 appears ONLY when the switches really are defaults', async () => {
+  const { draw, drawFailing, runEffects } = loadPanel()
+
+  /** Case 1 — no measurable session: degraded, but every switch on that screen is REAL and writable. */
+  const noSession = await realPayload({ editorAvailable: true, withSession: false })
+  draw(noSession)
+  await runEffects()
+  const noSessionCard = cardText(textOf(draw(noSession)).join(' '))
+  assert.match(noSessionCard, /没有可测量的活动会话/u, '这一屏确实因无会话而降级（前提确认）')
+  assert.equal(noSessionCard.includes('以上开关显示的是插件默认值'), false,
+    `开关是真的就不许说它们是默认值（同一张卡不能自相矛盾）；实测：${noSessionCard.slice(0, 500)}`)
+
+  /** Case 2 (other direction) — `configEditor` unavailable ⇒ the claim IS true and must print. */
+  const noEditor = await realPayload({ editorAvailable: false })
+  draw(noEditor)
+  await runEffects()
+  const noEditorCard = cardText(textOf(draw(noEditor)).join(' '))
+  assert.match(noEditorCard, /以上开关显示的是插件默认值/u,
+    `configEditor 不可用时必须说开关是默认值；实测：${noEditorCard.slice(0, 500)}`)
+
+  /** Case 3 — the bridge never answered: defaults, so the warning stays. */
+  drawFailing('桥接超时（探针）')
+  await runEffects()
+  const failedCard = cardText(textOf(drawFailing('桥接超时（探针）')).join(' '))
+  assert.match(failedCard, /以上开关显示的是插件默认值/u,
+    `读不到时开关必然是默认值，警告不得消失；实测：${failedCard.slice(0, 500)}`)
+})
+
+test('v316 ③b: the no-session degradation asserts TITLE and FOOTER too, not just the badge', async () => {
+  /**
+   * 18.6-D ④: `v316 ③` / `v316 ④` only asserted the BADGE. That is precisely how the original defect
+   * survived — the badge said 「宿主通道降级」 while the card underneath said 「读取失败」 +
+   * 「以上开关显示的是插件默认值」. A criterion that reads one of the three places a state is rendered
+   * cannot see the other two disagreeing with it.
+   */
+  const { draw, runEffects } = loadPanel()
+  const payload = await realPayload({ editorAvailable: true, withSession: false })
+  draw(payload)
+  await runEffects()
+  const text = panelBody(textOf(draw(payload)).join(' '))
+
+  assert.match(text, /没有可测量的活动会话/u, '① 理由：说清是哪一种降级')
+  assert.match(text, /宿主通道降级/u, '② 徽章：这是降级，不是断连')
+  assert.equal(text.includes('宿主通道未连通'), false, '③ 徽章不得把「通了」说成「未连通」')
+
+  const card = cardText(text)
+  assert.match(card, /宿主通道降级/u, '④ 标题：由状态决定，不是字面量')
+  assert.equal(card.includes('读取失败'), false, '⑤ 标题不得说「读取失败」——什么都没失败')
+  assert.equal(card.includes('以上开关显示的是插件默认值'), false,
+    '⑥ 页脚不得说开关是默认值——这一屏的开关是真的')
+  assert.match(card, /点击「刷新」重试/u, '⑦ 页脚仍要给出下一步动作')
 })

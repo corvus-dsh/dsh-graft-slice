@@ -11612,6 +11612,15 @@ export interface GraftConsoleState {
   /** Present only when `degraded` — a boolean without 「because」 sends the reader to the wrong switch. */
   degradedReason?: string
   /**
+   * 18.6-D ③: can a switch press actually persist? False ONLY when `configEditor` is unavailable.
+   *
+   * Distinct from `degraded` on purpose. A session-less or unreadable-graph console is degraded but its
+   * switches are real; an editor-less one shows defaults that cannot be saved. The renderer needs this
+   * bit to decide whether to print 「以上开关显示的是插件默认值」 — a sentence that is FALSE in the other
+   * degraded cases, and a panel contradicting itself in one card is the shape this batch keeps finding.
+   */
+  configWritable: boolean
+  /**
    * 17.4-A: the compaction ceiling, at the address the client reads.
    *
    * Optional because the no-sessions branch has no ceiling to report — that absence is real, and it is
@@ -13381,6 +13390,19 @@ async function appendTransitionCard(
        */
       degraded,
       ...(degraded ? { degradedReason: degradationReasons.join('；') } : {}),
+      /**
+       * ── 18.6-D ③: WHICH KIND OF DEGRADATION THIS IS — as a BOOLEAN, not as a phrase ───────────────
+       *
+       * The lead's stop condition asked whether fix ③ needs a 「degradation kind」 concept. It does not:
+       * the renderer's question is one bit — 「are these numbers plugin defaults?」 — and only an
+       * unavailable `configEditor` makes that true. The graph/ledger/no-session cases are degraded in a
+       * DIFFERENT way (a number may be unknown) and leave the switches perfectly writable.
+       *
+       * Emitted as its own field rather than parsed out of `degradedReason`: matching a Chinese sentence
+       * to decide a UI branch is the 「锚在名字上」 failure this batch keeps removing. `degradedReason`
+       * keeps its structure; this is a separate fact.
+       */
+      configWritable: editorAvailable,
       config: {
         modelDrivenGraft: settings.modelDrivenGraft,
         autoGraft: settings.autoGraft,
