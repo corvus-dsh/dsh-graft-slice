@@ -63,7 +63,7 @@ const EXEMPT = new Map([
       '(graftError 49×, isRecord 2×, SessionEventLike 7×) but never imported.',
   }],
   ['core/ignition.ts', {
-    ceiling: 1086,
+    ceiling: 1056,
     reason:
       'The ignition channel: per-goal admission, the durable queue, retries and rollback. Its pieces share ' +
       'module-level state (the deps resolver, the pending queue), so a split needs dependency inversion — ' +
@@ -71,7 +71,10 @@ const EXEMPT = new Map([
       'Ceiling raised 1069 → 1086 by B4-0a①: the rollback notice stopped claiming `source.kind`s it does ' +
       'not own — the literal `\'user\'` became an INJECTED parameter (importing `host-shape` from here was ' +
       'refused by `v136` as a new edge between two pre-existing modules). The 15 lines are that rule ' +
-      'stated where the next reader will look, not new machinery.',
+      'stated where the next reader will look, not new machinery. ' +
+      'Ceiling LOWERED 1086 → 1056 by B4-B B10: the un-retire moved to `core/ledger-restore.ts` (its order ' +
+      'had two owners, and the caller\'s copy was the bug), which is a real dependency inversion of a ' +
+      'pure-function block — the note above says such a split must be a ruled-on item, and it was ruled on.',
   }],
 ])
 

@@ -8843,7 +8843,19 @@ async function graftSliceAndInjectUnlocked(
         newId,
         ignition.reason ?? 'ignition failed',
       )
-      pendingIgnitions.delete(newId)
+      /**
+       * v8.x B10 (P0): deleting the queue entry is the LAST step of a rollback, not a formality.
+       *
+       * WHAT IT USED TO DO: `pendingIgnitions.delete(newId)` unconditionally, and `sourceRestored`
+       * was consulted only by the log line below. When the durable un-retire failed, the queue entry
+       * was gone, the source was still listed as retired on disk, and every later activation had
+       * nothing to retry — the double-blind state made permanent by the code that was supposed to
+       * undo it. `ignition.rollback` IS in the receipt, so the failure is visible either way; what
+       * the deletion decides is whether anything can still fix it.
+       */
+      if (rollback.sourceRestored) {
+        pendingIgnitions.delete(newId)
+      }
       // the ctx argument was a leftover: the function reads module state now (see commit msg)
       persistPendingIgnitions()
       ignition = { ...ignition, rollback }

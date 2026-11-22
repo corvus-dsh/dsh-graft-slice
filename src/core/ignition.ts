@@ -34,8 +34,8 @@
 import { mkdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-import { withFileLock } from './txn.js'
-import { readLedger, writeJsonAtomic, writeLedgerAtomic } from './ledger.js'
+import { writeJsonAtomic } from './ledger.js'
+import { restoreSessionDurably } from './ledger-restore.js'
 import { isRecord } from '../utils/serialize.js'
 import { ensureParadiseWrite } from './paradise-write.js'
 import type { ParadiseSessionLike } from './paradise-write.js'
@@ -103,6 +103,15 @@ export interface IgnitionRollback {
   noticeAppended: boolean
   /** Target left in place and marked, so it is visible but not picked up. */
   targetId: string
+  /**
+   * v8.x B10 (P0): TRUE when the source could NOT be un-retired on disk, so the pending-ignition
+   * entry was deliberately KEPT.
+   *
+   * This is a field rather than a sentence in `reason` because the caller has to ACT on it: deleting
+   * the queue entry is what makes the double-blind permanent (memory restored, disk retired, nothing
+   * left to retry). A boolean can be branched on; a log line cannot.
+   */
+  pendingRetained: boolean
   reason?: string
 }
 
@@ -414,13 +423,6 @@ function readJsonArrayLocal(path: string): unknown[] {
   } catch {
     return []
   }
-}
-
-/** The ledger-aware variant: a torn or future-epoch envelope reads as empty, not as garbage. */
-function ledgerArrayLocal(path: string): unknown[] {
-  const read = readLedger(path)
-  if (read.defect !== undefined && read.defect !== 'unreadable') return []
-  return Array.isArray(read.payload) ? read.payload : []
 }
 
 export function loadPendingIgnitions(): void {
@@ -840,81 +842,14 @@ export const ROLLBACK_NOTICE =
   `${ROLLBACK_NOTICE_MARKER} 由于新会话点火失败，已为您自动回滚到当前会话，请重试切片。`
 
 /**
- * The TRUE un-retire.
- *
- * `persistRetiredStore(ctx, [id])` is not enough, and the reason is subtle: the write path is a
- * read-modify-write that ADOPTS the file's contents back into memory (correct for merging two
- * processes' retirements). So a removal that runs before the file is rewritten can be UNDONE by that
- * same adopt pass on the next write — the id comes back from disk and the session is frozen again,
- * durably, on the next restart. The rollback would look successful in memory and be a no-op on disk.
- *
- * This does the removal in the only order that holds: remove from the file under the lock, and make the
- * in-memory set agree with the file afterwards.
- */
-function unRetireDurably(sessionId: string): boolean {
-  let restored = false
-  try {
-    mkdirSync(dirname(state().retiredStorePath()), { recursive: true })
-    withFileLock(state().retiredStorePath(), () => {
-      const remaining = new Set(ledgerArrayLocal(state().retiredStorePath()).filter((v): v is string => typeof v === 'string'))
-      remaining.delete(sessionId)
-      writeLedgerAtomic(state().retiredStorePath(), [...remaining].sort())
-      // The memory set is made to AGREE with the file, not merged into: after an explicit removal,
-      // "the file does not have it" is the authoritative answer.
-      state().retired.delete(sessionId)
-      restored = !remaining.has(sessionId)
-    })
-  } catch (error) {
-    try {
-      state().logWarn?.(`[dsh-graft-slice] un-retire write failed for ${sessionId}: ${String((error as any)?.message ?? error)}`)
-    } catch {
-      // Logging must not change the rollback result.
-    }
-    return false
-  }
-  try {
-    mkdirSync(dirname(state().transferredStorePath()), { recursive: true })
-    withFileLock(state().transferredStorePath(), () => {
-      const remaining = { ...(ledgerArrayLocal(state().transferredStorePath()) as unknown as Record<string, unknown>) }
-      delete remaining[sessionId]
-      writeLedgerAtomic(state().transferredStorePath(), remaining)
-      state().transferred.delete(sessionId)
-    })
-  } catch (error) {
-    try {
-      state().logWarn?.(
-        `[dsh-graft-slice] un-retire transfer write failed for ${sessionId}: ${String((error as any)?.message ?? error)}`,
-      )
-    } catch {
-      // Logging must not change the rollback result.
-    }
-  }
-  /**
-   * Belt and braces for the in-memory gate the pre-step actually reads.
-   *
-   * The pre-step consults FOUR per-session marks, not just the two ledgers: the retired set, the
-   * transferred map, the auto-graft STATE machine, and the deferred graft queue. Clearing only the
-   * ledgers leaves `autoGraftStates === 'done'`, which returns `reason: 'Transferred'` forever — the
-   * session would be un-retired on disk and still frozen in the running process, the same double-blind
-   * one layer down.
-   */
-  state().retired.delete(sessionId)
-  state().transferred.delete(sessionId)
-  state().autoGraftStates.delete(sessionId)
-  state().autoGraftInFlight.delete(sessionId)
-  state().pendingGraftSources.delete(sessionId)
-  state().pendingConfirms.delete(sessionId)
-  // The "this id is a target we created" mark belongs to the TARGET, and a rollback ends that
-  // relationship: the source is a plain session again and must not inherit the target's grace window.
-  state().targets.delete(sessionId)
-  return restored || !state().retired.has(sessionId)
-}
-
-/**
  * Undo a migration whose target never started.
  *
  * Order matters: the ledgers are restored FIRST, because an in-memory-only rollback dies on the next
- * restart and leaves the user exactly as stuck as before.
+ * restart and leaves the user exactly as stuck as before. The ordering itself lives in
+ * `core/ledger-restore.ts` (v8.x B10) — moved, not rewritten, and moved because the CALLER used to
+ * keep a second copy of it: `state().retired.delete()` BEFORE the durable write, so a failed write
+ * left memory saying "restored" and the ledger saying "still retired". One owner for an order; a
+ * second copy is always one edit away from drifting back.
  */
 export async function rollbackFailedIgnition(
   ctx: any,
@@ -927,16 +862,38 @@ export async function rollbackFailedIgnition(
     sourceRestored: false,
     noticeAppended: false,
     targetId,
+    pendingRetained: false,
     reason,
   }
   if (sourceSessionId.length === 0) {
     return { ...out, attempted: false, reason: 'no source session to roll back to' }
   }
   try {
-    state().retired.delete(sourceSessionId)
-    state().transferred.delete(sourceSessionId)
-    out.sourceRestored = unRetireDurably(sourceSessionId)
+    /**
+     * v8.x B10 (P0) — THE ORDER IS THE FIX, and the fix is to stop having two of them.
+     *
+     * WHAT IT USED TO DO: `state().retired.delete()` and `state().transferred.delete()` HERE, then the
+     * durable write. When that write failed, memory said "restored" while the ledger said "still
+     * retired" — the double-blind this function exists to undo, re-created one layer up. And
+     * `sourceRestored === false` was computed honestly, then used ONLY as log text: nothing retried.
+     *
+     * WHAT IT DOES NOW: `restoreSessionDurably` owns the order (file under the lock first, memory
+     * afterwards, and no memory change at all when the write fails), so "memory agrees with disk" holds
+     * on both branches by construction. Delegating is the point: a reorder here can be undone by the
+     * next edit, whereas a single owner cannot drift from itself.
+     */
+    out.sourceRestored = restoreSessionDurably(state(), sourceSessionId)
+    if (!out.sourceRestored) {
+      // The write did not land. `restoreSessionDurably` already logged the cause, but the CALLER must
+      // see it too — `pendingRetained` is what tells the call sites to keep the retry alive.
+      out.pendingRetained = true
+      out.reason =
+        `${reason}; durable un-retire FAILED — ${sourceSessionId} is still retired on disk, ` +
+        'in-memory recovery was NOT applied (memory left agreeing with disk), and the pending ' +
+        'ignition was retained so a later activation retries the rollback'
+    }
   } catch (error) {
+    out.pendingRetained = true
     out.reason = `${reason}; ledger rollback failed: ${String((error as any)?.message ?? error)}`
   }
   /**
@@ -1056,18 +1013,31 @@ export async function resumePendingIgnitions(
   for (const entry of [...state().pending.values()]) {
     if (!settings.igniteTarget) break
     if (ignitionExhausted(entry)) {
-      state().pending.delete(entry.targetId)
-      persistPendingIgnitions()
+      /**
+       * v8.x B10 (P0): the entry is removed only when the rollback actually reached the DISK.
+       *
+       * The old order was `delete` THEN `rollbackFailedIgnition`, so a failed durable un-retire threw
+       * away the only record that this migration still needed undoing: the source stayed retired on
+       * disk with nothing left to retry, which is the state `resumePendingIgnitions` exists to leave.
+       * Keeping the entry costs one rollback attempt per activation and is bounded by activation
+       * count, so the retry cannot become a hot loop.
+       */
       const rollback = await rollbackFailedIgnition(
         ctx,
         entry.sourceSessionId,
         entry.targetId,
         `gave up after ${entry.attempts} attempts`,
       )
+      if (rollback.sourceRestored) {
+        state().pending.delete(entry.targetId)
+        persistPendingIgnitions()
+      }
       out.push({
         targetId: entry.targetId,
         ok: false,
-        reason: `gave up after ${entry.attempts} attempts; rolled back to ${entry.sourceSessionId}`,
+        reason: rollback.sourceRestored
+          ? `gave up after ${entry.attempts} attempts; rolled back to ${entry.sourceSessionId}`
+          : `gave up after ${entry.attempts} attempts; ROLLBACK NOT DURABLE, entry retained for retry`,
         rollback,
       })
       continue

@@ -23,7 +23,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, posix } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -185,8 +185,21 @@ test('v136: a move may not add a dependency between two PRE-EXISTING modules', (
 
   for (const pair of brandNew) {
     const [from, to] = pair.split(' -> ')
-    const toStem = to.replace(/^\.\//u, '')
     const fromStem = from.replace(/^src\//u, '').replace(/\.ts$/u, '')
+    /**
+     * Resolve the specifier against the importer's directory before comparing it to a created stem.
+     *
+     * `verify-import-edges` prints the RAW SPECIFIER on the `to` side (`./ledger-restore`,
+     * `../utils/serialize`), so the old `to.replace(/^\.\//u, '')` only matched when the two files
+     * were SIBLINGS. Measured: adding `import … from './ledger-restore.js'` to `core/ignition.ts` —
+     * an edge INTO a module this diff created, i.e. exactly what the rule above permits — was
+     * reported as a new dependency, because `./ledger-restore` ≠ `core/ledger-restore`. The exemption
+     * was unreachable for every non-sibling import, which is most of them. Resolving is what makes
+     * the stated rule the rule that runs.
+     */
+    const toStem = posix
+      .normalize(posix.join(posix.dirname(fromStem), to))
+      .replace(/\.(?:d\.)?(?:ts|mts|cts|js|mjs|cjs)$/u, '')
     if (createdStems.has(toStem) || createdStems.has(fromStem)) continue
 
     /**
