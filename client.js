@@ -1416,21 +1416,42 @@ window.__ModuleLoader__.load({
        * numbers that never move. One badge answers "is this data real?" before the
        * operator reads a single switch.
        *
-       * Red = no host data at all, or the Host itself said it degraded. Amber = data is
-       * there but the derivation is missing. Green = the numbers came from the Host.
+       * ── 19.4-E (P1, lead-measured): 「未连通」 WAS UNREACHABLE, AND 「正常」 WAS A LIE ──────────
+       *
+       * The condition was `state === null || state === undefined` — and the failure path does
+       * `setState((prev) => prev ?? fallbackState(reason))`, where `fallbackState` sets `degraded: true`.
+       * So after ANY failed fetch `state` is never null: the FIRST failure produced a fallback object and
+       * every later one KEPT the previous payload. Measured, three timelines:
+       *
+       *   C. first render, effect not run yet  ⇒ 「未连通」   ← the only frame it was reachable
+       *   A. first fetch fails                 ⇒ 「降级」     ✗ the bridge is GONE, not degraded
+       *   B. succeeded once, then fails        ⇒ 「正常」(green) ✗✗ card said 「读取失败」 beside it
+       *
+       * B is the worst of the three: green badge, red card, same screen. The old comment reasoned about
+       * `state === null` as if that were 「no answer」, but the fallback object IS the no-answer case
+       * wearing a full payload's clothes — that is exactly what `degraded: true` was FOR, and it silently
+       * turned the null branch into dead code (§〇 26).
+       *
+       * The fix is the ORDER memory already uses (`memory client.js:1259`): loading → error → degraded →
+       * amber/green. `error` outranks `degraded` because a bridge failure can coexist with a stale
+       * `degraded` flag in a retained payload, and 「we could not reach it」 is the stronger fact.
        */
       const health =
         state === null || state === undefined
-          ? { level: 'red', text: '宿主通道未连通', hint: `桥接通道：${via || '（无）'}${error ? `；原因：${String(error).slice(0, 200)}` : ''}` }
-          : state.degraded === true
-            ? {
-                level: 'red',
-                text: '宿主通道降级',
-                hint: String(state.degradedReason || '宿主返回了降级状态：上面的数值是插件默认值，不是真实配置。'),
-              }
-            : thresholds === null
-              ? { level: 'amber', text: '已连通 · 推导缺失', hint: '配置读到了，但阈值/代价推导为空，请点「刷新」重试。' }
-              : { level: 'green', text: '宿主通道正常', hint: `桥接通道：${via || '（未知）'}；每 5 秒自动刷新。` }
+          ? error.length > 0
+            ? { level: 'red', text: '宿主通道未连通', hint: `桥接通道：${via || '（无）'}；原因：${String(error).slice(0, 200)}` }
+            : { level: 'red', text: '正在读取…', hint: `桥接通道：${via || '（无）'}；正在向宿主读取状态。` }
+          : error.length > 0
+            ? { level: 'red', text: '宿主通道未连通', hint: `桥接通道：${via || '（无）'}；原因：${String(error).slice(0, 200)}` }
+            : state.degraded === true
+              ? {
+                  level: 'red',
+                  text: '宿主通道降级',
+                  hint: String(state.degradedReason || '宿主返回了降级状态：上面的数值是插件默认值，不是真实配置。'),
+                }
+              : thresholds === null
+                ? { level: 'amber', text: '已连通 · 推导缺失', hint: '配置读到了，但阈值/代价推导为空，请点「刷新」重试。' }
+                : { level: 'green', text: '宿主通道正常', hint: `桥接通道：${via || '（未知）'}；每 5 秒自动刷新。` }
       const healthColor = health.level === 'green' ? '#16a34a' : health.level === 'amber' ? '#b45309' : '#b91c1c'
 
       return h('div', { className: 'gc-root' }, [
