@@ -1511,9 +1511,15 @@ window.__ModuleLoader__.load({
                * 「当前没有可测量的活动会话」. Two sentences in one view contradicting each other, and the
                * second one is the false one: those switches are REAL and writable.
                *
-               * Only an unavailable `configEditor` makes the claim true, and the server now says so as a
-               * bit (`configWritable`). Read as `!== false` so an older payload — which has no such field
-               * — keeps the previous wording instead of silently dropping a warning that might be needed.
+               * Only an unavailable `configEditor` makes the claim true, and the server states that as its own
+               * bit (`configWritable`, emitted in BOTH branches — see `GraftConsoleState`).
+               *
+               * Read through `=== false`, i.e. the warning prints only when the producer SAID so. An absent
+               * field therefore means 「an older producer I cannot ask」, and this branch chooses to say only
+               * 「点击「刷新」重试」 rather than assert a fact it does not have. The one path that must never
+               * lose the warning — the bridge never answered — cannot reach it: `fallbackState` emits
+               * `configWritable: false` explicitly. That is why the fallback states it instead of leaving it
+               * out, and why ⑤/⑥ in `v316` pin both directions.
                */
               state !== null && state !== undefined && state.configWritable === false
                 ? h('div', { key: 'h', style: { marginTop: '8px', opacity: 0.8 } },
