@@ -1745,6 +1745,31 @@ window.__ModuleLoader__.load({
                       `⚠ 生效值 ≠ 设置值：设置 ${configured.toFixed(3)}，天花板把硬阈值压到 ${effective.toFixed(3)}`)
                   })()
                 : null,
+              /**
+               * ── USER-REQUESTED: A SWITCH FOR THE HOST'S AUTO-COMPACTION ─────────────────────────────
+               *
+               * Until now the only way to change `compaction-basic`'s `auto` was 「edit the profile patch
+               * and restart」 — the same dead end the console was built to remove for graft's own knobs.
+               * The warning below told the operator the ceiling was active and then left them nowhere to go.
+               *
+               * The KEY is `hostAutoCompaction` and it is the ONLY switch here that is not graft config:
+               * it writes into the compaction plugin's row (see `writeCompactionAuto`). The hint says so,
+               * because a reader who assumes it is a graft setting would look in the wrong file next time.
+               *
+               * What it does NOT do: it does not disable the plugin, and it does not take away the
+               * per-session ability to compact on demand. Turning off the AUTOMATIC behaviour is the point;
+               * removing the manual one was never asked for.
+               */
+              h(Toggle, {
+                key: 'hostauto',
+                label: '宿主自动压缩（compaction-basic auto）',
+                hint:
+                  '关掉后 graft 不再把切片阈值压到压缩线之下（小窗口会话能保持真实的 70%/75%）；' +
+                  '宿主仍保留会话内手动压缩能力。写入 profile 的 compaction-basic 行，不是 graft 的配置。',
+                checked: compaction.present === true && compaction.auto === true,
+                onChange: (next) => write('hostAutoCompaction', next),
+                disabled: !canWrite || compaction.present !== true,
+              }),
             ]),
         h('div', { key: 'guard', className: 'gc-card' }, [
           h('h3', { key: 'h', className: 'gc-h' }, '护栏'),

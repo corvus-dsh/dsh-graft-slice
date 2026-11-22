@@ -36,7 +36,7 @@ export const COMPACTION_WARN_MARGIN = 0.03
 /** O 不可读时的保守 hardAt：只要 O ≤ 0.3875W，它仍然先于压缩。 */
 export const COMPACTION_CONSERVATIVE_HARD_AT = 0.55
 
-const COMPACTION_BASIC = '@deepseek-ai/dsh-compaction-basic'
+export const COMPACTION_BASIC = '@deepseek-ai/dsh-compaction-basic'
 const AGENT_PRESET = '@deepseek-ai/dsh-agent-preset'
 
 /** 一个实际挂载的 compaction-basic 后端（host 行或某个 agent preset 里的行）。 */
@@ -215,11 +215,38 @@ export function applyCompactionCeiling(
 
   let thresholdRatio: number | undefined
   if (computable) {
-    thresholdRatio = Math.min(
-      ...autoMounts.map((mount) =>
-        Math.min(mount.thresholdRatio, 1 - outputReservation / windowLimit - mount.headroomTokens / windowLimit),
-      ),
-    )
+    /**
+     * ── USER-RULED (P0): THE CEILING IS THE COMPACTION THRESHOLD, NOT 「WINDOW MINUS OUTPUT」 ───────
+     *
+     * WHAT IT USED TO BE:
+     *
+     *     thresholdRatio = min(
+     *       mount.thresholdRatio,                                   // the tool's own line
+     *       1 − O/W − headroom/W,                                    // ← THE DEFECT
+     *     )
+     *     hardAt = thresholdRatio − 0.02
+     *
+     * where `O` is the session's `maxTokens` (its OUTPUT reservation). The intent was 「the slice must
+     * happen before the window physically runs out」, which is right. The arithmetic was not: `O` is a
+     * budget for the NEXT completion, not space already consumed, so subtracting it from the CEILING
+     * charged every session for an output it had not written yet.
+     *
+     * Measured consequence on a real panel: a session with W=200k and O=64k produced
+     * `1 − 0.32 − 0.04 = 0.64`, then `hardAt = 0.64 − 0.02 = 0.62` — and with `deriveWarnAt`'s margin the
+     * warning line landed at 0.52. Rows read 「提示线 52% · 强制线 55%」 while the user's setting said
+     * 70% / 75%, and a session was cut at 55% having never been warned. The user reported exactly this
+     * as 「模型未到 70% 水位没有预警就被强切」.
+     *
+     * WHAT IT IS NOW: the compaction TOOL's own threshold is the ceiling, and nothing else is. The
+     * slice still wins the race (that is the whole point of this module) — it wins it against the line
+     * the tool will actually compact at, which is the only line that matters. `O` and `headroom` no
+     * longer move graft's threshold; they remain part of the tool's own reported threshold.
+     *
+     * STATED CONSEQUENCE, deliberately accepted by the user: if the compaction tool's threshold is BELOW
+     * the configured 0.70, that tool wins and the slice moves earlier. The alternative — ignoring it —
+     * is the silently-compacted handoff v0.37 was written to prevent.
+     */
+    thresholdRatio = Math.min(...autoMounts.map((mount) => mount.thresholdRatio))
     thresholdRatio = Math.max(0.01, Math.min(0.99, thresholdRatio))
   }
 

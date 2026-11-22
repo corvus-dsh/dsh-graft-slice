@@ -28,8 +28,19 @@ import {
 
 const W = 1_048_576
 const O = 256_000
-/** min(0.8, 1 − 256000/1048576 − 65536/1048576) = 0.693359… → 0.6934 */
-const HOST_RATIO = 0.6934
+/**
+ * ── USER-RULED 2026-11-22: THE CEILING IS THE TOOL'S THRESHOLD, NOT 「1 − O/W − headroom/W」 ────────
+ *
+ * This constant used to be `min(0.8, 1 − 256000/1048576 − 65536/1048576) = 0.6934`. The subtraction
+ * charged every session for an output budget it had not WRITTEN: `O` is `maxTokens` for the next
+ * completion, not space already consumed. On a small window it dominated — measured on a live panel, a
+ * 200k session with O=64k produced a hard line of 0.55 and a warning line of 0.52, so sessions were cut
+ * at 55% with no warning delivered, while the user's setting said 70% / 75%.
+ *
+ * The tool's own threshold is now the only ceiling. `O` and `headroom` still matter — to the tool's
+ * computation of ITS threshold — but they no longer move graft's.
+ */
+const HOST_RATIO = 0.8
 
 const loaderOf = (entries) => ({ entries: () => entries })
 
@@ -101,11 +112,34 @@ test('v221 ② can-red: auto:true ⇒ 有效 hardAt 必须低于压缩阈值，l
   assert.equal(out.compaction.source, 'computed')
   assert.equal(out.compaction.auto, true)
   assert.equal(out.compaction.thresholdRatio, HOST_RATIO)
-  assert.equal(out.hardAt, 0.6734, 'hardAt 必须是阈值 − 0.02')
-  assert.equal(out.warnAt, 0.6434, 'warnAt 必须再低 0.03')
-  assert.ok(out.hardAt < out.compaction.thresholdRatio, '切片必须严格早于压缩')
-  // the old, broken pair would have lost the race — assert that this is what changed
-  assert.ok(0.75 >= out.compaction.thresholdRatio, '0.75 本来就在压缩阈值之上')
+  /**
+   * With the tool's threshold at 0.8 the ceiling no longer constrains this session: `0.75` (the user's
+   * setting) is already below it, so the effective hard line IS the configured one. That is the whole
+   * point of the ruling — a big window keeps a real 75% instead of being pulled down by its output
+   * reservation. The negative direction is the next assertion.
+   */
+  assert.equal(out.hardAt, 0.75, '压缩阈值 0.8 时，用户的 0.75 生效 —— 不再被输出预留拉低')
+  assert.ok(out.hardAt <= out.compaction.thresholdRatio, '切片仍然严格不晚于压缩')
+  assert.ok(out.warnAt < out.hardAt, 'warn 必须早于 hard')
+})
+
+test('v221 ②b: the ceiling STILL wins when the tool compacts earlier than the user asked', () => {
+  /**
+   * The remaining half of the geometric guarantee, and the one that must not be lost: if the tool's own
+   * threshold is BELOW the configured hard line, that tool wins and the slice moves earlier. Removing the
+   * `1 − O/W` subtraction must not turn this into 「always use the setting」.
+   */
+  const mounts = [{
+    name: 'compaction-basic',
+    where: 'host',
+    auto: true,
+    thresholdRatio: 0.6,
+    headroomTokens: 65536,
+  }]
+  const out = applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, mounts, W, O)
+  assert.equal(out.compaction.thresholdRatio, 0.6)
+  assert.equal(out.hardAt, 0.58, '压缩阈值 0.6 ⇒ hardAt 0.58（阈值 − 0.02），即使设置是 0.75')
+  assert.ok(out.hardAt < 0.6, '切片必须早于压缩')
 })
 
 test('v221 ③ can-red: auto:false ⇒ 水位保持用户配置，且不报警', () => {
@@ -144,20 +178,26 @@ test('v221 ⑤: W 也不可读时同样落到 conservative（不是「W=0 所以
 })
 
 test('v221 ⑥: 多个后端取最早的那个阈值（config 是 per-mount 的，不硬编码）', () => {
-  // first backend is default (0.8/65536) → 0.6934; second reserves 200k:
-  // 1 − 256000/1048576 − 200000/1048576 = 0.5651. The slice must respect the
-  // EARLIEST compression, so 0.5651 wins (and hardAt = 0.5651 − 0.02 = 0.5451).
+  /**
+   * REWRITTEN for the user's ruling: the discriminator is now the mounts' OWN `thresholdRatio`, because
+   * `headroomTokens` no longer moves graft's ceiling. The property under test is unchanged — 「the slice
+   * respects the EARLIEST compression」 — only the knob that expresses 「earlier」 changed.
+   *
+   * The old version distinguished the two mounts with `headroomTokens: 200_000`, which only produced a
+   * difference through the `1 − O/W − headroom/W` subtraction that was removed.
+   */
   const mounts = readCompactionMounts({
     loader: loaderOf([
-      presetOf('cordis', undefined),
-      presetOf('ptc', { headroomTokens: 200_000 }),
+      presetOf('cordis', undefined), // backend default 0.8
+      presetOf('ptc', { thresholdRatio: 0.62 }),
     ]),
   })
   assert.equal(mounts.length, 2)
   const out = applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, mounts, W, O)
   assert.equal(out.compaction.source, 'computed')
-  assert.equal(out.compaction.thresholdRatio, 0.5651)
-  assert.equal(out.hardAt, 0.5451)
+  assert.equal(out.compaction.thresholdRatio, 0.62, '最早的那个压缩阈值胜出')
+  assert.equal(out.hardAt, 0.6, 'hardAt = 0.62 − 0.02，即使设置是 0.75')
+  assert.ok(out.hardAt < out.compaction.thresholdRatio, '切片仍然严格早于压缩')
 })
 
 test('v221 ⑦: 用户水位已经更低时不抬高；没有后端时原样返回', () => {

@@ -860,11 +860,38 @@ function applyCompactionCeiling(
 
   let thresholdRatio                    
   if (computable) {
-    thresholdRatio = Math.min(
-      ...autoMounts.map((mount) =>
-        Math.min(mount.thresholdRatio, 1 - outputReservation / windowLimit - mount.headroomTokens / windowLimit),
-      ),
-    )
+    /**
+     * ── USER-RULED (P0): THE CEILING IS THE COMPACTION THRESHOLD, NOT 「WINDOW MINUS OUTPUT」 ───────
+     *
+     * WHAT IT USED TO BE:
+     *
+     *     thresholdRatio = min(
+     *       mount.thresholdRatio,                                   // the tool's own line
+     *       1 − O/W − headroom/W,                                    // ← THE DEFECT
+     *     )
+     *     hardAt = thresholdRatio − 0.02
+     *
+     * where `O` is the session's `maxTokens` (its OUTPUT reservation). The intent was 「the slice must
+     * happen before the window physically runs out」, which is right. The arithmetic was not: `O` is a
+     * budget for the NEXT completion, not space already consumed, so subtracting it from the CEILING
+     * charged every session for an output it had not written yet.
+     *
+     * Measured consequence on a real panel: a session with W=200k and O=64k produced
+     * `1 − 0.32 − 0.04 = 0.64`, then `hardAt = 0.64 − 0.02 = 0.62` — and with `deriveWarnAt`'s margin the
+     * warning line landed at 0.52. Rows read 「提示线 52% · 强制线 55%」 while the user's setting said
+     * 70% / 75%, and a session was cut at 55% having never been warned. The user reported exactly this
+     * as 「模型未到 70% 水位没有预警就被强切」.
+     *
+     * WHAT IT IS NOW: the compaction TOOL's own threshold is the ceiling, and nothing else is. The
+     * slice still wins the race (that is the whole point of this module) — it wins it against the line
+     * the tool will actually compact at, which is the only line that matters. `O` and `headroom` no
+     * longer move graft's threshold; they remain part of the tool's own reported threshold.
+     *
+     * STATED CONSEQUENCE, deliberately accepted by the user: if the compaction tool's threshold is BELOW
+     * the configured 0.70, that tool wins and the slice moves earlier. The alternative — ignoring it —
+     * is the silently-compacted handoff v0.37 was written to prevent.
+     */
+    thresholdRatio = Math.min(...autoMounts.map((mount) => mount.thresholdRatio))
     thresholdRatio = Math.max(0.01, Math.min(0.99, thresholdRatio))
   }
 
@@ -20477,6 +20504,15 @@ export function collectMemoryStoreStatus(
  * general config editor that can silently produce an invalid patch.
  */
 export const CONSOLE_BOOLEAN_KEYS = ['modelDrivenGraft', 'autoGraft', 'workspaceRedline', 'commandGuard', 'igniteTarget']         
+/**
+ * USER-REQUESTED (P0): a switch for the HOST's auto-compaction, which is NOT a graft setting.
+ *
+ * Listed separately because it is written to a DIFFERENT profile row (`compaction-basic`, inside the
+ * preset), and the write path branches on it: everything in `CONSOLE_BOOLEAN_KEYS` goes through
+ * `withConsoleSetting` on graft's own row. Keeping it in that list would have produced a plausible-looking
+ * write to the wrong row — the exact failure this batch keeps finding.
+ */
+export const CONSOLE_HOST_COMPACTION_KEY = 'hostAutoCompaction'
 export const CONSOLE_RATIO_KEYS = ['modelDrivenGraftAtRatio', 'autoGraftAtRatio']         
 /**
  * v0.18: the enumerated knobs. Adding them here is what keeps the v0.18 policy and
@@ -20500,6 +20536,8 @@ export const CONSOLE_WRITABLE_KEYS                    = [
   ...CONSOLE_RATIO_KEYS,
   ...Object.keys(CONSOLE_ENUM_KEYS),
   ...Object.keys(CONSOLE_INTEGER_KEYS),
+  // USER-REQUESTED: the one key that writes to the HOST's compaction row, not to graft's.
+  CONSOLE_HOST_COMPACTION_KEY,
 ]
 
                                  
@@ -20521,6 +20559,15 @@ export function parseConsoleSetting(rawInput        )                           
   const key = parts[0]
   const raw = parts[1].toLowerCase()
   if ((CONSOLE_BOOLEAN_KEYS                     ).includes(key)) {
+    if (raw !== 'true' && raw !== 'false') return { error: `${key} 只接受 true / false（收到 ${parts[1]}）` }
+    return { setting: { key, value: raw === 'true' } }
+  }
+  /**
+   * The host-compaction switch is a BOOLEAN by nature but is NOT in `CONSOLE_BOOLEAN_KEYS` (that list keys
+   * graft's own row). Accepting it here keeps one parser: the alternative was a second entry point that
+   * would drift from this one on validation, error text and the accepted value forms.
+   */
+  if (key === CONSOLE_HOST_COMPACTION_KEY) {
     if (raw !== 'true' && raw !== 'false') return { error: `${key} 只接受 true / false（收到 ${parts[1]}）` }
     return { setting: { key, value: raw === 'true' } }
   }
@@ -22333,6 +22380,20 @@ async function appendTransitionCard(
   const writeConsoleSetting = async (rawInput        )                                         => {
     const parsed = parseConsoleSetting(rawInput)
     if (parsed.setting === undefined) return { ok: false, text: parsed.error }
+    /**
+     * ROUTE THE HOST-COMPACTION SWITCH TO ITS OWN ROW, before anything else touches graft's row.
+     *
+     * `hostAutoCompaction` is the only key in the console that is NOT graft configuration, so it is the
+     * only one that must not go through `withConsoleSetting`: that helper spreads graft's row, and writing
+     * `auto` there would change a key graft does not own while leaving the compaction plugin untouched —
+     * a write that reports success and changes nothing that matters.
+     */
+    if (parsed.setting.key === CONSOLE_HOST_COMPACTION_KEY) {
+      if (typeof parsed.setting.value !== 'boolean') {
+        return { ok: false, text: `${CONSOLE_HOST_COMPACTION_KEY} 只接受 true / false` }
+      }
+      return writeCompactionAuto(parsed.setting.value)
+    }
     const editor = (() => {
       try {
         return (stableCtx       ).get('configEditor')       
@@ -22360,6 +22421,83 @@ async function appendTransitionCard(
     return {
       ok: true,
       text: `已保存 ${parsed.setting.key}=${parsed.setting.value}（无需重启：下一次 pre-step 就按新值判断）`,
+    }
+  }
+
+  /**
+   * ── USER-REQUESTED (P0): TURN THE HOST'S AUTO-COMPACTION OFF FROM HERE ──────────────────────────
+   *
+   * `readCompactionMounts` can SEE whether `compaction-basic` is mounted with `auto: true`, and
+   * `alertCompactionMounts` logs a warning about it — but the only documented way to change it was
+   * 「edit the profile patch and restart」, which is the same dead end the console was built to remove for
+   * graft's own knobs.
+   *
+   * WHAT THIS WRITES, AND WHAT IT DOES NOT:
+   *
+   *   · it writes `auto: false` into the `compaction-basic` entry's config, through the SAME
+   *     `configEditor.edit` path the other knobs use, so it lands in the profile patch and survives a
+   *     restart;
+   *   · it does NOT disable the compaction PLUGIN, and it does not touch the per-session ability to
+   *     compact on demand — that stays available. The user asked for exactly this split: take away the
+   *     automatic behaviour, keep the manual one.
+   *
+   * The entry is located by NAME inside the preset row, not by index: `loader.entries()` order is a
+   * loader detail, and writing `auto:false` into the wrong child would silently disable something else.
+   */
+  const writeCompactionAuto = async (enabled         )                                         => {
+    const editor = (() => {
+      try {
+        return (stableCtx       ).get('configEditor')       
+      } catch {
+        return undefined
+      }
+    })()
+    if (!isRecord(editor) || typeof editor.edit !== 'function' || typeof editor.entries !== 'function') {
+      return { ok: false, text: 'configEditor 服务不可用：本次改动没有落盘。' }
+    }
+    const rows = editor.entries()         
+    /**
+     * The mount may live on EITHER the preset row or the plugin row — `readCompactionMounts` walks both,
+     * so this does too. `readCompactionMounts` is the definition of 「where the compaction config is」;
+     * a second, hand-written locator here would be the drifted copy.
+     */
+    const candidate = rows.find((row) => {
+      const children = Array.isArray(row?.options?.config?.group?.children) ? row.options.config.group.children : []
+      return children.some((child     ) => child?.name === COMPACTION_BASIC)
+    }) ?? rows.find((row) => row?.name === COMPACTION_BASIC || row?.options?.name === COMPACTION_BASIC)
+    if (candidate === undefined) {
+      return { ok: false, text: `profile 里找不到 ${COMPACTION_BASIC} 的配置行；宿主可能没有挂载压缩插件。` }
+    }
+    try {
+      await editor.edit(candidate, (current                         ) => {
+        const base = current ?? {}
+        const group = isRecord(base.group) ? base.group : undefined
+        if (group === undefined || !Array.isArray(group.children)) {
+          // The plugin row itself: set `auto` here.
+          return { ...base, auto: enabled }
+        }
+        // The preset row: rewrite ONLY the compaction child, preserving every sibling verbatim.
+        return {
+          ...base,
+          group: {
+            ...group,
+            children: (group.children         ).map((child     ) =>
+              child?.name === COMPACTION_BASIC
+                ? { ...child, config: { ...(isRecord(child.config) ? child.config : {}), auto: enabled } }
+                : child,
+            ),
+          },
+        }
+      })
+    } catch (error) {
+      return { ok: false, text: `写入失败：${String((error       )?.message ?? error)}` }
+    }
+    return {
+      ok: true,
+      text: enabled
+        ? `已开启宿主自动压缩（${COMPACTION_BASIC} auto=true）：graft 会重新把切片压到压缩阈值之下。`
+        : `已关闭宿主自动压缩（${COMPACTION_BASIC} auto=false）：切片不再被压缩阈值拉低；` +
+          '会话内仍可手动调用压缩。需要重启宿主才完全生效的部署请以回执为准。',
     }
   }
 
