@@ -1,0 +1,1729 @@
+{
+  "generatedFrom": "src/index.ts",
+  "derivedFrom": "call-graph",
+  "measured": {
+    "lines": 14874,
+    "functions": 191
+  },
+  "units": [
+    {
+      "name": "asRatioInRange",
+      "line": 899,
+      "end": 903,
+      "exported": false,
+      "responsibility": "被 normalizeConfig 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 normalizeConfig",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "normalizeConfig",
+      "line": 905,
+      "end": 1028,
+      "exported": true,
+      "responsibility": "被 (module scope)、apply、commitPreparedSlice、graftSliceAndInjectUnlocked、prepareSlice 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "asRatio",
+      "line": 1030,
+      "end": 1036,
+      "exported": false,
+      "responsibility": "被 normalizeConfig 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 normalizeConfig",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isAbsolutePath",
+      "line": 1038,
+      "end": 1040,
+      "exported": false,
+      "responsibility": "被 (module scope)、apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "stripMarkdown",
+      "line": 1052,
+      "end": 1068,
+      "exported": false,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "firstParagraph",
+      "line": 1070,
+      "end": 1077,
+      "exported": false,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "pointerSentences",
+      "line": 1089,
+      "end": 1091,
+      "exported": false,
+      "responsibility": "被 (module scope)、collectReadbackIndex 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isConstraintSentence",
+      "line": 1095,
+      "end": 1097,
+      "exported": false,
+      "responsibility": "被 (module scope)、apply、summaryWithConstraints 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isQuestionLike",
+      "line": 1113,
+      "end": 1116,
+      "exported": false,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isOneOffAction",
+      "line": 1182,
+      "end": 1186,
+      "exported": false,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isRedline",
+      "line": 1325,
+      "end": 1340,
+      "exported": false,
+      "responsibility": "被 selectConstraints 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 selectConstraints",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "selectConstraints",
+      "line": 1343,
+      "end": 1405,
+      "exported": true,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "filterRejectedConstraints",
+      "line": 1471,
+      "end": 1478,
+      "exported": true,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "applyManualConstraints",
+      "line": 1513,
+      "end": 1516,
+      "exported": true,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "constraintRejectionPath",
+      "line": 1531,
+      "end": 1533,
+      "exported": true,
+      "responsibility": "被 (module scope)、apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "readConstraintRejections",
+      "line": 1540,
+      "end": 1574,
+      "exported": true,
+      "responsibility": "被 (module scope)、apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "appendConstraintRejection",
+      "line": 1580,
+      "end": 1590,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "constraintManualPath",
+      "line": 1624,
+      "end": 1626,
+      "exported": true,
+      "responsibility": "被 apply、manualTextsForWorkspace 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "readManualConstraints",
+      "line": 1629,
+      "end": 1662,
+      "exported": true,
+      "responsibility": "被 (module scope)、appendManualConstraint、apply、manualTextsForWorkspace 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "writeManualConstraints",
+      "line": 1664,
+      "end": 1667,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "appendManualConstraint",
+      "line": 1670,
+      "end": 1684,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "removeManualConstraint",
+      "line": 1686,
+      "end": 1688,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "removeConstraintRejection",
+      "line": 1708,
+      "end": 1710,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "manualTextsForWorkspace",
+      "line": 1730,
+      "end": 1736,
+      "exported": true,
+      "responsibility": "被 (module scope)、apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "assertConstraintsPreserved",
+      "line": 1738,
+      "end": 1751,
+      "exported": true,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "assertReadBackAccounted",
+      "line": 1763,
+      "end": 1775,
+      "exported": false,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "extractConstraintsDetailed",
+      "line": 1802,
+      "end": 1805,
+      "exported": true,
+      "responsibility": "被 (module scope)、extractConstraints 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "extractConstraints",
+      "line": 1988,
+      "end": 1990,
+      "exported": true,
+      "responsibility": "被 (module scope)、graftSliceAndInjectUnlocked、llmExtractConstraints、refineConstraintsInBackground 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "llmExtractConstraints",
+      "line": 2020,
+      "end": 2093,
+      "exported": true,
+      "responsibility": "被 refineConstraintsInBackground 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 refineConstraintsInBackground",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "parseTodoLine",
+      "line": 2138,
+      "end": 2142,
+      "exported": true,
+      "responsibility": "被 takePlanNudge 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 takePlanNudge",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "phaseKeyOf",
+      "line": 2145,
+      "end": 2154,
+      "exported": true,
+      "responsibility": "被 (module scope)、takePlanNudge 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "planBlocksOf",
+      "line": 2157,
+      "end": 2192,
+      "exported": false,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "currentNodeFromProse",
+      "line": 2195,
+      "end": 2205,
+      "exported": false,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "extractPhaseRoadmap",
+      "line": 2214,
+      "end": 2217,
+      "exported": true,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "blockerOf",
+      "line": 2314,
+      "end": 2335,
+      "exported": false,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "renderPhaseRoadmap",
+      "line": 2340,
+      "end": 2365,
+      "exported": true,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "summaryWithConstraints",
+      "line": 2367,
+      "end": 2375,
+      "exported": false,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "locateBoundary",
+      "line": 2394,
+      "end": 2456,
+      "exported": true,
+      "responsibility": "被 (module scope)、commitPreparedSlice 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "hasClosedTurn",
+      "line": 2464,
+      "end": 2466,
+      "exported": true,
+      "responsibility": "被 (module scope)、apply、prepareSlice 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "extractOpenTurnCarryover",
+      "line": 2506,
+      "end": 2578,
+      "exported": true,
+      "responsibility": "被 (module scope)、buildTape 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "extractSourceTemplate",
+      "line": 2588,
+      "end": 2602,
+      "exported": true,
+      "responsibility": "被 buildTape、llmExtractConstraints 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 buildTape",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "sliceLines",
+      "line": 2634,
+      "end": 2640,
+      "exported": true,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "pathFromToolArguments",
+      "line": 2741,
+      "end": 2748,
+      "exported": false,
+      "responsibility": "被 extractLastStepScene、extractWorkspaceIndex 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 extractLastStepScene",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "extractWorkspaceIndex",
+      "line": 2756,
+      "end": 2830,
+      "exported": true,
+      "responsibility": "被 (module scope)、extractWorkspaceState 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "extractWorkspaceState",
+      "line": 2832,
+      "end": 2834,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "renderWorkspaceState",
+      "line": 2841,
+      "end": 2861,
+      "exported": true,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "describeUnavailableTool",
+      "line": 2871,
+      "end": 2874,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "renderPointerLines",
+      "line": 2889,
+      "end": 2907,
+      "exported": true,
+      "responsibility": "被 buildTape 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 buildTape",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "collectReadbackIndex",
+      "line": 2923,
+      "end": 2991,
+      "exported": false,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "extractOpenBackgroundWork",
+      "line": 3014,
+      "end": 3069,
+      "exported": true,
+      "responsibility": "被 (module scope)、graftSliceAndInjectUnlocked 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "renderOpenWorkNotice",
+      "line": 3078,
+      "end": 3091,
+      "exported": true,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "constraintBlockOf",
+      "line": 3106,
+      "end": 3124,
+      "exported": false,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "findConstraintProvenance",
+      "line": 3153,
+      "end": 3190,
+      "exported": true,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "renderConstraintProvenance",
+      "line": 3192,
+      "end": 3199,
+      "exported": false,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "extractLastStepScene",
+      "line": 3201,
+      "end": 3276,
+      "exported": true,
+      "responsibility": "被 (module scope)、buildTape 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "slimScene",
+      "line": 3285,
+      "end": 3290,
+      "exported": true,
+      "responsibility": "被 buildTape 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 buildTape",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "verifyWorkspace",
+      "line": 3322,
+      "end": 3380,
+      "exported": true,
+      "responsibility": "被 buildTape 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 buildTape",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "extractGoalForTest",
+      "line": 3447,
+      "end": 3449,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "renderReplayTurn",
+      "line": 3473,
+      "end": 3493,
+      "exported": false,
+      "responsibility": "被 buildTape 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 buildTape",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "buildTape",
+      "line": 3503,
+      "end": 3998,
+      "exported": true,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "attachmentPointer",
+      "line": 4011,
+      "end": 4031,
+      "exported": false,
+      "responsibility": "被 extractAttachmentPointers 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 extractAttachmentPointers",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "extractAttachmentPointers",
+      "line": 4034,
+      "end": 4044,
+      "exported": true,
+      "responsibility": "被 buildTape 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 buildTape",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "renderMemoryContext",
+      "line": 4082,
+      "end": 4116,
+      "exported": true,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "buildInjectionPlan",
+      "line": 4145,
+      "end": 4183,
+      "exported": true,
+      "responsibility": "被 commitPreparedSlice、graftSliceAndInjectUnlocked、prepareSlice 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 commitPreparedSlice",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "storePaths",
+      "line": 5146,
+      "end": 5156,
+      "exported": false,
+      "responsibility": "被 (module scope)、acquireSourceLock、appendGraftAudit、apply、captureDraft、collectDebugStatus 等 30 处 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "storeDirOrEmpty",
+      "line": 5173,
+      "end": 5175,
+      "exported": false,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "storeCtxOf",
+      "line": 5178,
+      "end": 5180,
+      "exported": false,
+      "responsibility": "被 (module scope)、appendPendingTransfer、apply、graftSliceAndInjectUnlocked、markGraftTarget、resumeSession 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "appendPendingTransfer",
+      "line": 5192,
+      "end": 5204,
+      "exported": false,
+      "responsibility": "被 graftSliceAndInjectUnlocked、markTransfersDelivered、pendingTransferMessage 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 graftSliceAndInjectUnlocked",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "readPendingTransfers",
+      "line": 5207,
+      "end": 5228,
+      "exported": false,
+      "responsibility": "被 markTransfersDelivered、pendingTransferMessage 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 markTransfersDelivered",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "markTransfersDelivered",
+      "line": 5243,
+      "end": 5254,
+      "exported": false,
+      "responsibility": "被 pendingTransferMessage 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 pendingTransferMessage",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "pendingTransferMessage",
+      "line": 5266,
+      "end": 5329,
+      "exported": false,
+      "responsibility": "被 pendingTransferMessagesFor 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 pendingTransferMessagesFor",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "foldPendingTransfers",
+      "line": 5338,
+      "end": 5344,
+      "exported": false,
+      "responsibility": "被 pendingTransferMessage 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 pendingTransferMessage",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "pendingTransferMessagesFor",
+      "line": 5356,
+      "end": 5377,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "configureRetiredStore",
+      "line": 5380,
+      "end": 5496,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "verifyHardConstraints",
+      "line": 5544,
+      "end": 5561,
+      "exported": true,
+      "responsibility": "被 refineConstraintsInBackground 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 refineConstraintsInBackground",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "rotateGraftAudit",
+      "line": 5648,
+      "end": 5680,
+      "exported": false,
+      "responsibility": "被 appendGraftAudit 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 appendGraftAudit",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "appendGraftAudit",
+      "line": 5682,
+      "end": 5699,
+      "exported": true,
+      "responsibility": "被 (module scope)、apply、loadPrepared、reportForeignJournal、scanAndReclaimLocks、takeModelDrivenNudge 等 7 处 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "acquireSourceLock",
+      "line": 5719,
+      "end": 5722,
+      "exported": true,
+      "responsibility": "被 commitPreparedSlice、graftSliceAndInject 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 commitPreparedSlice",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "ledgerDefectOf",
+      "line": 5772,
+      "end": 5776,
+      "exported": true,
+      "responsibility": "被 configureRetiredStore 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 configureRetiredStore",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "ledgerArray",
+      "line": 5778,
+      "end": 5782,
+      "exported": false,
+      "responsibility": "被 configureRetiredStore、persistRetiredStore、refreshMigrationLedgers 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 configureRetiredStore",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "readJsonArray",
+      "line": 5786,
+      "end": 5793,
+      "exported": false,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "persistConstraintSections",
+      "line": 5797,
+      "end": 5853,
+      "exported": false,
+      "responsibility": "被 graftSliceAndInjectUnlocked 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 graftSliceAndInjectUnlocked",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "loadConstraintSections",
+      "line": 5855,
+      "end": 5879,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "persistPendingConstraints",
+      "line": 5895,
+      "end": 5907,
+      "exported": false,
+      "responsibility": "被 refineConstraintsInBackground、takePendingConstraintMessages 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 refineConstraintsInBackground",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "persistLeftovers",
+      "line": 5926,
+      "end": 5939,
+      "exported": false,
+      "responsibility": "被 (module scope) 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "loadLeftovers",
+      "line": 5941,
+      "end": 5967,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "recordLeftover",
+      "line": 5969,
+      "end": 5971,
+      "exported": false,
+      "responsibility": "被 (module scope)、recoverGraftTransactions 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "leftoverWarningLine",
+      "line": 5982,
+      "end": 5990,
+      "exported": true,
+      "responsibility": "被 prepareSlice 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 prepareSlice",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "persistDrafts",
+      "line": 5992,
+      "end": 6003,
+      "exported": false,
+      "responsibility": "被 takeDraftMerge 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 takeDraftMerge",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "loadDrafts",
+      "line": 6005,
+      "end": 6031,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "lastUserText",
+      "line": 6034,
+      "end": 6043,
+      "exported": false,
+      "responsibility": "被 apply、captureDraft、takeDraftMerge、takePlanNudge 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "countNumberedSteps",
+      "line": 6075,
+      "end": 6079,
+      "exported": false,
+      "responsibility": "被 takePlanNudge 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 takePlanNudge",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "takePlanNudge",
+      "line": 6081,
+      "end": 6145,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "watermarkUrgentText",
+      "line": 6208,
+      "end": 6217,
+      "exported": false,
+      "responsibility": "被 takeWatermarkEscalation 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 takeWatermarkEscalation",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "takeWatermarkEscalation",
+      "line": 6219,
+      "end": 6255,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "noteForcedCut",
+      "line": 6274,
+      "end": 6287,
+      "exported": false,
+      "responsibility": "被 buildTape 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 buildTape",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "nudgePanelState",
+      "line": 6308,
+      "end": 6311,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "nudgePredictionFor",
+      "line": 6379,
+      "end": 6419,
+      "exported": false,
+      "responsibility": "被 takeModelDrivenNudge 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 takeModelDrivenNudge",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "previousRatioOf",
+      "line": 6422,
+      "end": 6426,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "resetSinceLastNudgeSample",
+      "line": 6440,
+      "end": 6452,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "takeModelDrivenNudge",
+      "line": 6454,
+      "end": 6574,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "loadPendingConstraints",
+      "line": 6576,
+      "end": 6620,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "persistRetiredStore",
+      "line": 6623,
+      "end": 6652,
+      "exported": false,
+      "responsibility": "被 apply、commitRetirementAtomic、resumeSession 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "persistTransferredStore",
+      "line": 6665,
+      "end": 6692,
+      "exported": false,
+      "responsibility": "被 apply、commitRetirementAtomic、resumeSession 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "commitRetirementAtomic",
+      "line": 6705,
+      "end": 6740,
+      "exported": false,
+      "responsibility": "被 graftSliceAndInjectUnlocked 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 graftSliceAndInjectUnlocked",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "getTransferredSessions",
+      "line": 6743,
+      "end": 6745,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "getRetiredSessions",
+      "line": 6748,
+      "end": 6750,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "resetRetiredSessions",
+      "line": 6753,
+      "end": 6825,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "getGraftTargets",
+      "line": 6828,
+      "end": 6830,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isLegacyHandoverEntryForTest",
+      "line": 6847,
+      "end": 6853,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "clearGraftTargetsForTest",
+      "line": 6855,
+      "end": 6856,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "restorableTitle",
+      "line": 6891,
+      "end": 6916,
+      "exported": false,
+      "responsibility": "被 resumeSession 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 resumeSession",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "resumeSession",
+      "line": 6918,
+      "end": 6992,
+      "exported": true,
+      "responsibility": "被 apply、recoverGraftTransactions 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isRetired",
+      "line": 7034,
+      "end": 7036,
+      "exported": true,
+      "responsibility": "被 assertResliceAllowed、pendingTransferMessage 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 assertResliceAllowed",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "assertResliceAllowed",
+      "line": 7050,
+      "end": 7067,
+      "exported": true,
+      "responsibility": "被 apply、commitPreparedSlice、graftSliceAndInject 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "sliceDigest",
+      "line": 7102,
+      "end": 7110,
+      "exported": false,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isClockBearingChunkKind",
+      "line": 7143,
+      "end": 7145,
+      "exported": true,
+      "responsibility": "被 digestTextOfChunk 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 digestTextOfChunk",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "normalizeDigestText",
+      "line": 7147,
+      "end": 7149,
+      "exported": true,
+      "responsibility": "被 digestTextOfChunk 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 digestTextOfChunk",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "digestTextOfChunk",
+      "line": 7157,
+      "end": 7160,
+      "exported": true,
+      "responsibility": "被 commitPreparedSlice、digestOfPlan 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 commitPreparedSlice",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "digestOfPlan",
+      "line": 7162,
+      "end": 7187,
+      "exported": false,
+      "responsibility": "被 prepareSlice 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 prepareSlice",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "readSourceForPreview",
+      "line": 7189,
+      "end": 7195,
+      "exported": false,
+      "responsibility": "被 commitPreparedSlice、prepareSlice 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 commitPreparedSlice",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "prepareSlice",
+      "line": 7197,
+      "end": 7391,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isLegacyHandoverEntry",
+      "line": 7409,
+      "end": 7412,
+      "exported": false,
+      "responsibility": "被 commitPreparedSlice、isLegacyHandoverEntryForTest 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 commitPreparedSlice",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "commitPreparedSlice",
+      "line": 7414,
+      "end": 7753,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "loadPrepared",
+      "line": 7755,
+      "end": 7868,
+      "exported": false,
+      "responsibility": "被 commitPreparedSlice 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 commitPreparedSlice",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "persistPrepared",
+      "line": 7870,
+      "end": 7898,
+      "exported": false,
+      "responsibility": "被 commitPreparedSlice、prepareSlice 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 commitPreparedSlice",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "persistAutoGraftSuppression",
+      "line": 7901,
+      "end": 7929,
+      "exported": false,
+      "responsibility": "被 apply、autoGraftSuppression、resumeSession 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "loadAutoGraftSuppression",
+      "line": 7931,
+      "end": 7944,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "refreshMigrationLedgers",
+      "line": 7955,
+      "end": 7964,
+      "exported": true,
+      "responsibility": "被 commitPreparedSlice、graftSliceAndInject 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 commitPreparedSlice",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "graftSliceAndInject",
+      "line": 8006,
+      "end": 8022,
+      "exported": true,
+      "responsibility": "被 (module scope)、apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "graftSliceAndInjectUnlocked",
+      "line": 8024,
+      "end": 8993,
+      "exported": false,
+      "responsibility": "被 commitPreparedSlice、graftSliceAndInject 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 commitPreparedSlice",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "extractToolResultText",
+      "line": 8996,
+      "end": 9008,
+      "exported": true,
+      "responsibility": "被 (module scope)、graftSearchHistory 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "graftLogVisibility",
+      "line": 9039,
+      "end": 9089,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "previewAround",
+      "line": 9152,
+      "end": 9157,
+      "exported": false,
+      "responsibility": "被 graftSearchHistory 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 graftSearchHistory",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "graftSearchHistory",
+      "line": 9159,
+      "end": 9285,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "graftReadResult",
+      "line": 9291,
+      "end": 9296,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "autoTargetId",
+      "line": 9385,
+      "end": 9388,
+      "exported": false,
+      "responsibility": "被 (module scope)、apply、prepareSlice 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "resolveSourceSessionId",
+      "line": 9416,
+      "end": 9421,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "callingSessionId",
+      "line": 9424,
+      "end": 9427,
+      "exported": false,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "txnOwnerToken",
+      "line": 9497,
+      "end": 9505,
+      "exported": false,
+      "responsibility": "被 graftTxnOwner 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 graftTxnOwner",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "graftTxnOwner",
+      "line": 9508,
+      "end": 9521,
+      "exported": true,
+      "responsibility": "被 writeGraftTxn 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 writeGraftTxn",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "txnOwnerVerdict",
+      "line": 9532,
+      "end": 9554,
+      "exported": true,
+      "responsibility": "被 recoverGraftTransactions 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 recoverGraftTransactions",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "txnFileFor",
+      "line": 9569,
+      "end": 9584,
+      "exported": false,
+      "responsibility": "被 clearGraftTxn、writeGraftTxn 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 clearGraftTxn",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "asSessionIdOrThrow",
+      "line": 9608,
+      "end": 9620,
+      "exported": false,
+      "responsibility": "被 commitPreparedSlice、graftSliceAndInjectUnlocked、loadPrepared、prepareSlice 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 commitPreparedSlice",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "writeGraftTxn",
+      "line": 9645,
+      "end": 9665,
+      "exported": false,
+      "responsibility": "被 (module scope)、graftSliceAndInjectUnlocked 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "clearGraftTxn",
+      "line": 9667,
+      "end": 9673,
+      "exported": false,
+      "responsibility": "被 graftSliceAndInjectUnlocked 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 graftSliceAndInjectUnlocked",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "markTargetBroken",
+      "line": 9682,
+      "end": 9686,
+      "exported": false,
+      "responsibility": "被 graftSliceAndInjectUnlocked、recoverGraftTransactions 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 graftSliceAndInjectUnlocked",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "reportForeignJournal",
+      "line": 9740,
+      "end": 9748,
+      "exported": false,
+      "responsibility": "被 recoverGraftTransactions 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 recoverGraftTransactions",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "recoverGraftTransactions",
+      "line": 9765,
+      "end": 9937,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "rollbackTargetViaLayer",
+      "line": 9976,
+      "end": 10005,
+      "exported": false,
+      "responsibility": "被 graftSliceAndInjectUnlocked 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 graftSliceAndInjectUnlocked",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "discardPartialTarget",
+      "line": 10007,
+      "end": 10067,
+      "exported": false,
+      "responsibility": "被 recoverGraftTransactions、rollbackTargetViaLayer 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 recoverGraftTransactions",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "graftGenerationOf",
+      "line": 10123,
+      "end": 10125,
+      "exported": false,
+      "responsibility": "被 (module scope)、apply、markGraftTarget、readTaskPosition 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "anchorGenerationFor",
+      "line": 10128,
+      "end": 10136,
+      "exported": false,
+      "responsibility": "被 buildTape 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 buildTape",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "markGraftTarget",
+      "line": 10138,
+      "end": 10157,
+      "exported": false,
+      "responsibility": "被 graftSliceAndInjectUnlocked 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 graftSliceAndInjectUnlocked",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "persistGraftTargetStore",
+      "line": 10165,
+      "end": 10187,
+      "exported": false,
+      "responsibility": "被 apply、markGraftTarget、resumeSession 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "loadGraftTargetStore",
+      "line": 10198,
+      "end": 10224,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isProtectedGraftTarget",
+      "line": 10235,
+      "end": 10246,
+      "exported": false,
+      "responsibility": "被 (module scope)、apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isConfirmAffirmative",
+      "line": 10248,
+      "end": 10252,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "autoGraftSuppression",
+      "line": 10276,
+      "end": 10290,
+      "exported": false,
+      "responsibility": "被 (module scope)、isAutoGraftSuppressed 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isAutoGraftSuppressed",
+      "line": 10292,
+      "end": 10294,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "autoGraftIfNeeded",
+      "line": 10296,
+      "end": 10319,
+      "exported": false,
+      "responsibility": "被 (module scope)、apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "attachSessionToWorkspace",
+      "line": 10539,
+      "end": 10560,
+      "exported": false,
+      "responsibility": "被 registerArchivedForks 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 registerArchivedForks",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "registerArchivedForks",
+      "line": 10562,
+      "end": 10634,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "commandTextOf",
+      "line": 10681,
+      "end": 10692,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "scanAndReclaimLocks",
+      "line": 10724,
+      "end": 10786,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isProcessAlive",
+      "line": 10789,
+      "end": 10798,
+      "exported": true,
+      "responsibility": "被 scanAndReclaimLocks、txnOwnerVerdict 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 scanAndReclaimLocks",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "workspaceOfAgent",
+      "line": 10808,
+      "end": 10825,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "resolveMemoryPaths",
+      "line": 10828,
+      "end": 10832,
+      "exported": false,
+      "responsibility": "被 (module scope)、apply、readTaskPosition 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "readTaskPosition",
+      "line": 10866,
+      "end": 10946,
+      "exported": false,
+      "responsibility": "被 commitPreparedSlice、graftSliceAndInjectUnlocked、prepareSlice 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 commitPreparedSlice",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "readReservedOutputTokens",
+      "line": 10958,
+      "end": 10978,
+      "exported": false,
+      "responsibility": "被 (module scope)、apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "governedWatermarks",
+      "line": 10989,
+      "end": 10993,
+      "exported": false,
+      "responsibility": "被 (module scope)、apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "summariseThresholdReason",
+      "line": 11078,
+      "end": 11079,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "collectDebugStatus",
+      "line": 11110,
+      "end": 11250,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "collectMemoryStoreStatus",
+      "line": 11257,
+      "end": 11392,
+      "exported": true,
+      "responsibility": "被 collectDebugStatus 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 collectDebugStatus",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "parseConsoleSetting",
+      "line": 11461,
+      "end": 11502,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "withConsoleSetting",
+      "line": 11509,
+      "end": 11514,
+      "exported": true,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "splitByShape",
+      "line": 11657,
+      "end": 11672,
+      "exported": false,
+      "responsibility": "被 loadPendingConstraints、persistConstraintSections、takePendingConstraintMessages 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 loadPendingConstraints",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "apply",
+      "line": 11674,
+      "end": 14746,
+      "exported": true,
+      "responsibility": "被 (module scope)、autoGraftIfNeeded、collectDebugStatus、normalizeConfig、storePaths 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 (module scope)",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "refineConstraintsInBackground",
+      "line": 11795,
+      "end": 11860,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "captureDraft",
+      "line": 11867,
+      "end": 11904,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "isSteeringOnly",
+      "line": 11915,
+      "end": 11923,
+      "exported": false,
+      "responsibility": "被 captureDraft 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 captureDraft",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "takeDraftMerge",
+      "line": 11930,
+      "end": 11959,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "takePendingConstraintMessages",
+      "line": 11982,
+      "end": 12028,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "validateAppendIsLifecycleSafe",
+      "line": 12071,
+      "end": 12073,
+      "exported": false,
+      "responsibility": "被 appendTransitionCard 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 appendTransitionCard",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "openStepOf",
+      "line": 12121,
+      "end": 12145,
+      "exported": false,
+      "responsibility": "被 appendTransitionCard 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 appendTransitionCard",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "continuationTitle",
+      "line": 12155,
+      "end": 12159,
+      "exported": false,
+      "responsibility": "被 appendTransitionCard 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 appendTransitionCard",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "appendTransitionCard",
+      "line": 12161,
+      "end": 12227,
+      "exported": false,
+      "responsibility": "被 apply 调用",
+      "why": "它的引用者仍在 index.ts —— 搬它必须先搬 apply",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "getPendingIgnitions",
+      "line": 14857,
+      "end": 14859,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "hasIgnitionAdmission",
+      "line": 14862,
+      "end": 14864,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "markIgnitionAdmission",
+      "line": 14867,
+      "end": 14869,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "getIgnitionAdmissions",
+      "line": 14872,
+      "end": 14874,
+      "exported": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "它是入口（apply / 注册面），搬动等于改注册形状",
+      "derivedFrom": "call-graph"
+    }
+  ]
+}

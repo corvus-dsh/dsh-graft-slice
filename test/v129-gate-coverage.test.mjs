@@ -170,6 +170,7 @@ const KINDS = new Map([
    */
   ['handler-inventory.mjs', 'INSTRUMENT'],
   ['emit-taxonomy.mjs', 'INSTRUMENT'],
+  ['index-ratchet.mjs', 'INSTRUMENT'],
   ['families.mjs', 'INSTRUMENT'],
 
   // ── OPS: needs a live store/host, or is a drill ──
@@ -204,6 +205,12 @@ const NOT_A_CI_STEP = new Map([
    */
   ['handler-inventory.mjs', 'generator: writes docs/HANDLER-INVENTORY.md. Its ASSERTION (exit 1 on an unregistered unit) runs inside node --test via v325, which IS a CI step; running the generator in CI would modify the tree it is meant to check'],
   ['emit-taxonomy.mjs', 'generator: writes src/contracts/content-taxonomy.v1.json. Its --check assertion runs inside node --test via v326, which IS a CI step; the default mode rewrites a committed file'],
+  /**
+   * `index-ratchet.mjs` 的默认模式**就是断言**（超 ceiling / 未登记 ⇒ exit 1），但它的判据 `v327`
+   * 已经在 `node --test` 里跑，而 `node --test` 是 `npm run check` 的最后一环、也是 CI 步骤。
+   * 所以它不需要再作为独立 CI 步骤登记 —— 再登记一次只会让同一个断言在两个地方各跑一遍。
+   */
+  ['index-ratchet.mjs', 'asserting instrument whose criteria v327 already runs inside node --test (the last step of npm run check and a CI step); a separate CI step would run the same assertion twice'],
   /**
    * ── W4-1: THE MODULE THAT RUNS THE SUITE ONCE FOR EVERY GATE ───────────────────────────────────
    *
