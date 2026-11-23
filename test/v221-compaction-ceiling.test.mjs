@@ -111,14 +111,19 @@ test('v221 ② can-red: auto:true ⇒ 有效 hardAt 必须低于压缩阈值，l
   const out = applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, mounts, W, O)
   assert.equal(out.compaction.source, 'computed')
   assert.equal(out.compaction.auto, true)
-  assert.equal(out.compaction.thresholdRatio, HOST_RATIO)
   /**
-   * With the tool's threshold at 0.8 the ceiling no longer constrains this session: `0.75` (the user's
-   * setting) is already below it, so the effective hard line IS the configured one. That is the whole
-   * point of the ruling — a big window keeps a real 75% instead of being pulled down by its output
-   * reservation. The negative direction is the next assertion.
+   * ── N5 (P0, lead §二十八): 17.4-C 的结论被推翻，这条判据随之改判 ─────────────────────────────────
+   *
+   * 17.4-C 曾断言「`O` 不参与计算，所以压缩阈值 0.8 时用户的 0.75 生效」。**用户裁定该结论是错的**：
+   * 本模块文档 `:7` 写着宿主公式 `threshold = floor(min(W × r, W − O − headroomTokens))`，`O` 与 `B`
+   * 都在里面。删掉它们没有让宿主不读它们，只让**我们的线比宿主晚 10.66 个点**。
+   *
+   * 实测本 profile：W=1M, O=256000, B=65536 ⇒ 0.6934。宿主 69.34% 压缩，而旧代码把预警放在 70.00%
+   * —— **永远差 0.66 个点，永远到不了**。这正是用户报的那件事。
    */
-  assert.equal(out.hardAt, 0.75, '压缩阈值 0.8 时，用户的 0.75 生效 —— 不再被输出预留拉低')
+  assert.equal(out.compaction.thresholdRatio, 0.6934,
+    `N5：阈值必须复现宿主公式 min(0.8, 1−(256000+65536)/1048576)=0.6934；实测 ${out.compaction.thresholdRatio}`)
+  assert.ok(out.hardAt < 0.6934, `N5：强切线必须在宿主压缩线之前；实测 ${out.hardAt}`)
   assert.ok(out.hardAt <= out.compaction.thresholdRatio, '切片仍然严格不晚于压缩')
   assert.ok(out.warnAt < out.hardAt, 'warn 必须早于 hard')
 })
@@ -174,16 +179,31 @@ test('v221 ③ can-red: auto:false ⇒ 水位保持用户配置，且不报警',
  * `v221 ⑤` is untouched and still pins the opposite half: `W` unreadable ⇒ `conservative`. The two
  * unreadable inputs must NOT collapse into one verdict.
  */
-test('v221 ④ (rewritten by 17.4-C): O unreadable but W readable ⇒ COMPUTED, not conservative', () => {
+/**
+ * ── v221 ④ INVERTED BY USER RULING (N5, lead §二十八) ────────────────────────────────────────────
+ *
+ * 17.4-C rewrote this to assert `O unreadable ⇒ COMPUTED`. The user has ruled that conclusion WRONG:
+ * `O` participates in the host's own formula (`compaction-guard.ts:7`), so treating an unreadable `O` as
+ * 0 silently restores the 0.8 line the whole module exists to undercut.
+ *
+ * The module's own rule `:22` says it best: 「算不出来时必须报 RESOURCE 并落 0.55，**不许拿 0.75 假装
+ * 没事**」. 17.4-C made the code violate the rule it was written to honour.
+ *
+ * So the direction flips, and the negative half (④b below) is preserved: `W` unreadable must still say
+ * RESOURCE. Two unreadable inputs must not collapse into one verdict — they must collapse into the SAME
+ * honest verdict (conservative), each naming its own cause.
+ */
+test('v221 ④ (INVERTED by N5 ruling): O unreadable ⇒ CONSERVATIVE, and the reason names O', () => {
   const mounts = mountOfPreset(undefined)
   const out = applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, mounts, W, undefined)
-  assert.equal(out.compaction.source, 'computed',
-    'O 不可读但 W 可读 ⇒ 必须 computed —— O 已不参与任何计算，不该再决定能不能算')
-  assert.equal(out.compaction.thresholdRatio, 0.8, 'stays the tool’s own threshold')
-  assert.equal(out.hardAt, 0.75, '用户的 0.75 生效（不被 O 拖到 0.55）')
-  assert.equal(out.warnAt, 0.7, 'warn 也不再被压到 0.52')
-  assert.doesNotMatch(out.compaction.reason, /O=/u,
-    'reason 里不得再出现 O= —— 它陈述的输入已不参与')
+  assert.equal(out.compaction.source, 'conservative',
+    'O 不可读时必须报保守 —— 把它当 0 等于静默恢复 0.8 那条线（17.4-C 的结论已被用户推翻）')
+  assert.equal(out.hardAt, COMPACTION_CONSERVATIVE_HARD_AT,
+    '落保守常数 0.55，而不是拿 0.75 假装没事（模块文档 :22 的纪律 2）')
+  assert.match(out.compaction.reason, /O \(output reservation\) unreadable/u,
+    '理由必须点名 O 是输出预留且被当成未知')
+  assert.match(out.compaction.reason, /treated as UNKNOWN, not as 0/u,
+    '必须明说「不当作 0」，否则「O 读不出」与「O=0」在读者那里不可区分')
 })
 
 test('v221 ④b: O unreadable must NOT lose the RESOURCE wording when W is ALSO unreadable', () => {

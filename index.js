@@ -886,7 +886,9 @@ function applyCompactionCeiling(
    * It is NOT re-exported to the ceiling object either: `CompactionCeiling` never published it, so the
    * panel never displayed it, so there is no reader to break.
    */
-  void reservedOutputTokens
+  /* N5: `reservedOutputTokens` is READ again (see the host-formula block below). The former
+   * `void reservedOutputTokens` marked an input that was accepted and ignored — the exact
+   * 「producer emits, delivery drops」 shape this batch removes. */
   /**
    * ── 17.4-C (P0, lead-measured): `O` NO LONGER DECIDES WHETHER THE CEILING IS COMPUTABLE ──────────
    *
@@ -913,6 +915,8 @@ function applyCompactionCeiling(
   const computable = Number.isFinite(windowLimit) && windowLimit > 0
 
   let thresholdRatio                    
+  /** N5: `O` unreadable is its own cause and must be named, not folded into `W` unreadable. */
+  let oUnreadable = false
   if (computable) {
     /**
      * ── USER-RULED (P0): THE CEILING IS THE COMPACTION THRESHOLD, NOT 「WINDOW MINUS OUTPUT」 ───────
@@ -945,8 +949,53 @@ function applyCompactionCeiling(
      * the configured 0.70, that tool wins and the slice moves earlier. The alternative — ignoring it —
      * is the silently-compacted handoff v0.37 was written to prevent.
      */
-    thresholdRatio = Math.min(...autoMounts.map((mount) => mount.thresholdRatio))
-    thresholdRatio = Math.max(0.01, Math.min(0.99, thresholdRatio))
+    /**
+     * ── N5 (P0, lead §二十八): THE HOST'S FORMULA HAS THREE INPUTS AND WE USED ONE ────────────────
+     *
+     * This module's own header (`:7`) states the host formula verbatim:
+     *
+     *     threshold = floor(min(W × thresholdRatio, W − O − headroomTokens))
+     *
+     * The line below used to take only the FIRST arm of that `min`, because 17.4-C `void`-ed `O` and
+     * `headroomTokens` was collected only to be printed in an alert sentence. So the ceiling answered
+     * 「what did the config say」 and not 「when does the host actually refuse more input」.
+     *
+     * MEASURED on the user's profile: W=1048576, O=256000, B=65536 ⇒ `(1048576−256000−65536)/1048576 =
+     * 0.69336`. The host compacts at **69.34%**, while graft warned at **70.00%** — it was 0.66 points
+     * BEHIND, always, so the warning could never arrive before compaction. 1M window ⇒ 6,963 tokens.
+     *
+     * WHY 17.4-C's REASONING WAS RIGHT AND ITS CONCLUSION WRONG: `O` is the next completion's budget, so
+     * subtracting it from 「how much room is left」 would be charging for unwritten output. But the
+     * ceiling has never answered 「how much room is left」 — it answers 「when does the host declare the
+     * window full」, and the host's own formula subtracts both `O` and `B`. Removing them here did not
+     * remove them there; it only made our line 10.66 points later than the host's.
+     *
+     * `B` comes from the mount row (already parsed); `O` comes from the caller (`readReservedOutputTokens`).
+     * BOTH were already in hand — this is the 「producer emits, delivery drops」 shape again.
+     */
+    const hostArm = (() => {
+      const mountRatio = Math.min(...autoMounts.map((mount) => mount.thresholdRatio))
+      const headroom = Math.max(0, ...autoMounts.map((mount) => mount.headroomTokens))
+      /** `O` unreadable must NOT be treated as 0 — that silently restores the 0.8 we just left. */
+      if (reservedOutputTokens === undefined || !Number.isFinite(reservedOutputTokens) || reservedOutputTokens < 0) {
+        return { arm: mountRatio, oUnreadable: true          }
+      }
+      const byWindow = 1 - (reservedOutputTokens + headroom) / windowLimit
+      return { arm: Math.min(mountRatio, byWindow), oUnreadable: false         , byWindow, mountRatio, headroom }
+    })()
+
+    if (hostArm.oUnreadable) {
+      /**
+       * FALL TO `conservative` RATHER THAN PRETENDING: module rule `:22` says 「算不出来时必须报 RESOURCE
+       * 并落 0.55，不许拿 0.75 假装没事」. Treating an unreadable `O` as 0 is exactly that pretense, and
+       * it is what 17.4-C was trying to fix from the wrong end.
+       */
+      thresholdRatio = undefined
+      oUnreadable = true
+    } else {
+      thresholdRatio = hostArm.arm
+      thresholdRatio = Math.max(0.01, Math.min(0.99, thresholdRatio))
+    }
   }
 
   const conservative = thresholdRatio === undefined
@@ -973,6 +1022,7 @@ function applyCompactionCeiling(
          */
         `RESOURCE — compaction-basic auto is ON (${where}) but the host threshold is not computable ` +
         `(W=${Number.isFinite(windowLimit) && windowLimit > 0 ? windowLimit : 'unknown'}); ` +
+        `${oUnreadable ? 'O (output reservation) unreadable ⇒ treated as UNKNOWN, not as 0; ' : ''}` +
         `conservative hardAt ${COMPACTION_CONSERVATIVE_HARD_AT} used so the slice still wins. ` +
         'This is a RESOURCE condition, not a pass.'
       : `compaction-basic auto is ON (${where}); host threshold ${roundTo4(thresholdRatio          )}; ` +

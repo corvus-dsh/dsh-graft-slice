@@ -28,8 +28,9 @@ import { pathToFileURL } from 'node:url'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const guard = await import(pathToFileURL(join(ROOT, 'src', 'core', 'compaction-guard.ts')).href)
 
-/** `thresholdRatio` comes from the MOUNT row, not from arithmetic — a fixture without it yields NaN. */
-const autoMount = { where: 'preset:standard', auto: true, thresholdRatio: 0.8 }
+/** `thresholdRatio` comes from the MOUNT row, not from arithmetic — a fixture without it yields NaN.
+ * N5 also reads `headroomTokens` from the same row; without it the window arm is NaN too. */
+const autoMount = { where: 'preset:standard', auto: true, thresholdRatio: 0.8, headroomTokens: 0 }
 
 test('v328 ①: a host ceiling ABOVE our hardAt must not claim anything was lowered', () => {
   const out = guard.applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, [autoMount], 1_000_000, 20_000)
@@ -46,7 +47,7 @@ test('v328 ② (negative half): a genuine lowering still says `lowered`', () => 
    * Without this half, ① is satisfied by deleting the word entirely — which would lose the one case where
    * the sentence is carrying real information.
    */
-  const lowMount = { where: 'preset:tight', auto: true, thresholdRatio: 0.6 }
+  const lowMount = { where: 'preset:tight', auto: true, thresholdRatio: 0.6, headroomTokens: 0 }
   const out = guard.applyCompactionCeiling({ warnAt: 0.7, hardAt: 0.75 }, [lowMount], 1_000_000, 900_000)
   const reason = String(out.compaction.reason)
   assert.equal(out.compaction.source, 'computed', '前提：这条分支应能算出天花板')
