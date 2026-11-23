@@ -137,6 +137,19 @@ jobs:
       - name: Documentation counts match the code
         run: node scripts/check-readme-counts.mjs
 
+      # ── RUNTIME DEPENDENCIES MUST STAY EMPTY (B4-A 的「依赖为空门禁」) ───────────────────────────
+      #
+      # MEASURED (lead §31.2): `node_modules/typescript` = 5.9.3 existed only at the workspace ROOT,
+      # inherited by every repo, **declared by none**. Locally green, fresh clone red — and a red CI run
+      # is what that produced for as long as nobody read it. The dependency is now DECLARED as a
+      # devDependency (exact pin) and this gate keeps `dependencies` empty forever: those are what get
+      # installed into a user's runtime, and B4-A's target is that they stay empty.
+      #
+      # It runs before the merge gates: a manifest that smuggles a runtime dependency is a product
+      # change, not a documentation mismatch.
+      - name: Runtime dependencies are empty and dev tooling is allowlisted
+        run: node scripts/check-runtime-deps.mjs
+
       # ── TEST NUMBERS ARE UNIQUE WITHIN A REPOSITORY ──────────────────────────────────────────────
       #
       # Measured 2026-11-21 (B4-0b-2 W5-1): this repository already shares 18 numbers between files

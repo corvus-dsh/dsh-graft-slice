@@ -172,6 +172,11 @@ const KINDS = new Map([
   ['emit-taxonomy.mjs', 'INSTRUMENT'],
   ['index-ratchet.mjs', 'INSTRUMENT'],
   ['ci-fresh-clone.mjs', 'INSTRUMENT'],
+  /**
+   * B4-A 的「依赖为空门禁」。它是 **GATE**（`dependencies` 非空 ⇒ exit 1），并且必须在 `ci.yml` 里
+   * 有自己的步骤 —— 它在 `npm run check` 里跑不代表 CI 会跑到它（本仓已经因为「门禁没人跑」红过一次）。
+   */
+  ['check-runtime-deps.mjs', 'GATE'],
   ['families.mjs', 'INSTRUMENT'],
 
   // ── OPS: needs a live store/host, or is a drill ──
