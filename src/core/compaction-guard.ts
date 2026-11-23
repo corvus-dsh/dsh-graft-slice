@@ -307,7 +307,28 @@ export function applyCompactionCeiling(
         `conservative hardAt ${COMPACTION_CONSERVATIVE_HARD_AT} used so the slice still wins. ` +
         'This is a RESOURCE condition, not a pass.'
       : `compaction-basic auto is ON (${where}); host threshold ${roundTo4(thresholdRatio as number)}; ` +
-        `hardAt lowered from ${roundTo4(thresholds.hardAt)} to ${hardAt} so the slice wins.`,
+        `${hardAtSentence(roundTo4(thresholds.hardAt), hardAt)} so the slice wins.`,
   }
   return { warnAt, hardAt, compaction }
+}
+
+/**
+ * ── N4a: 「lowered from 0.75 to 0.75」 IS A SENTENCE THAT SAYS NOTHING (lead §二十七) ────────────
+ *
+ * MEASURED on a live profile: `thresholdReason` read
+ *
+ *     hardAt lowered from 0.75 to 0.75 so the slice wins
+ *
+ * The host threshold was 0.8, so `0.8 − 0.02 = 0.78` is ABOVE our 0.75 and **nothing was lowered** —
+ * yet the sentence announced an adjustment, in the past tense, with a rationale attached. A reader
+ * debugging 「why didn't the cut land at 75%」 reads that line as evidence that something moved.
+ *
+ * So the verb is now chosen from the arithmetic: only a real decrease may say `lowered`. Same family as
+ * `source: 'off'` meaning both 「confirmed none」 and 「could not see」 — the field exists, the fact does not.
+ */
+export function hardAtSentence(from: number, to: number): string {
+  if (to < from) return `hardAt lowered from ${from} to ${to}`
+  if (to === from) return `hardAt unchanged at ${to}`
+  /** Raising our own cut-off under a compaction ceiling would be a defect, so it says so out loud. */
+  return `hardAt RAISED from ${from} to ${to} (unexpected under a ceiling)`
 }

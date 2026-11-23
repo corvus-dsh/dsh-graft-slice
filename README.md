@@ -413,7 +413,7 @@ UI 与命令共用一份实现，而且在客户端 bundle 尚未加载时，命
 
 | 项 | 结果 | 证据 |
 |---|---|---|
-| 全量测试 | graft **1109 / 1111**（**2 条 skipped，不是 failed**：`v112 D2 control`（TD-17 已裁定保留该行为）/ `v113 C1`（goal 语义待裁定））、memory **819 / 819** | `node --test test/*.test.mjs`（两仓库） |
+| 全量测试 | graft **1112 / 1114**（**2 条 skipped，不是 failed**：`v112 D2 control`（TD-17 已裁定保留该行为）/ `v113 C1`（goal 语义待裁定））、memory **819 / 819** | `node --test test/*.test.mjs`（两仓库） |
 | 文档/打包一致性 | `check-docs` 27 项一致、`verify-bundle` 28/28 | 同上 |
 | 幽灵条目清理 | projcache **574 → 10**（幽灵 564 → 0）、`retired` **5 → 0**、`targets` **8 → 0** | `scripts/prune-ghosts.mjs`（隔离到 `_quarantine-ghost-<ts>/`，含 `MANIFEST.json` + `restore.ps1`，**未删除任何文件**） |
 | 调试面板 | 真机注册表可查到 `graft_debug_status`；CLI 输出与取证报告逐项吻合 | `cordis_inspect_query Tool.listTools`、`scripts/debug-status.mjs` |
@@ -1503,7 +1503,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 1111 个测试
+# 2) 1114 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）
