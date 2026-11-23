@@ -76,10 +76,44 @@ if (existsSync(modules)) {
   console.log('[ci-proxy] removed inherited node_modules')
 }
 
-/* 3. Install without running scripts — this is a measurement, not a build environment. */
-const install = run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'], target)
+/**
+ * ── THE REGISTRY IS PINNED, IN-PROCESS, AND PRINTED (lead §三十二) ──────────────────────────────
+ *
+ * MEASURED MISTAKE: the first version ran `npm install` with whatever registry this machine is
+ * configured for — `https://repo.harmonyos.com/npm/` — which does not carry `typescript@5.9.3`, so it
+ * reported `404`. **CI does not use that registry**: `ci.yml` has no `registry-url`, `setup-node` sets
+ * none, and no repository has an `.npmrc`. So the proxy was measuring a configuration nobody uses.
+ *
+ * "A tool that measures the wrong surface keeps producing the wrong red and the wrong green" — the same
+ * family as `v322` (green storage layer, unwired tool) and `v329 ③` (a regex that matched `auto is ON`).
+ *
+ * So the registry is pinned for THIS PROCESS ONLY, and printed, because evidence has to be auditable:
+ *
+ *   · `--registry=` is passed to the install command; the user's npm config is never written.
+ *   · The run announces which registry it used.
+ *   · A registry that cannot be reached is reported as a NETWORK condition — NOT as "the tree is broken".
+ */
+const REGISTRY = 'https://registry.npmjs.org'
+
+const install = run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', `--registry=${REGISTRY}`], target)
+console.log(`[ci-proxy] install registry: ${REGISTRY} (pinned for this process only; your npm config is untouched)`)
+
 if (install.code !== 0) {
-  console.error(`[ci-proxy] npm install failed (exit ${install.code}):\n${install.out.slice(-2000)}`)
+  /**
+   * ── NETWORK vs TREE: two different verdicts, and collapsing them is the defect ─────────────────
+   *
+   * A 404 / ENOTFOUND / ECONNREFUSED says the REGISTRY is the problem. Reporting that as
+   * 「the committed tree does not build」 would send the next reader to look for a code defect that does
+   * not exist — exactly what the harmoyos 404 did last round.
+   */
+  const networkish = /(ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|404 Not Found|network|socket hang up)/iu.test(install.out)
+  if (networkish) {
+    console.error(`[ci-proxy] NETWORK CONDITION — could not install from ${REGISTRY}. This is NOT a verdict about the tree.`)
+    console.error(install.out.trim().split('\n').slice(-6).join('\n'))
+    if (!keep) rmSync(temp, { recursive: true, force: true })
+    process.exit(2)
+  }
+  console.error(`[ci-proxy] npm install failed (exit ${install.code}) — this is a PACKAGE/MANIFEST problem:\n${install.out.slice(-2000)}`)
   if (!keep) rmSync(temp, { recursive: true, force: true })
   process.exit(1)
 }
