@@ -171,6 +171,7 @@ const KINDS = new Map([
   ['handler-inventory.mjs', 'INSTRUMENT'],
   ['emit-taxonomy.mjs', 'INSTRUMENT'],
   ['index-ratchet.mjs', 'INSTRUMENT'],
+  ['ci-fresh-clone.mjs', 'INSTRUMENT'],
   ['families.mjs', 'INSTRUMENT'],
 
   // ── OPS: needs a live store/host, or is a drill ──
@@ -211,6 +212,11 @@ const NOT_A_CI_STEP = new Map([
    * 所以它不需要再作为独立 CI 步骤登记 —— 再登记一次只会让同一个断言在两个地方各跑一遍。
    */
   ['index-ratchet.mjs', 'asserting instrument whose criteria v327 already runs inside node --test (the last step of npm run check and a CI step); a separate CI step would run the same assertion twice'],
+  /**
+   * 本地 CI 代理：**clone + install + check**。它在 CI 里跑没有意义（CI 本身就是全新环境），
+   * 而它会写临时目录、需要网络装依赖。它的用途是**在 CI 看不见时**抓「只在本地成立」的失败。
+   */
+  ['ci-fresh-clone.mjs', 'local proxy: clones the repo to a temp dir and runs the check chain there. Pointless as a CI step (CI IS a clean environment) and needs a registry; its job is to catch local-only failures while CI is unobserved'],
   /**
    * ── W4-1: THE MODULE THAT RUNS THE SUITE ONCE FOR EVERY GATE ───────────────────────────────────
    *
