@@ -60,16 +60,54 @@ jobs:
           repository: corvus-dsh/dsh-memory
           path: .siblings/dsh-memory
 
+      - name: Check out the sibling whose monitor the supervision probes read
+        # ── lead §三十三: THE OTHER HALF OF THE SAME CONTRACT ─────────────────────────────────────
+        #
+        # `v022`–`v030` and `v102`/`v103` do not merely *mention* the other plugins — their SUBJECT is
+        # 「two plugins must agree」. They read `dsh-observer/src/core/monitor.ts` to prove the reader and
+        # the writer of one fact did not drift. A skip would not test a weaker version of that contract;
+        # it would delete the contract.
+        #
+        # `repository:` without `ref:` means the DEFAULT BRANCH HEAD, not this machine's state. That is a
+        # capability CI did not have before (cross-repo drift is now visible), and it is why 「local green
+        # ⇒ CI green」 stops being true — recorded in README so nobody re-learns it from a red run.
+        uses: actions/checkout@v4
+        with:
+          repository: corvus-dsh/dsh-observer
+          path: .siblings/dsh-observer
+
       - name: Place the siblings where the probes expect them
         # Both lookups use the DIRECTORY NAME (the repo name), not the scoped package name: this
         # workspace lays repos side by side by repo name, and the probes follow that layout.
+        #
+        # ── THE SHAS ARE PRINTED ON PURPOSE (lead §三十三.2) ──────────────────────────────────────
+        #
+        # When one of the cross-repo criteria fails, the reader must be able to answer 「who moved?」
+        # from the log alone. Without the sha, a failure in `dsh-memory@…` reads as a failure in this
+        # repository, and the next hour goes into the wrong tree.
+        #
+        # `set -e` also makes the failure LOUD: if a checkout did not produce the directory, the `mv`
+        # fails and the job fails. 「取不到兄弟」 and 「兄弟一致」 are two different facts.
         run: |
           set -e
           mv .siblings/dsh-paradise ../dsh-paradise
           mv .siblings/dsh-memory ../dsh-memory
+          mv .siblings/dsh-observer ../dsh-observer
           rm -rf .siblings
           node -e "console.log('paradise at', require('node:fs').realpathSync('../dsh-paradise/index.js'))"
           node -e "console.log('memory at', require('node:fs').realpathSync('../dsh-memory/client.js'))"
+          node -e "console.log('observer at', require('node:fs').realpathSync('../dsh-observer/index.js'))"
+
+      - name: Record which sibling revisions these criteria ran against
+        # A cross-repo criterion that does not name the revision it compared is unauditable: the same
+        # commit could pass today and fail tomorrow because a SIBLING moved, and the log would not say so.
+        run: |
+          set -e
+          for sibling in dsh-paradise dsh-memory dsh-observer; do
+            sha=$(git -C "../$sibling" rev-parse --short HEAD)
+            full=$(git -C "../$sibling" rev-parse HEAD)
+            echo "sibling $sibling@$sha ($full)"
+          done
 
       - name: Install (no dependencies expected)
         run: npm install --no-audit --no-fund

@@ -414,6 +414,12 @@ UI 与命令共用一份实现，而且在客户端 bundle 尚未加载时，命
 | 项 | 结果 | 证据 |
 |---|---|---|
 | 全量测试 | graft **1122 / 1124**（**2 条 skipped，不是 failed**：`v112 D2 control`（TD-17 已裁定保留该行为）/ `v113 C1`（goal 语义待裁定））、memory **819 / 819** | `node --test test/*.test.mjs`（两仓库） |
+
+> **「本地全绿 ⇒ CI 全绿」不再成立（lead §三十三.3）。** `ci.yml` 现在把 `dsh-paradise` /
+> `dsh-memory` / `dsh-observer` 三个兄弟仓 checkout 到同一工作区，用的**是它们默认分支的 HEAD**，
+> 不是本机那三份工作副本。所以同一个 graft 提交可能本地绿而 CI 红（兄弟仓往前走了），也可能相反。
+> 日志里那三行 `sibling <repo>@<sha>` 就是用来回答「**谁动了**」的——跨仓判据失败时先看它，
+> 否则一小时会花在错的仓里。
 | 文档/打包一致性 | `check-docs` 27 项一致、`verify-bundle` 28/28 | 同上 |
 | 幽灵条目清理 | projcache **574 → 10**（幽灵 564 → 0）、`retired` **5 → 0**、`targets` **8 → 0** | `scripts/prune-ghosts.mjs`（隔离到 `_quarantine-ghost-<ts>/`，含 `MANIFEST.json` + `restore.ps1`，**未删除任何文件**） |
 | 调试面板 | 真机注册表可查到 `graft_debug_status`；CLI 输出与取证报告逐项吻合 | `cordis_inspect_query Tool.listTools`、`scripts/debug-status.mjs` |
