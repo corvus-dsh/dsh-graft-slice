@@ -1,0 +1,220 @@
+{
+  "contractVersion": 1,
+  "contentClasses": [
+    {
+      "id": "human",
+      "label": "人类真打的字",
+      "continuation": "full",
+      "intoConstraintCandidates": true,
+      "basis": "唯一能承载「用户要什么」的类；受预算截断，但保留原文。"
+    },
+    {
+      "id": "objective",
+      "label": "总目标 / 目标状态",
+      "continuation": "pointer+first-line",
+      "intoConstraintCandidates": false,
+      "basis": "目标是「去哪儿」，不是「不许做什么」；由 goal 记录承载，不混进约束池。"
+    },
+    {
+      "id": "project-rule",
+      "label": "项目级长期约束",
+      "continuation": "full",
+      "intoConstraintCandidates": true,
+      "basis": "agent-instructions 是人写在仓库里的规则文件，不是模型注入 —— 与 D1 要防的不是同一件事。"
+    },
+    {
+      "id": "session-rule",
+      "label": "本会话短期约束",
+      "continuation": "full",
+      "intoConstraintCandidates": true,
+      "basis": "从 human 文本里抽出的祈使句；出处仍是人，所以有资格进池。"
+    },
+    {
+      "id": "task-transcript",
+      "label": "转述 / 待分析材料",
+      "continuation": "pointer",
+      "intoConstraintCandidates": false,
+      "basis": "Q1 的裁定：转述不是需求。正文可能很长，交接只留指针 + 一句摘要。"
+    },
+    {
+      "id": "async-result",
+      "label": "子智能体 / 后台作业结果",
+      "continuation": "pointer+first-line",
+      "intoConstraintCandidates": false,
+      "basis": "结论有用、正文可重读；D3 要求必须留 {kind, seq, 首句}。"
+    },
+    {
+      "id": "peer-message",
+      "label": "其它节点 / 子智能体发的",
+      "continuation": "pointer+first-line",
+      "intoConstraintCandidates": false,
+      "basis": "跨节点的指令不是用户指令；留发送者与首句，其余靠指针。"
+    },
+    {
+      "id": "host-noise",
+      "label": "宿主噪音 / 环境快照",
+      "continuation": "drop",
+      "intoConstraintCandidates": false,
+      "basis": "D4：丢弃必须记数，不许静默；影响行为但不该进约束池。"
+    },
+    {
+      "id": "reference",
+      "label": "参考数据（无权威）",
+      "continuation": "drop",
+      "intoConstraintCandidates": false,
+      "basis": "来源自称 authority=\"none\"；当成事实引入会把无权威变成有权威。"
+    },
+    {
+      "id": "history",
+      "label": "压缩摘要 / 上一代交接",
+      "continuation": "pointer",
+      "intoConstraintCandidates": false,
+      "basis": "摘要已压过一次；再全文带入是二次压缩，且会把上一代的措辞当成本代事实。"
+    }
+  ],
+  "provenance": [
+    {
+      "id": "human",
+      "meaning": "人类直接输入"
+    },
+    {
+      "id": "self",
+      "meaning": "本插件自己注入的（回放 / 交接）—— 这是 provenance，不是内容类"
+    },
+    {
+      "id": "peer",
+      "meaning": "其它节点 / 子智能体 / 副脑"
+    },
+    {
+      "id": "host",
+      "meaning": "宿主运行时（时间、cwd、模型切换、审批策略）"
+    },
+    {
+      "id": "reference",
+      "meaning": "只读参考源（无权威）"
+    }
+  ],
+  "sourceKinds": [
+    {
+      "kind": "user",
+      "contentClass": "human",
+      "provenance": "human",
+      "note": "壳是 human，里面可能混着压缩摘要 / 人设注入，需二次判定"
+    },
+    {
+      "kind": "goal",
+      "contentClass": "objective",
+      "provenance": "host",
+      "note": ""
+    },
+    {
+      "kind": "tool-goal",
+      "contentClass": "objective",
+      "provenance": "host",
+      "note": "goal_complete / goal_blocked"
+    },
+    {
+      "kind": "agent-instructions",
+      "contentClass": "project-rule",
+      "provenance": "host",
+      "note": "CLAUDE.md / AGENTS.md 等目录级指令"
+    },
+    {
+      "kind": "subagent-settled",
+      "contentClass": "async-result",
+      "provenance": "peer",
+      "note": ""
+    },
+    {
+      "kind": "tool-jobs",
+      "contentClass": "async-result",
+      "provenance": "host",
+      "note": "后台作业完成回执"
+    },
+    {
+      "kind": "agent-message",
+      "contentClass": "peer-message",
+      "provenance": "peer",
+      "note": ""
+    },
+    {
+      "kind": "plugin:observer-briefing",
+      "contentClass": "peer-message",
+      "provenance": "peer",
+      "note": "副脑给主脑的简报"
+    },
+    {
+      "kind": "plugin:graft-replay",
+      "contentClass": "history",
+      "provenance": "self",
+      "note": "本插件注入的上一代回放：内容上是历史，来源上是自己"
+    },
+    {
+      "kind": "plugin:dsh-memory",
+      "contentClass": "reference",
+      "provenance": "reference",
+      "note": "authority=\"none\""
+    },
+    {
+      "kind": "compact-checkpoint",
+      "contentClass": "history",
+      "provenance": "host",
+      "note": ""
+    },
+    {
+      "kind": "time-context",
+      "contentClass": "host-noise",
+      "provenance": "host",
+      "note": ""
+    },
+    {
+      "kind": "runtime-context",
+      "contentClass": "host-noise",
+      "provenance": "host",
+      "note": "影响行为（cwd / 文件策略 / GUI URL）"
+    },
+    {
+      "kind": "skill-catalog",
+      "contentClass": "host-noise",
+      "provenance": "host",
+      "note": ""
+    },
+    {
+      "kind": "model-selection",
+      "contentClass": "host-noise",
+      "provenance": "host",
+      "note": "影响行为"
+    },
+    {
+      "kind": "user-approval",
+      "contentClass": "host-noise",
+      "provenance": "host",
+      "note": "影响行为（审批策略）"
+    },
+    {
+      "kind": "repeat-tool-reminder",
+      "contentClass": "host-noise",
+      "provenance": "host",
+      "note": ""
+    },
+    {
+      "kind": "plugin:chat-import",
+      "contentClass": "host-noise",
+      "provenance": "host",
+      "note": ""
+    },
+    {
+      "kind": "working-directory",
+      "contentClass": "host-noise",
+      "provenance": "host",
+      "note": "影响行为"
+    }
+  ],
+  "unknownPolicy": {
+    "className": "host-noise",
+    "flagUnclassified": true,
+    "preservePointer": true,
+    "warn": true,
+    "basis": "D5：未登记的 kind 必须显形并记数，不许静默丢弃；指针保留，便于回读确认它到底是什么。"
+  }
+}

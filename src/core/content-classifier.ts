@@ -30,59 +30,164 @@
  * `classifyBySource('user')` 只回答「壳是 user」，`classifyHumanText(text)` 回答「里面的字是谁的」。
  */
 
-/** 一条 `user/message` 在 Q1 语境里「是谁的、能不能当需求」。 */
+/**
+ * ── THE REGISTRY LIVES HERE (Phase A, lead §25.3①) ───────────────────────────────────────────────
+ *
+ * `src/contracts/content-taxonomy.v1.json` and `docs/CONTENT-TAXONOMY.md` are both **generated** from
+ * the tables below (`node scripts/emit-taxonomy.mjs`), and `v326` compares the three. So the registry has
+ * ONE owner, and the JSON/docs are projections rather than second copies of 19 rows.
+ *
+ * ── WHY THE TABLES ARE HERE AND NOT IN `src/contracts/` ─────────────────────────────────────────
+ *
+ * The lead's wording was 「JSON 是唯一登记，`content-classifier.ts` 读合同」. Reading it needs a relative
+ * import, and this file has TWO constraints that forbid one:
+ *
+ *   · `v219` loads this module straight from `.ts`. With a `.js` specifier nothing resolves on disk;
+ *     with a `.ts` specifier `tsc` refuses (`allowImportingTsExtensions`), and the repo already carries
+ *     ONE frozen instance of that diagnostic — adding a second is debt for no gain.
+ *   · The file header's rule 「零 import」 exists for exactly that reason.
+ *
+ * So the direction is reversed: **the code is canonical and the JSON is the projection.** That keeps the
+ * lead's actual goal (one owner, three places compared by a gate) and avoids both gate fights. The
+ * divergence from the letter is recorded here rather than hidden.
+ *
+ * 用户裁定：`self-authored` 不是内容类，是 **provenance**。所以内容类是 10 个，而 `cls` 与
+ * `provenance` 是两个正交维度，返回两个字段。
+ */
+
+/** 10 内容类。`self-authored` 不在这里 —— 它是 provenance。 */
 export type ContentClass =
-  | 'human'            // 人类真打的字
-  | 'objective'        // 总目标 / 目标状态
-  | 'project-rule'     // 项目级长期约束
-  | 'session-rule'     // 本会话短期约束（从 human 里抽祈使句；本批只留接口，无 producer）
-  | 'task-transcript'  // 转述 / 待分析材料  ← Q1 的核心
-  | 'async-result'     // 子智能体 / 后台作业结果
-  | 'peer-message'     // 其它节点 / 子智能体发的
-  | 'self-authored'    // 本插件自己注入的回放
-  | 'host-noise'       // 宿主噪音 / 环境快照
-  | 'reference'        // 参考数据（无权威）
-  | 'history'          // 压缩摘要
+  | 'human'
+  | 'objective'
+  | 'project-rule'
+  | 'session-rule'
+  | 'task-transcript'
+  | 'async-result'
+  | 'peer-message'
+  | 'host-noise'
+  | 'reference'
+  | 'history'
+
+/** 来源属性：这条消息**是谁放进来的**（与「它是什么内容」正交）。 */
+export type Provenance = 'human' | 'self' | 'peer' | 'host' | 'reference'
+
+/** 交接里怎么处置这一类。 */
+export type Continuation = 'full' | 'pointer' | 'pointer+first-line' | 'drop'
+
+export interface ContentClassSpec {
+  readonly id: ContentClass
+  readonly label: string
+  readonly continuation: Continuation
+  /** 是否允许进硬约束候选池（D1 的目的，而不是它的字面）。 */
+  readonly intoConstraintCandidates: boolean
+  readonly basis: string
+}
+
+export interface ProvenanceSpec {
+  readonly id: Provenance
+  readonly meaning: string
+}
+
+export interface SourceKindEntry {
+  readonly kind: string
+  readonly contentClass: ContentClass
+  readonly provenance: Provenance
+  readonly note: string
+}
+
+export const CATEGORY_TABLES = (() => {
+  const contentClasses: readonly ContentClassSpec[] = Object.freeze([
+    { id: 'human', label: '人类真打的字', continuation: 'full', intoConstraintCandidates: true, basis: '唯一能承载「用户要什么」的类；受预算截断，但保留原文。' },
+    { id: 'objective', label: '总目标 / 目标状态', continuation: 'pointer+first-line', intoConstraintCandidates: false, basis: '目标是「去哪儿」，不是「不许做什么」；由 goal 记录承载，不混进约束池。' },
+    { id: 'project-rule', label: '项目级长期约束', continuation: 'full', intoConstraintCandidates: true, basis: 'agent-instructions 是人写在仓库里的规则文件，不是模型注入 —— 与 D1 要防的不是同一件事。' },
+    { id: 'session-rule', label: '本会话短期约束', continuation: 'full', intoConstraintCandidates: true, basis: '从 human 文本里抽出的祈使句；出处仍是人，所以有资格进池。' },
+    { id: 'task-transcript', label: '转述 / 待分析材料', continuation: 'pointer', intoConstraintCandidates: false, basis: 'Q1 的裁定：转述不是需求。正文可能很长，交接只留指针 + 一句摘要。' },
+    { id: 'async-result', label: '子智能体 / 后台作业结果', continuation: 'pointer+first-line', intoConstraintCandidates: false, basis: '结论有用、正文可重读；D3 要求必须留 {kind, seq, 首句}。' },
+    { id: 'peer-message', label: '其它节点 / 子智能体发的', continuation: 'pointer+first-line', intoConstraintCandidates: false, basis: '跨节点的指令不是用户指令；留发送者与首句，其余靠指针。' },
+    { id: 'host-noise', label: '宿主噪音 / 环境快照', continuation: 'drop', intoConstraintCandidates: false, basis: 'D4：丢弃必须记数，不许静默；影响行为但不该进约束池。' },
+    { id: 'reference', label: '参考数据（无权威）', continuation: 'drop', intoConstraintCandidates: false, basis: '来源自称 authority="none"；当成事实引入会把无权威变成有权威。' },
+    { id: 'history', label: '压缩摘要 / 上一代交接', continuation: 'pointer', intoConstraintCandidates: false, basis: '摘要已压过一次；再全文带入是二次压缩，且会把上一代的措辞当成本代事实。' },
+  ])
+
+  const provenance: readonly ProvenanceSpec[] = Object.freeze([
+    { id: 'human', meaning: '人类直接输入' },
+    { id: 'self', meaning: '本插件自己注入的（回放 / 交接）—— 这是 provenance，不是内容类' },
+    { id: 'peer', meaning: '其它节点 / 子智能体 / 副脑' },
+    { id: 'host', meaning: '宿主运行时（时间、cwd、模型切换、审批策略）' },
+    { id: 'reference', meaning: '只读参考源（无权威）' },
+  ])
+
+  /**
+   * 19 种 `source.kind`（B0.8 的实测快照）。不在表里的一律走 `UNKNOWN_POLICY`。
+   * 刻意不用 `startsWith('plugin:graft')` 收编变体：没见过的 `plugin:graft-foo` 应当**显形为未登记**，
+   * 而不是被前缀悄悄归进 `self`。
+   */
+  const sourceKinds: readonly SourceKindEntry[] = Object.freeze([
+    { kind: 'user', contentClass: 'human', provenance: 'human', note: '壳是 human，里面可能混着压缩摘要 / 人设注入，需二次判定' },
+    { kind: 'goal', contentClass: 'objective', provenance: 'host', note: '' },
+    { kind: 'tool-goal', contentClass: 'objective', provenance: 'host', note: 'goal_complete / goal_blocked' },
+    { kind: 'agent-instructions', contentClass: 'project-rule', provenance: 'host', note: 'CLAUDE.md / AGENTS.md 等目录级指令' },
+    { kind: 'subagent-settled', contentClass: 'async-result', provenance: 'peer', note: '' },
+    { kind: 'tool-jobs', contentClass: 'async-result', provenance: 'host', note: '后台作业完成回执' },
+    { kind: 'agent-message', contentClass: 'peer-message', provenance: 'peer', note: '' },
+    { kind: 'plugin:observer-briefing', contentClass: 'peer-message', provenance: 'peer', note: '副脑给主脑的简报' },
+    { kind: 'plugin:graft-replay', contentClass: 'history', provenance: 'self', note: '本插件注入的上一代回放：内容上是历史，来源上是自己' },
+    { kind: 'plugin:dsh-memory', contentClass: 'reference', provenance: 'reference', note: 'authority="none"' },
+    { kind: 'compact-checkpoint', contentClass: 'history', provenance: 'host', note: '' },
+    { kind: 'time-context', contentClass: 'host-noise', provenance: 'host', note: '' },
+    { kind: 'runtime-context', contentClass: 'host-noise', provenance: 'host', note: '影响行为（cwd / 文件策略 / GUI URL）' },
+    { kind: 'skill-catalog', contentClass: 'host-noise', provenance: 'host', note: '' },
+    { kind: 'model-selection', contentClass: 'host-noise', provenance: 'host', note: '影响行为' },
+    { kind: 'user-approval', contentClass: 'host-noise', provenance: 'host', note: '影响行为（审批策略）' },
+    { kind: 'repeat-tool-reminder', contentClass: 'host-noise', provenance: 'host', note: '' },
+    { kind: 'plugin:chat-import', contentClass: 'host-noise', provenance: 'host', note: '' },
+    { kind: 'working-directory', contentClass: 'host-noise', provenance: 'host', note: '影响行为' },
+  ])
+
+  /**
+   * 未知 kind 的策略（D5）：19 种是**今天的**答案。归入 host-noise 以求安全，但**显形**为
+   * unclassified 并保留指针 —— 否则「用户说了什么」与「我们看见了什么」会悄悄分叉。
+   */
+  const unknownPolicy = Object.freeze({
+    className: 'host-noise' as ContentClass,
+    flagUnclassified: true,
+    preservePointer: true,
+    warn: true,
+    basis: 'D5：未登记的 kind 必须显形并记数，不许静默丢弃；指针保留，便于回读确认它到底是什么。',
+  })
+
+  return Object.freeze({ version: 1, contentClasses, provenance, sourceKinds, unknownPolicy })
+})()
+
+export const CONTENT_CLASSES = CATEGORY_TABLES.contentClasses
+export const PROVENANCE = CATEGORY_TABLES.provenance
+export const SOURCE_KINDS = CATEGORY_TABLES.sourceKinds
+export const UNKNOWN_POLICY = CATEGORY_TABLES.unknownPolicy
+export const TAXONOMY_VERSION = CATEGORY_TABLES.version
 
 export interface ClassifiedSource {
   cls: ContentClass
+  /** 谁放进来的（与内容类正交）。用户裁定：`self-authored` 落在这里，不落进 `cls`。 */
+  provenance: Provenance
   /** 未登记的 kind（D5 纪律：必须记录，不许静默丢弃）。 */
   unclassified?: true
 }
 
+/** kind → 合同条目。从合同派生，不是手写 —— 手写的那份已经有 19 行要同步了。 */
+const BY_KIND: ReadonlyMap<string, { contentClass: ContentClass; provenance: Provenance }> = new Map(
+  SOURCE_KINDS.map((entry) => [entry.kind, { contentClass: entry.contentClass, provenance: entry.provenance }]),
+)
+
+/** 合同里的 10 个内容类（测试与文档比对用同一份）。 */
+export const CONTENT_CLASS_IDS: readonly ContentClass[] = CONTENT_CLASSES.map((entry) => entry.id)
+
 /**
- * ── 19 种 kind 的映射表（逐字来自 B0.8 的实测快照）────────────────────────────────────────────
+ * ── 这张表搬进了合同（Phase A）────────────────────────────────────────────────────────────────
  *
- * 键是**登记过的** kind；不在表里的一律 host-noise + `unclassified: true`。
- * 刻意不用 `startsWith('plugin:graft')` 去收编 `plugin:graft-*` 的其它变体 ——
- * `isGraftAuthored` 那么做是因为它要回答「是不是我」，而这里要回答「它属于哪一类」：
- * 一个没见过的 `plugin:graft-foo` 应当**显形为未登记**，而不是被前缀悄悄归进 self-authored。
- *
- * `plugin:graft-replay` 这个字面量与 `core/host-shape.ts` 的 `GRAFT_REPLAY_SOURCE_KIND` 同值。
- * 这里不 import 它：本模块被测试直接以 `.ts` 加载，而 host-shape 的相对 import 用的是 `.js`
- * 说明符（只在校验/打包链路里可解析）。抄一个字面量的代价由 v219 的夹具驱动来兜底。
+ * 它曾经是这里的一份手写 19 行映射，同时 `docs/` 里还有一张 19 行的表、合同里还有一份。**一个事实，
+ * 三个所有者。** 现在表只在 `src/contracts/content-taxonomy.v1.ts`，本模块从它派生（`BY_KIND`），
+ * 并有一条 gate 比对「合同 / 本模块导出的类 id / 文档表」三处。
  */
-const KIND_TO_CLASS: ReadonlyMap<string, ContentClass> = new Map<string, ContentClass>([
-  ['user', 'human'], // 二次判定见 classifyHumanText
-  ['goal', 'objective'],
-  ['tool-goal', 'objective'],
-  ['agent-instructions', 'project-rule'],
-  ['subagent-settled', 'async-result'],
-  ['tool-jobs', 'async-result'],
-  ['agent-message', 'peer-message'],
-  ['plugin:observer-briefing', 'peer-message'],
-  ['plugin:graft-replay', 'self-authored'],
-  ['plugin:dsh-memory', 'reference'],
-  ['compact-checkpoint', 'history'],
-  ['time-context', 'host-noise'],
-  ['runtime-context', 'host-noise'],
-  ['skill-catalog', 'host-noise'],
-  ['model-selection', 'host-noise'],
-  ['user-approval', 'host-noise'],
-  ['repeat-tool-reminder', 'host-noise'],
-  ['plugin:chat-import', 'host-noise'],
-  ['working-directory', 'host-noise'],
-])
 
 /** `summarizeUnclassified` 对「连 kind 都没有」的条目使用的标签。 */
 const NO_KIND_LABEL = '(no source.kind)'
@@ -92,13 +197,16 @@ const NO_KIND_LABEL = '(no source.kind)'
  *
  * 返回 `unclassified: true` 时，调用方**必须**把它当成「输入不完整」而不是「不重要」：
  * 用 `summarizeUnclassified()` 聚合后打印出来，比一条一条猜测有用得多（D5）。
+ *
+ * 未登记的 kind 走合同的 `UNKNOWN_POLICY`：归入它指定的内容类以求安全，但**显形**为 unclassified
+ * （策略在合同里，不在这个函数里 —— 否则「未知怎么办」会有两个所有者）。
  */
 export function classifyBySource(kind: string | undefined): ClassifiedSource {
   if (typeof kind === 'string') {
-    const cls = KIND_TO_CLASS.get(kind)
-    if (cls !== undefined) return { cls }
+    const entry = BY_KIND.get(kind)
+    if (entry !== undefined) return { cls: entry.contentClass, provenance: entry.provenance }
   }
-  return { cls: 'host-noise', unclassified: true }
+  return { cls: UNKNOWN_POLICY.className, provenance: 'host', unclassified: true }
 }
 
 /**
@@ -180,7 +288,7 @@ export function summarizeUnclassified(events: readonly { source?: { kind?: strin
   for (const event of events) {
     const raw = event?.source?.kind
     const kind = typeof raw === 'string' && raw.length > 0 ? raw : NO_KIND_LABEL
-    if (KIND_TO_CLASS.has(kind) || seen.has(kind)) continue
+    if (BY_KIND.has(kind) || seen.has(kind)) continue
     seen.add(kind)
     out.push(kind)
   }

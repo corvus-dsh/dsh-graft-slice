@@ -44,6 +44,13 @@ const CI = join(ROOT, '.github', 'workflows', 'ci.yml')
 const EXEMPT = new Map([
   ['closure.mjs', 'needs the TypeScript compiler, which this package does not depend on; it exits 2 by design in CI'],
   ['verify-pure-move.mjs', 'compares the working tree to a git ref, which is IDENTICAL by construction in CI; its --self-test is run locally'],
+  /**
+   * Phase A 的两个 GENERATOR：它们的默认模式**写文件**，在 CI 里跑就等于让流水线改仓库。
+   * 它们的断言不因此缺席 —— `v325` / `v326` 在 `node --test`（= CI 步骤）里跑同一个脚本，
+   * 后者会用 `--check`。所以「未登记」与「投影过期」在 CI 上仍然会红。
+   */
+  ['handler-inventory.mjs', 'generator: writes docs/HANDLER-INVENTORY.md; its ASSERTION runs inside node --test via v325, which is a CI step'],
+  ['emit-taxonomy.mjs', 'generator: writes src/contracts/content-taxonomy.v1.json; its --check assertion runs inside node --test via v326, which is a CI step'],
 ])
 
 const ciText = readFileSync(CI, 'utf8')
@@ -151,6 +158,18 @@ const KINDS = new Map([
   ['who-references.mjs', 'INSTRUMENT'],
   ['calibrate-who-references.mjs', 'INSTRUMENT'],
   ['inventory-source-guards.mjs', 'INSTRUMENT'],
+  /**
+   * ── Phase A 的两件新工具：GENERATOR，不是 CI 步骤 ────────────────────────────────────────────
+   *
+   * 两者都**会写文件**（`docs/HANDLER-INVENTORY.md`、`src/contracts/content-taxonomy.v1.json`），
+   * 所以在 CI 里跑它们等于让流水线改仓库 —— 那必然把干净树弄脏，而干净树本身是被检查的。
+   *
+   * 它们的**断言**并没有因此缺失：`v325` / `v326` 就在 `node --test` 里跑同一个脚本（后者用
+   * `--check`），而 `node --test` 是 CI 步骤。所以「未登记 / 投影过期」在 CI 上仍然会红。
+   * 分类为 INSTRUMENT 是因为它们的默认模式是产出，不是断言。
+   */
+  ['handler-inventory.mjs', 'INSTRUMENT'],
+  ['emit-taxonomy.mjs', 'INSTRUMENT'],
   ['families.mjs', 'INSTRUMENT'],
 
   // ── OPS: needs a live store/host, or is a drill ──
@@ -176,6 +195,15 @@ const KINDS = new Map([
 const NOT_A_CI_STEP = new Map([
   ['build.mjs', 'THE build step: it runs as `npm run build` inside the job, not as a separate check'],
   ['bundle.mjs', 'library module imported by build.mjs and check-docs.mjs, not a standalone script'],
+  /**
+   * ── Phase A 的两个 GENERATOR（不是断言）─────────────────────────────────────────────────────
+   *
+   * 两者的默认模式**写文件**：在 CI 里跑它们等于让流水线改仓库，而干净树本身是被检查的。
+   * 它们的断言不因此缺席 —— `v325` / `v326` 在 `node --test`（= CI 步骤）里跑同一个脚本，
+   * 后者用 `--check`。所以「未登记」与「投影过期」在 CI 上仍然会红。
+   */
+  ['handler-inventory.mjs', 'generator: writes docs/HANDLER-INVENTORY.md. Its ASSERTION (exit 1 on an unregistered unit) runs inside node --test via v325, which IS a CI step; running the generator in CI would modify the tree it is meant to check'],
+  ['emit-taxonomy.mjs', 'generator: writes src/contracts/content-taxonomy.v1.json. Its --check assertion runs inside node --test via v326, which IS a CI step; the default mode rewrites a committed file'],
   /**
    * ── W4-1: THE MODULE THAT RUNS THE SUITE ONCE FOR EVERY GATE ───────────────────────────────────
    *

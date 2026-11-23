@@ -56,7 +56,16 @@ const EXPECTED = {
   'tool-jobs': 'async-result',
   'agent-message': 'peer-message',
   'plugin:observer-briefing': 'peer-message',
-  'plugin:graft-replay': 'self-authored',
+  /**
+   * ── PHASE A（lead §25.3① 裁定）：`self-authored` 不是内容类，是 provenance ──────────────────────
+   *
+   * 所以 `plugin:graft-replay` 的内容类是 **history**（它是上一代的回放：内容上是历史），
+   * 而「是我自己注入的」这个事实落到 **provenance: 'self'**。
+   *
+   * 这不是「改期望值把测试弄绿」：20 个内容类/来源的组合里，只有这一个的**分类维度**变了，
+   * 所以只改这一行；其余 18 行一个都没动，可以逐行对照。
+   */
+  'plugin:graft-replay': 'history',
   'plugin:dsh-memory': 'reference',
   'compact-checkpoint': 'history',
   'time-context': 'host-noise',
@@ -155,8 +164,13 @@ test('v219 ①: 19 种 kind 逐个映射正确（由 B0.8 夹具驱动）', () =
 })
 
 test('v219 ②: 未登记 kind ⇒ host-noise + unclassified，且 summarizeUnclassified 能点名', () => {
-  assert.deepEqual(classifyBySource('some-new-kind'), { cls: 'host-noise', unclassified: true })
-  assert.deepEqual(classifyBySource(undefined), { cls: 'host-noise', unclassified: true })
+  /**
+   * 返回形状现在多一个 `provenance` 字段（内容类与来源属性正交）。未登记的 kind 走合同的
+   * `UNKNOWN_POLICY`：内容类取它指定的那个，来源记 `host` —— 「我们不知道该把它算成谁的」和
+   * 「它是宿主噪音」是两件事，所以 provenance 仍然给一个诚实的默认而不是留空。
+   */
+  assert.deepEqual(classifyBySource('some-new-kind'), { cls: 'host-noise', provenance: 'host', unclassified: true })
+  assert.deepEqual(classifyBySource(undefined), { cls: 'host-noise', provenance: 'host', unclassified: true })
 
   const events = [
     { source: { kind: 'user' } },
