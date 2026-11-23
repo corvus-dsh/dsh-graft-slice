@@ -416,6 +416,7 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 | `core/ledger.ts` | 原子读写台账与 epoch | `readLedger`, `writeLedgerAtomic` | `utils/serialize.ts` |
 | `core/message-source.ts` | 判定消息是插件生成还是人写的 | `isGraftAuthored`, `isHumanAuthored` | `core/host-shape.ts`, `utils/serialize.ts` |
 | `core/nudge-margin.ts` | 把 nudge 余量表示成 token：warnAt 派生、p90 增长预测、强制切两文案（纯函数，零 IO，零 import） | `deriveWarnAt`, `predictGrowthTokens`, `shouldNudge`, `forcedCutSentence`, `recordNudgeSample` | — |
+| `core/chain-advisory.ts` | 宽限期内只读地说明「压缩不受宽限期保护」：不改几何、文案不得邀请切片（N1） | `chainCompactionAdvisory` | — |
 | `core/paradise-write.ts` | 彼岸层写通道的懒加载与具名拒绝 | `ensureParadiseWrite` | — |
 | `core/pending-state.ts` | 构建交接看板的待裁定状态 | `buildPendingState` | `core/task-state.ts`, `utils/serialize.ts` |
 | `core/semantic-state.ts` | 从工具调用与结果读出本轮语义状态 | `extractSemanticState` | `core/watermark.ts`, `core/task-board.ts`, `core/instruction-card.ts`, `utils/serialize.ts` |
