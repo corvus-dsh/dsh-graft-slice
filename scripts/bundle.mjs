@@ -35,7 +35,6 @@ const TERMINATES = /['"]\s*;?\s*$/u
  * to a single line or to a bracketed block of at most 10 continuation lines.
  */
 const LOCAL_SINGLE_LINE = /^import[^\n]*from[ \t]+'\.[^'\n]+';?[ \t]*\n/gmu
-const LOCAL_BRACKETED = /^import[ \t]*\{\n(?:[ \t]+[^\n]*\n){0,40}?\}[ \t]*from[ \t]+'\.[^'\n]+';?[ \t]*\n/gmu
 const LOCAL_SINGLE_BRACKETED = /^import[ \t]*\{(?:[^}\n]*)\}[ \t]*from[ \t]+'\.[^'\n]+';?[ \t]*\n/gmu
 
 /**
