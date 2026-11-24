@@ -64,7 +64,27 @@ function boot({ tokens }) {
    * advisory/dedupe half too — so the criteria do not need a second seam. A dedicated hook was tried and
    * removed: `resetCompactionAdvisoryStateForTest?.()` hid its own absence, and a bare
    * `export { … }` re-export did not survive the bundler.
+   *
+   * ── THE `?.(` SELF-HARM, AND THE ASSERTIONS THAT NOW STAND IN FRONT OF IT (v337 / A5) ──────────
+   *
+   * That `?.()` made this file pass ALONE and fail IN THE SUITE: the hook had been dropped from the
+   * artifact, the optional call skipped it, and the dedupe state leaked between test files. The
+   * green was real, the seam was not (_lead §四十二.4_).
+   *
+   * So both hooks are now PROVEN PRESENT before they are optionally called. If either disappears
+   * again, this file goes red with a message that names the hook — instead of silently doing nothing.
+   * `v337` enforces this shape across every test file in the repository.
    */
+  assert.equal(
+    typeof plugin.clearGraftTargetsForTest,
+    'function',
+    'clearGraftTargetsForTest 必须从产物里导出 —— ?.() 会把它缺失伪装成「什么都没发生」',
+  )
+  assert.equal(
+    typeof plugin.resetRetiredSessions,
+    'function',
+    'resetRetiredSessions 必须从产物里导出 —— 它就是那个清去重状态的接缝',
+  )
   plugin.clearGraftTargetsForTest?.()
   plugin.resetRetiredSessions?.()
   const sourceLog = makeSourceLog({ turns: 3 })
