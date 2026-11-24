@@ -54,15 +54,25 @@ for (const [scopeName, scope] of Object.entries(manifest.scopes ?? {})) {
     problems.push(`基准仓 ${base} 不在工作区（作用域 ${scopeName}）`)
     continue
   }
+  /**
+   * ── A DECLARED PATH MAY NAME A SUBDIRECTORY ──────────────────────────────────────────────────
+   *
+   * A bare name means `scripts/<name>`; a name containing `/` is repo-relative
+   * (`test/source-assertion.mjs`). `check-shared-sources.mjs` resolves the same two shapes — the
+   * GATE and the SYNC TOOL must agree on where a file lives, or the tool copies to a path the gate
+   * does not check (and both look fine).
+   */
+  const resolveIn = (repo, file) =>
+    file.includes('/') ? join(WORKSPACE, repo, ...file.split('/')) : join(WORKSPACE, repo, 'scripts', file)
   for (const file of scope.files ?? []) {
-    const source = join(baseDir, file)
+    const source = resolveIn(base, file)
     if (!existsSync(source)) {
-      problems.push(`${base}/scripts/${file} 不存在 —— 清单要求它存在`)
+      problems.push(`${base}/${file.includes('/') ? file : `scripts/${file}`} 不存在 —— 清单要求它存在`)
       continue
     }
     const sourceDigest = digestOf(source)
     for (const repo of repos.slice(1)) {
-      const target = join(WORKSPACE, repo, 'scripts', file)
+      const target = resolveIn(repo, file)
       if (existsSync(target) && digestOf(target) === sourceDigest) {
         skipped += 1
         continue

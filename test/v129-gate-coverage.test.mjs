@@ -201,6 +201,12 @@ const KINDS = new Map([
    */
   ['check-source-assertions.mjs', 'GATE'],
   /**
+   * §四十六.4：文本文件不得带 UTF-8 BOM。断言型（首三字节 EF BB BF ⇒ exit 1）。
+   * BOM 是**不报错的改变**：`JSON.parse` 能容忍它，所以它只让 diff 多一行、让第一个字符串少几个字节。
+   * 我本轮正是靠 `git diff` 人工发现并回滚的 —— 那是检查，不是判据。
+   */
+  ['check-utf8-no-bom.mjs', 'GATE'],
+  /**
    * `sync-shared.mjs` 是**工具**，不是门禁：它是基准仓的同步入口，默认会写文件，而 CI 是全新 checkout，
    * 没有可同步的分叉。它的自检（复制后跑 check-shared-sources）由它自己完成。
    */

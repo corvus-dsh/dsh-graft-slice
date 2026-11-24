@@ -185,6 +185,8 @@ jobs:
       #
       # It runs before the merge gates: a manifest that smuggles a runtime dependency is a product
       # change, not a documentation mismatch.
+      - name: No text file carries a UTF-8 BOM
+        run: node scripts/check-utf8-no-bom.mjs
       - name: Runtime dependencies are empty and dev tooling is allowlisted
         run: node scripts/check-runtime-deps.mjs
 

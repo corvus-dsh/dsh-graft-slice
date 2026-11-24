@@ -22,7 +22,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, posix } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -268,35 +269,47 @@ test('v136x: a pure-move run against a tree with NO diff is VACUOUS, and exits 2
    * the word IDENTICAL is the one a reviewer looks for, so a check invoked after the commit instead
    * of before it would look like proof. The tool now distinguishes the two.
    *
-   * The test runs the DEFAULT invocation on the current tree, which (in CI and after a commit) has no
-   * src/ diff against HEAD. It asserts exit 2 AND the word VACUOUS — not merely "non-zero", because a
-   * crash would also be non-zero and would tell the reader nothing.
+   * ── WHY THIS NO LONGER READS THE WORKING TREE (measured, twice) ────────────────────────────────
+   *
+   * The first version guarded with `git status --porcelain -- src` and returned early when the tree
+   * was dirty ("a dirty tree is the normal state DURING a move"). That guard is a RACE: the suite
+   * runs test files CONCURRENTLY, so another file can dirty `src/` between this test's `git status`
+   * and its `execFileSync` — measured as a flaky red that passed on a direct run and failed inside
+   * the full suite, then passed again.
+   *
+   * Reading a GLOBAL, SHARED, MUTABLE state to decide whether to assert is the same defect class as
+   * 「只在另一个分支运行时才出现的红线」(D1): the criterion's outcome depends on something it does
+   * not control. So the vacuous case is now constructed in a THROWAWAY GIT REPO — no dependence on
+   * this working tree at all, and it runs every time instead of skipping.
    */
-  const status = execFileSync('git', ['status', '--porcelain', '--', 'src'], { cwd: ROOT, encoding: 'utf8' }).trim()
-  const diff = (() => {
-    try {
-      execFileSync('git', ['diff', '--quiet', 'HEAD', '--', 'src'], { cwd: ROOT, stdio: 'ignore' })
-      return false
-    } catch {
-      return true
-    }
-  })()
-
-  if (status !== '' || diff) {
-    // a dirty tree is the normal state DURING a move; the vacuous case cannot be exercised here
-    return
-  }
-
-  let code = 0
-  let out = ''
+  const sandbox = mkdtempSync(join(tmpdir(), 'v136x-vacuous-'))
   try {
-    out = execFileSync(process.execPath, [PURE_MOVE], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
-  } catch (error) {
-    code = error.status ?? 1
-    out = `${error.stdout ?? ''}${error.stderr ?? ''}`
+    const run = (args) =>
+      execFileSync('git', args, { cwd: sandbox, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+
+    run(['init', '-q'])
+    run(['config', 'user.email', 'v136x@example.invalid'])
+    run(['config', 'user.name', 'v136x'])
+    mkdirSync(join(sandbox, 'src'), { recursive: true })
+    writeFileSync(join(sandbox, 'src', 'a.ts'), 'export const a = 1\n', 'utf8')
+    run(['add', '-A'])
+    run(['commit', '-q', '-m', 'baseline'])
+
+    /** Same content, committed: the working tree has NOTHING to compare against HEAD. */
+    run(['add', '-A'])
+    let code = 0
+    let out = ''
+    try {
+      out = execFileSync(process.execPath, [PURE_MOVE], { cwd: sandbox, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+    } catch (error) {
+      code = error.status ?? 1
+      out = `${error.stdout ?? ''}${error.stderr ?? ''}`
+    }
+    assert.equal(code, 2, `a vacuous comparison must exit 2 (a usage/resource condition), got ${code}:\n${out}`)
+    assert.match(out, /VACUOUS/u, 'the output must say VACUOUS so nobody reads it as a pass')
+    assert.match(out, /NOT a pass/u, 'the output must say this is not a pass')
+    assert.doesNotMatch(out, /IDENTICAL/u, 'a vacuous run must never print IDENTICAL')
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true })
   }
-  assert.equal(code, 2, `a vacuous comparison must exit 2 (a usage/resource condition), got ${code}:\n${out}`)
-  assert.match(out, /VACUOUS/u, 'the output must say VACUOUS so nobody reads it as a pass')
-  assert.match(out, /NOT a pass/u, 'the output must say this is not a pass')
-  assert.doesNotMatch(out, /IDENTICAL/u, 'a vacuous run must never print IDENTICAL')
 })
