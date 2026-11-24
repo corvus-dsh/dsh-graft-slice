@@ -136,6 +136,22 @@ test('v136: a move may not add a dependency between two PRE-EXISTING modules', (
   assert.deepEqual(vanished, [], `an import edge vanished entirely:\n${output}`)
 
   // modules this diff CREATED (untracked under src/)
+  /**
+   * ── THIS ONE READS THIS WORKING TREE, AND THAT IS STATED RATHER THAN HIDDEN ────────────────────
+   *
+   * `v341 ②` forbids letting a criterion's ASSERTION depend on `git status` of a tree it does not
+   * own. This call is the one remaining case, and it is deliberately kept:
+   *
+   *   - the whole test compares THIS tree against `--against <ref>`; the diff IS the input, so a
+   *     sandbox would have to reproduce the entire move to mean anything;
+   *   - the value read here is 「which files are NEW」, a PRESENTATION detail (it only decides
+   *     whether a new edge counts as `created`); the assertion itself is about `git show <ref>:…`,
+   *     which is committed content and cannot move under concurrency.
+   *
+   * `v341` therefore exempts it BY NAME with this reasoning, instead of the rule being loosened for
+   * everyone. The cost of the exemption is that a concurrently-created `src/*.ts` could be seen
+   * mid-write — which is why nothing below asserts on the SET of created files, only on edges.
+   */
   const created = (() => {
     const status = execFileSync('git', ['status', '--porcelain', 'src'], { cwd: ROOT, encoding: 'utf8' })
     return status.split('\n')
