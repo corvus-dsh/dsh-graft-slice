@@ -12304,10 +12304,8 @@ async function appendTransitionCard(
         guardReasserted.add(agentId)
         const cwd = workspaceOfAgent(stableCtx, agentId) || process.cwd()
         const generation = graftGenerationOf(agentId)
-        // COLLECTED, never returned early: the branches above and below this point
-        // decide whether this session still exists (retired / transferred /
-        // grafting). A guard that returns here would answer "enter" for a session
-        // that is about to be rejected, which is a behaviour change, not a guard.
+        // COLLECTED, never returned early: the branches above/below decide whether this session
+        // still exists (retired / transferred / grafting). D1 was the violation — see `v339`.
         guardMessages.push({
           id: `graft-guard-${agentId}` as any,
           role: 'user',
@@ -12333,11 +12331,13 @@ async function appendTransitionCard(
         const standing = targetConstraintSections.get(agentId)
         if (standing !== undefined && standing.constraints.length > 0) {
           constraintsReasserted.add(agentId)
-          const existing = Array.isArray(payload?.messages) ? payload.messages : []
           return {
             kind: 'enter',
             messages: [
-              ...existing,
+              ...(Array.isArray(payload?.messages) ? payload.messages : []),
+              /** D1: the guard rides every exit, including this early return. It used to be
+               *  `[...existing, standing]`, losing the red line on a fresh target's first step. */
+              ...guardMessages,
               {
                 id: `graft-standing-${agentId}` as any,
                 role: 'user',

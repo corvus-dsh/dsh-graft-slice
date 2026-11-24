@@ -27,6 +27,13 @@ Thumbs.db
 # It was TRACKED until 2026-11-10 (found by a stray git add -A) — runtime state must not be shipped.
 # Untracking changes nothing except what git sees: an absent file reads as an empty queue.
 .pending-constraints.json
+# The pending-transfer journal: <dataDir>/ runtime state, the SAME class as `.transferred.json`
+# and `.graft-pending-ignition.json` above — every other store file was already listed here.
+# Measured 2026-11-24: it appeared at the REPOSITORY ROOT because a run resolved its data dir to
+# the working directory (no `dataDir`, no `paths`, no `DSH_PROFILE_DIR`), which is the documented
+# last-resort fallback. The ignore rule is the second line of defence, not the fix: the store
+# resolver prefers the profile's own data dir and only falls back when none is configured.
+pending-transfers.jsonl
 
 # Local experiment/measurement records (measure-efficiency --out, probes). Never source.
 _scratch/
