@@ -6078,6 +6078,48 @@ const nudgeDeliveredAt = new Map                                                
  */
 const compactionAdvisories = new Map                ()
 
+/**
+ * 取走一次待投递的 advisory（读后即删）。
+ *
+ * 为什么是「取」而不是「读」：它是**一个时刻**的事实（此刻水位已过压缩线），不是常驻状态。
+ * 每轮重发会把提示变成噪音，而「只注入一次」正是判据 `v332` 要钉的东西。
+ */
+function takeCompactionAdvisory(sessionId        )                     {
+  const message = compactionAdvisories.get(sessionId)
+  if (message !== undefined) compactionAdvisories.delete(sessionId)
+  return message
+}
+
+/**
+ * ── 同一会话、同一水位带，只提示一次 ────────────────────────────────────────────────────────────
+ *
+ * MEASURED (`v332 ③`): 观察者每一轮都会重算，于是「取走即删」只保证了**同一轮内**不重复；
+ * 下一轮它又算出一个 advisory 并重新 `set`，模型每轮都收到同一句话。**删一个值不等于只说一次。**
+ *
+ * 记的是**水位带**（`ratio` 保留两位小数）而不是布尔：水位从 0.70 涨到 0.74 是新的压力，
+ * 值得再说一句；停在 0.72 反复说，则是噪音。
+ */
+const compactionAdvisorySaidAt = new Map                ()
+
+function shouldAnnounceAdvisory(sessionId        , ratio        )          {
+  const band = Math.round(ratio * 100)
+  if (compactionAdvisorySaidAt.get(sessionId) === band) return false
+  compactionAdvisorySaidAt.set(sessionId, band)
+  return true
+}
+
+/**
+ * Test hook: forget every 「already said」 record and every pending advisory.
+ *
+ * Needed because the state is MODULE-LEVEL: two criteria in one process share it, so a test that runs
+ * second would see the first one's record and report 「not delivered」 for a delivery that worked.
+ * The same reason `clearGraftTargetsForTest` exists.
+ */
+function resetCompactionAdvisoryStateForTest()       {
+  compactionAdvisories.clear()
+  compactionAdvisorySaidAt.clear()
+}
+
 const invalidateGraceRequested = new Map                ()
 
 /**
@@ -16286,8 +16328,10 @@ export function resetRetiredSessions()       {
   // v7.4: a reset must also drop the resume grace, or a test that resumes a
   // session poisons every later test that expects the watermark to fire.
   autoGraftSuppressedUntil.clear()
-  graftTargets.clear()
+  // N1: advisory + dedupe state is session state too (v332 ③).
+  resetCompactionAdvisoryStateForTest()
 }
+
 
 /** Test/diagnostic view of graft-target marks (v7.0 C2). */
 export function getGraftTargets()                                       {
@@ -21921,24 +21965,18 @@ async function appendTransitionCard(
       // force-cut at 75% by the very pressure its seeded tape inherited.
       chainProtected = (() => {
         const live = stableCtx.sessions.get(agentId)       
-        const events =
-          live !== undefined && typeof live.snapshotEvents === 'function'
-            ? (live.snapshotEvents(0)                      )
-            : undefined
+        const events = live !== undefined && typeof live.snapshotEvents === 'function' ? (live.snapshotEvents(0)                      ) : undefined
         return isProtectedGraftTarget(agentId, events, settings.graftTargetGraceTurns)
       })()
-
-      // N1+N2+N3 (lead §二十九/三十): 宽限期保护的是「不被自己再切」，不是免于宿主压缩。
-      // 判定在 core/compaction-observer.ts，chain 侧接口在 core/chain-grace.ts；这里只接线。
+      // N1+N2+N3: 宽限期只保护「不被自己再切」，不保护免于宿主压缩。判定在 compaction-observer.ts。
       if (chainProtected && (autoGraftStates.get(agentId) ?? 'idle') === 'idle') {
-        const watermark = await readTokenWatermark(stableCtx, agentId, settings)
-        watermarkForNudge = watermark
+        const watermark = await readTokenWatermark(stableCtx, agentId, settings); watermarkForNudge = watermark
         const thresholds = watermark === undefined ? undefined : await governedWatermarks(stableCtx, settings, agentId, watermark, ctx.logger)
         if (watermark !== undefined && thresholds !== undefined) {
           const turns = turnsInGeneration((stableCtx.sessions.get(agentId)       )?.snapshotEvents?.(0)         )
           const observed = observeCompaction({ chainProtected, graceTurnsRemaining: settings.graftTargetGraceTurns, turnsSinceBirth: turns, ratio: watermark.ratio, warnAt: thresholds.warnAt, hardAt: thresholds.hardAt, compactionLine: thresholds.compaction?.thresholdRatio })
           if (observed.kind !== 'none') appendGraftAudit({ at: new Date().toISOString(), kind: observed.kind === 'advisory' ? 'chain-guard' : observed.audit.kind, sessionId: agentId, ratio: observed.ratio, detail: observed.kind === 'advisory' ? observed.message : `${observed.kind} (generation ${graftGenerationOf(agentId)}, turns ${observed.audit.turnsSinceBirth})` })
-          if (observed.kind === 'advisory') compactionAdvisories.set(agentId, observed.message)
+          if (observed.kind === 'advisory' && shouldAnnounceAdvisory(agentId, observed.ratio)) compactionAdvisories.set(agentId, observed.message)
           if (observed.kind === 'yield') requestGraceInvalidation(invalidateGraceRequested, agentId, 'worked-then-crossed')
         }
       }
@@ -22171,6 +22209,7 @@ async function appendTransitionCard(
         ...planExtra,
         ...modelExtra,
         ...urgentExtra,
+        ...[takeCompactionAdvisory(agentId)].flatMap((message) => (message === undefined ? [] : [{ role: 'user'         , content: message }])),
         ...relayMessages,
       ]
       /**

@@ -392,6 +392,48 @@ export const nudgeDeliveredAt = new Map<string, { ratio: number; resetAfter: boo
  */
 export const compactionAdvisories = new Map<string, string>()
 
+/**
+ * 取走一次待投递的 advisory（读后即删）。
+ *
+ * 为什么是「取」而不是「读」：它是**一个时刻**的事实（此刻水位已过压缩线），不是常驻状态。
+ * 每轮重发会把提示变成噪音，而「只注入一次」正是判据 `v332` 要钉的东西。
+ */
+export function takeCompactionAdvisory(sessionId: string): string | undefined {
+  const message = compactionAdvisories.get(sessionId)
+  if (message !== undefined) compactionAdvisories.delete(sessionId)
+  return message
+}
+
+/**
+ * ── 同一会话、同一水位带，只提示一次 ────────────────────────────────────────────────────────────
+ *
+ * MEASURED (`v332 ③`): 观察者每一轮都会重算，于是「取走即删」只保证了**同一轮内**不重复；
+ * 下一轮它又算出一个 advisory 并重新 `set`，模型每轮都收到同一句话。**删一个值不等于只说一次。**
+ *
+ * 记的是**水位带**（`ratio` 保留两位小数）而不是布尔：水位从 0.70 涨到 0.74 是新的压力，
+ * 值得再说一句；停在 0.72 反复说，则是噪音。
+ */
+export const compactionAdvisorySaidAt = new Map<string, number>()
+
+export function shouldAnnounceAdvisory(sessionId: string, ratio: number): boolean {
+  const band = Math.round(ratio * 100)
+  if (compactionAdvisorySaidAt.get(sessionId) === band) return false
+  compactionAdvisorySaidAt.set(sessionId, band)
+  return true
+}
+
+/**
+ * Test hook: forget every 「already said」 record and every pending advisory.
+ *
+ * Needed because the state is MODULE-LEVEL: two criteria in one process share it, so a test that runs
+ * second would see the first one's record and report 「not delivered」 for a delivery that worked.
+ * The same reason `clearGraftTargetsForTest` exists.
+ */
+export function resetCompactionAdvisoryStateForTest(): void {
+  compactionAdvisories.clear()
+  compactionAdvisorySaidAt.clear()
+}
+
 export const invalidateGraceRequested = new Map<string, string>()
 
 /**

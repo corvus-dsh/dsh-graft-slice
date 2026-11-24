@@ -38,6 +38,26 @@ const LOCAL_SINGLE_LINE = /^import[^\n]*from[ \t]+'\.[^'\n]+';?[ \t]*\n/gmu
 const LOCAL_BRACKETED = /^import[ \t]*\{\n(?:[ \t]+[^\n]*\n){0,40}?\}[ \t]*from[ \t]+'\.[^'\n]+';?[ \t]*\n/gmu
 const LOCAL_SINGLE_BRACKETED = /^import[ \t]*\{(?:[^}\n]*)\}[ \t]*from[ \t]+'\.[^'\n]+';?[ \t]*\n/gmu
 
+/**
+ * ── THE BOUNDED COUNT WAS ITSELF A TRAP (measured 2026-11-24) ─────────────────────────────────
+ *
+ * `LOCAL_BRACKETED` above caps the block at 40 continuation lines. When a legitimate import block grew
+ * to 42 lines, the regex no longer matched it — and then the NEXT alternative
+ * (`LOCAL_SINGLE_BRACKETED`, which forbids newlines) failed too, and the engine backtracked through
+ * `(?:[ \t]+[^\n]*\n){0,40}?` for every start position. **`node scripts/build.mjs` hung indefinitely**
+ * with no output, and it took a CPU-profile-by-hand to see it was a REGEX, not the bundler.
+ *
+ * Two lessons, both recorded here because the comment above says the opposite:
+ *
+ *   1. A numeric bound that reasons about 「how long a block can be」 is a bound on TODAY'S source.
+ *      It silently becomes wrong the first time a block grows — and it fails as a HANG, not an error.
+ *   2. A `{0,N}?` lazy quantifier over a `[^\n]*` item is the classic catastrophic-backtracking shape.
+ *
+ * The unbounded form is safe here because the closing `}` and `from '....'` anchor it: a block that never
+ * closes simply does not match, and the engine advances one line instead of re-trying every split.
+ */
+const LOCAL_BRACKETED_UNBOUNDED = /^import[ \t]*\{\n(?:[ \t]+[^\n]*\n)*?\}[ \t]*from[ \t]+'\.[^'\n]+';?[ \t]*\n/gmu
+
 export function removeLocalImports(source) {
   // Normalise CRLF first: the source files are CRLF on Windows, and a regex anchored on
   // `{\n` silently matched nothing there — which is how three local imports survived into
@@ -46,7 +66,7 @@ export function removeLocalImports(source) {
   return normalized
     .replace(LOCAL_SINGLE_LINE, '')
     .replace(LOCAL_SINGLE_BRACKETED, '')
-    .replace(LOCAL_BRACKETED, '')
+    .replace(LOCAL_BRACKETED_UNBOUNDED, '')
 }
 
 function listTsFiles(dir) {

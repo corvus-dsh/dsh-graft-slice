@@ -301,6 +301,9 @@ import {
   ignitionAdmissions,
   inFlight,
   compactionAdvisories,
+  takeCompactionAdvisory,
+  shouldAnnounceAdvisory,
+  resetCompactionAdvisoryStateForTest,
   invalidateGraceRequested,
   leftoverTargets,
   modelDrivenNudgeTurns,
@@ -6825,8 +6828,10 @@ export function resetRetiredSessions(): void {
   // v7.4: a reset must also drop the resume grace, or a test that resumes a
   // session poisons every later test that expects the watermark to fire.
   autoGraftSuppressedUntil.clear()
-  graftTargets.clear()
+  // N1: advisory + dedupe state is session state too (v332 ③).
+  resetCompactionAdvisoryStateForTest()
 }
+
 
 /** Test/diagnostic view of graft-target marks (v7.0 C2). */
 export function getGraftTargets(): ReadonlyMap<string, GraftTargetMark> {
@@ -12471,24 +12476,18 @@ async function appendTransitionCard(
       // force-cut at 75% by the very pressure its seeded tape inherited.
       chainProtected = (() => {
         const live = stableCtx.sessions.get(agentId) as any
-        const events =
-          live !== undefined && typeof live.snapshotEvents === 'function'
-            ? (live.snapshotEvents(0) as SessionEventLike[])
-            : undefined
+        const events = live !== undefined && typeof live.snapshotEvents === 'function' ? (live.snapshotEvents(0) as SessionEventLike[]) : undefined
         return isProtectedGraftTarget(agentId, events, settings.graftTargetGraceTurns)
       })()
-
-      // N1+N2+N3 (lead §二十九/三十): 宽限期保护的是「不被自己再切」，不是免于宿主压缩。
-      // 判定在 core/compaction-observer.ts，chain 侧接口在 core/chain-grace.ts；这里只接线。
+      // N1+N2+N3: 宽限期只保护「不被自己再切」，不保护免于宿主压缩。判定在 compaction-observer.ts。
       if (chainProtected && (autoGraftStates.get(agentId) ?? 'idle') === 'idle') {
-        const watermark = await readTokenWatermark(stableCtx, agentId, settings)
-        watermarkForNudge = watermark
+        const watermark = await readTokenWatermark(stableCtx, agentId, settings); watermarkForNudge = watermark
         const thresholds = watermark === undefined ? undefined : await governedWatermarks(stableCtx, settings, agentId, watermark, ctx.logger)
         if (watermark !== undefined && thresholds !== undefined) {
           const turns = turnsInGeneration((stableCtx.sessions.get(agentId) as any)?.snapshotEvents?.(0) as never)
           const observed = observeCompaction({ chainProtected, graceTurnsRemaining: settings.graftTargetGraceTurns, turnsSinceBirth: turns, ratio: watermark.ratio, warnAt: thresholds.warnAt, hardAt: thresholds.hardAt, compactionLine: thresholds.compaction?.thresholdRatio })
           if (observed.kind !== 'none') appendGraftAudit({ at: new Date().toISOString(), kind: observed.kind === 'advisory' ? 'chain-guard' : observed.audit.kind, sessionId: agentId, ratio: observed.ratio, detail: observed.kind === 'advisory' ? observed.message : `${observed.kind} (generation ${graftGenerationOf(agentId)}, turns ${observed.audit.turnsSinceBirth})` })
-          if (observed.kind === 'advisory') compactionAdvisories.set(agentId, observed.message)
+          if (observed.kind === 'advisory' && shouldAnnounceAdvisory(agentId, observed.ratio)) compactionAdvisories.set(agentId, observed.message)
           if (observed.kind === 'yield') requestGraceInvalidation(invalidateGraceRequested, agentId, 'worked-then-crossed')
         }
       }
@@ -12721,6 +12720,7 @@ async function appendTransitionCard(
         ...planExtra,
         ...modelExtra,
         ...urgentExtra,
+        ...[takeCompactionAdvisory(agentId)].flatMap((message) => (message === undefined ? [] : [{ role: 'user' as const, content: message }])),
         ...relayMessages,
       ]
       /**
