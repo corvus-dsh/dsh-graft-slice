@@ -193,6 +193,9 @@ jobs:
         # 清单外的文件【允许】不同。清单自己也在 all4 里，否则「某仓少一条」会伪装成绿。
         run: node scripts/check-shared-sources.mjs
 
+      - name: The pre-registered stability criterion is unchanged
+        run: node scripts/check-stability-registration.mjs
+
       - name: CI checkout layout matches what the mv steps assume
         run: node scripts/check-ci-layout.mjs
 

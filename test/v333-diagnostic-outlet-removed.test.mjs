@@ -37,11 +37,12 @@ function walk(dir, out = []) {
 }
 
 test('v333 ①: the diagnostic marker is GONE from src/', () => {
-  const offenders = walk(join(ROOT, 'src')).filter((file) => readFileSync(file, 'utf8').includes(MARKER))
+  const files = walk(join(ROOT, 'src'))
+  const offenders = files.filter((file) => readFileSync(file, 'utf8').includes(MARKER))
   assert.deepEqual(
     offenders.map((file) => relative(ROOT, file).replace(/\\/gu, '/')),
     [],
-    '① 临时诊断出口必须删掉 —— 留着它，下一位读者会把它当成产品开关',
+    `① 临时诊断出口必须删掉 —— 留着它，下一位读者会把它当成产品开关（扫了 ${files.length} 个文件）`,
   )
 })
 

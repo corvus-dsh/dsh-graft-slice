@@ -192,6 +192,10 @@ const KINDS = new Map([
    */
   ['check-shared-sources.mjs', 'GATE'],
   /**
+   * §四十二.5：事前登记的 `contentHash` 锁。断言型（改正文不动哈希 ⇒ exit 1），所以是 GATE。
+   */
+  ['check-stability-registration.mjs', 'GATE'],
+  /**
    * `sync-shared.mjs` 是**工具**，不是门禁：它是基准仓的同步入口，默认会写文件，而 CI 是全新 checkout，
    * 没有可同步的分叉。它的自检（复制后跑 check-shared-sources）由它自己完成。
    */
