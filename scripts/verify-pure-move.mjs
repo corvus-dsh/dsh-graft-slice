@@ -37,7 +37,7 @@
  * at a constructed sandbox (see the note on `REPO` below for why a test needs that).
  */
 import { execFileSync } from 'node:child_process'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -63,6 +63,50 @@ const REPO = process.env.GRAFT_PURE_MOVE_REPO !== undefined && process.env.GRAFT
   ? resolve(process.env.GRAFT_PURE_MOVE_REPO)
   : fileURLToPath(new URL('..', import.meta.url))
 const SRC = join(REPO, 'src')
+
+/**
+ * ── AN INJECTION POINT THAT SAYS NOTHING IS A SILENT OVERRIDE ──────────────────────────────────
+ *
+ * The paragraph above justifies the environment variable. This paragraph is about what an
+ * UNLOGGED one costs, because that cost is larger than the bug the variable was added to fix.
+ *
+ * Every other criterion in this repository is about stopping a check from depending on something
+ * it does not control. This switch is the reverse: it lets the SUBJECT change without the check
+ * knowing. A repository that passes because it was pointed at an empty directory prints exactly
+ * the same report shape as one that passes on its own merits, so the log alone cannot tell a real
+ * green from a redirected one. That is the same shape as 「用 user 壳装 developer 灵魂」: the gate is
+ * still the gate, only the tree it looks at was chosen by someone else, and every line looks normal.
+ *
+ * So the rule (lead §五十.3/§五十.4): when the variable is actually in effect, print one line that
+ * names the input, in a form a criterion can grep for:
+ *
+ *     <tool>: <what> = <absolute path> (injected via <VARIABLE>)
+ *
+ * and refuse an injected value that cannot mean anything:
+ *
+ *   1. it must EXIST — a path that does not exist makes `readdirSync` throw, which reads like a
+ *      crash rather than a misconfiguration, and the message never names the variable;
+ *   2. it must BE a git repository — measured: pointing this at a plain directory makes
+ *      `git diff --quiet` exit 128, which the VACUOUS check below deliberately interprets as
+ *      "differences exist" (exit 1 means changed). The wrong answer is not the throw that follows;
+ *      it is that the tool first claims there IS something to compare in a tree it cannot read.
+ *
+ * Validation runs only when the variable is in effect, so the normal CLI path and every in-process
+ * importer (`v210-classify-buckets`) stay exactly as they were.
+ */
+const INJECTED_REPO = process.env.GRAFT_PURE_MOVE_REPO !== undefined && process.env.GRAFT_PURE_MOVE_REPO !== ''
+
+if (INJECTED_REPO) {
+  const fail = (reason) => {
+    console.error(`pure-move: ${reason}`)
+    console.error('pure-move: GRAFT_PURE_MOVE_REPO must name an existing git repository (it selects the tree this check measures).')
+    console.error('pure-move: unset it to measure the repository this file lives in.')
+    process.exit(1)
+  }
+  if (!existsSync(REPO)) fail(`repository = ${REPO} (injected via GRAFT_PURE_MOVE_REPO) does not exist`)
+  if (!existsSync(join(REPO, '.git'))) fail(`repository = ${REPO} (injected via GRAFT_PURE_MOVE_REPO) is not a git repository (no .git)`)
+  console.error(`pure-move: repository = ${REPO} (injected via GRAFT_PURE_MOVE_REPO)`)
+}
 
 /** Is this line content, per the definition above? */
 export function isContentLine(line) {

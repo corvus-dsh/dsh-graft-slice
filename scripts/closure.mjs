@@ -40,6 +40,23 @@ const REPO = fileURLToPath(new URL('..', import.meta.url))
 const SRC = process.env.GRAFT_CLOSURE_SRC !== undefined && process.env.GRAFT_CLOSURE_SRC !== ''
   ? resolve(process.env.GRAFT_CLOSURE_SRC)
   : join(REPO, 'src')
+/**
+ * ── 注入点必须自述（lead §五十.4）───────────────────────────────────────────────────────────────
+ *
+ * 本仓的判据全都在打「结论不要取决于它不控制的东西」；这个环境变量是**反向**的：
+ * **被检查的那棵树可以被外部换掉，而门禁不知道**。一次「指向空目录因此通过」和一次
+ * 「自己通过」打印出来的报告形状完全相同，所以**只看日志分不出真绿和改道绿**。
+ *
+ * 规则（与 `check-cycles.mjs` / `move-gate.mjs` / `verify-pure-move.mjs` 同一格式）：
+ * 变量真正生效时打印一行，格式可被判据 grep：
+ *
+ *     <tool>: <what> = <绝对路径> (injected via <变量名>)
+ *
+ * 未生效时不打印——这半条同样重要：一行**永远存在**的说明等于没有说明。
+ */
+if (process.env.GRAFT_CLOSURE_SRC !== undefined && process.env.GRAFT_CLOSURE_SRC !== '') {
+  console.error(`closure: src = ${SRC} (injected via GRAFT_CLOSURE_SRC)`)
+}
 
 /**
  * ── THE ONE FORMATTER FOR A MUTABLE LABEL ─────────────────────────────────────────────────────

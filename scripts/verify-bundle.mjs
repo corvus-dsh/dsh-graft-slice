@@ -360,6 +360,23 @@ if (surface !== undefined && !surface.includes('default')) {
    * dirty list, because a waiver that does not say what it waived is a blank cheque.
    */
   const acceptDirtyTree = String(process.env.GRAFT_ACCEPT_DIRTY_TREE ?? '') === '1'
+  /**
+   * ── 注入点必须自述（lead §五十.4）───────────────────────────────────────────────────────────────
+   *
+   * 格式与 `closure.mjs` / `check-cycles.mjs` / `move-gate.mjs` 相同。两个变量各有各的危险：
+   *
+   *   - `GRAFT_ACCEPT_DIRTY_TREE=1` 是**豁免**：它让「测量的是不是被声明的那个产物」这条绑定的
+   *     答案永远为是。豁免本身已有记录（后面会打印脏文件列表），但**「这次是接管了」这件事本身
+   *     必须先说出来**，否则一次 waived 通过和一次真通过的第一行一模一样。
+   *   - `GRAFT_COMMIT_MESSAGE` 让门禁**以为**提交消息里有 `[export-change]` 声明。它改的是入口
+   *     证据而不是被测产物，所以只打印「消息被注入」以及长度，不打印内容。
+   */
+  if (String(process.env.GRAFT_ACCEPT_DIRTY_TREE ?? '') === '1') {
+    console.error('verify-bundle: dirty-tree binding is WAIVED (injected via GRAFT_ACCEPT_DIRTY_TREE)')
+  }
+  if (process.env.GRAFT_COMMIT_MESSAGE !== undefined && process.env.GRAFT_COMMIT_MESSAGE !== '') {
+    console.error(`verify-bundle: commit message supplied from the environment, ${process.env.GRAFT_COMMIT_MESSAGE.length} char(s) (injected via GRAFT_COMMIT_MESSAGE)`)
+  }
   const envDeclares = /\[export-change\]/u.test(envMessage)
   const fromEnvironment = envDeclares && (treeCleanOverMeasuredPaths || acceptDirtyTree)
   /** A commit-message declaration is honoured ONLY when the measured artifact IS that commit's. */
