@@ -316,7 +316,20 @@ test('v136x: a pure-move run against a tree with NO diff is VACUOUS, and exits 2
     let code = 0
     let out = ''
     try {
-      out = execFileSync(process.execPath, [PURE_MOVE], { cwd: sandbox, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+      out = execFileSync(process.execPath, [PURE_MOVE], {
+        cwd: sandbox,
+        /**
+         * ── WITHOUT THIS THE SANDBOX IS DECORATION (measured) ──────────────────────────────────────
+         *
+         * `verify-pure-move.mjs` derived its repository from `import.meta.url`, so it read THIS repo
+         * no matter where the test launched it from. This assertion therefore passed while looking at
+         * a clean tree the test never built — and went red inside the full suite whenever a concurrent
+         * test dirtied `src/`. The env var is what makes the throwaway repo the ACTUAL input.
+         */
+        env: { ...process.env, GRAFT_PURE_MOVE_REPO: sandbox },
+        encoding: 'utf8',
+        maxBuffer: 64 * 1024 * 1024,
+      })
     } catch (error) {
       code = error.status ?? 1
       out = `${error.stdout ?? ''}${error.stderr ?? ''}`
@@ -325,6 +338,67 @@ test('v136x: a pure-move run against a tree with NO diff is VACUOUS, and exits 2
     assert.match(out, /VACUOUS/u, 'the output must say VACUOUS so nobody reads it as a pass')
     assert.match(out, /NOT a pass/u, 'the output must say this is not a pass')
     assert.doesNotMatch(out, /IDENTICAL/u, 'a vacuous run must never print IDENTICAL')
+  } finally {
+    rmSync(sandbox, { recursive: true, force: true })
+  }
+})
+
+test('v136y: a REAL pure move in a throwaway repo prints IDENTICAL — the instrument reads its input, not this tree', () => {
+  /**
+   * ── WHY THE VACUOUS TEST ALONE CANNOT SEE A DECORATIVE SANDBOX ────────────────────────────────
+   *
+   * Measured: v136x above passed for months of runs while the tool ignored the sandbox entirely,
+   * because a CLEAN REAL TREE also produces `VACUOUS, exit 2`. The expected outcome was identical for
+   * the right reason and for the wrong one, so the assertion could not tell them apart.
+   *
+   * This test supplies the discriminating case: a sandbox that contains a REAL pure move. If the tool
+   * honours `GRAFT_PURE_MOVE_REPO` it must print IDENTICAL and exit 0; if it still reads this repo it
+   * can only ever print VACUOUS (clean tree) or a difference report (dirty tree) — never IDENTICAL
+   * about a move this repository does not contain. Both answers are distinguishable.
+   *
+   * The second run is deliberately launched with `cwd: ROOT` — the WRONG repository. It must still
+   * answer about the sandbox, which is only possible if the environment variable is what selects the
+   * input. A test that only ever runs with `cwd` and env agreeing cannot prove which one won.
+   */
+  const sandbox = mkdtempSync(join(tmpdir(), 'v136y-move-'))
+  try {
+    const run = (args) =>
+      execFileSync('git', args, { cwd: sandbox, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+
+    run(['init', '-q'])
+    run(['config', 'user.email', 'v136y@example.invalid'])
+    run(['config', 'user.name', 'v136y'])
+    mkdirSync(join(sandbox, 'src'), { recursive: true })
+    writeFileSync(join(sandbox, 'src', 'a.ts'), 'const alpha = 1\nconst beta = 2\n', 'utf8')
+    run(['add', '-A'])
+    run(['commit', '-q', '-m', 'before the move'])
+
+    /** The move: same content lines, one new module, one deleted module, exports added as plumbing. */
+    rmSync(join(sandbox, 'src', 'a.ts'))
+    writeFileSync(join(sandbox, 'src', 'b.ts'), 'export const alpha = 1\nexport const beta = 2\n', 'utf8')
+    run(['add', '-A'])
+
+    const inspect = (cwd, label) => {
+      let code = 0
+      let out = ''
+      try {
+        out = execFileSync(process.execPath, [PURE_MOVE], {
+          cwd,
+          env: { ...process.env, GRAFT_PURE_MOVE_REPO: sandbox },
+          encoding: 'utf8',
+          maxBuffer: 64 * 1024 * 1024,
+        })
+      } catch (error) {
+        code = error.status ?? 1
+        out = `${error.stdout ?? ''}${error.stderr ?? ''}`
+      }
+      assert.equal(code, 0, `${label}: a real pure move must exit 0, got ${code}:\n${out}`)
+      assert.match(out, /IDENTICAL/u, `${label}: a real pure move must print IDENTICAL:\n${out}`)
+      assert.doesNotMatch(out, /VACUOUS/u, `${label}: this sandbox HAS a diff, so VACUOUS is wrong:\n${out}`)
+    }
+
+    inspect(sandbox, 'launched inside the sandbox')
+    inspect(ROOT, 'launched from THIS repo — the env var must still win')
   } finally {
     rmSync(sandbox, { recursive: true, force: true })
   }

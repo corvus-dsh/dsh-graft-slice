@@ -44,19 +44,35 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const TEST_DIR = join(ROOT, 'test')
 
 /**
- * ── NAMED EXEMPTIONS, WITH THE REASONING IN THE DATA ────────────────────────────────────────────
+ * ── AN EXEMPTION MUST NAME A CALL SITE, NOT A FILE ───────────────────────────────────────────────
  *
- * Loosening the rule for everyone is how a criterion gets switched off. An exemption here is one
- * line, names the exact call site, and has to survive re-reading.
+ * First version keyed this map by FILENAME (`EXEMPT.has(name)`), while the reason inside described
+ * ONE call. Consequence, and it is the whole point of this rewrite: **any future `git status` added
+ * to that file would ride the existing exemption silently.** An exemption bound to the CONTAINER
+ * covers everything the container grows later.
  *
- * `v136-import-edges.test.mjs`  →  it compares THIS tree against `--against <ref>`; the diff IS the
- *   test's input, so a sandbox would have to reproduce an entire real move to mean anything. The
- *   `git status` there only decides whether a new edge is labelled `created` — a presentation
- *   detail — while every ASSERTION is made against `git show <ref>:<file>`, i.e. committed content
- *   that cannot move under concurrency. The cost is stated at the call site.
+ * Same class as `closure.mjs`'s per-repo `SAMPLES` and `type-budget`'s baseline: the binding is
+ * wider than the fact it records.
+ *
+ * So a key is `file` + a FRAGMENT OF THE CALL'S OWN ARGUMENTS (the captured text between `[` and
+ * `]`, without the brackets). It matches only that call, and **an exemption that matches nothing is
+ * RED** — a stale exemption is a permission nobody reviewed.
+ * `v205` already had this shape (`EXEMPT` keyed by file + ceiling, with 「降下去必须删除登记项」);
+ * this criterion did not inherit it, which is why it is written out here.
+ *
+ * `v136` →  `'status', '--porcelain', 'src'`: the test compares THIS tree against `--against <ref>`;
+ *   the diff IS its input, so a sandbox would have to reproduce an entire real move to mean anything.
+ *   That one call only decides which files are NEW (a presentation detail); every ASSERTION is made
+ *   against `git show <ref>:<file>`, i.e. committed content that cannot move under concurrency.
  */
 const EXEMPT = new Map([
-  ['v136-import-edges.test.mjs', '本树 diff 就是它的输入；断言只落在 git show <ref>:…，不受并发影响'],
+  [
+    'v136-import-edges.test.mjs',
+    {
+      args: "'status', '--porcelain', 'src'",
+      why: '本树 diff 就是它的输入；断言只落在 git show <ref>:…，不受并发影响',
+    },
+  ],
 ])
 
 /**
@@ -96,7 +112,12 @@ function offendingGitCalls(source) {
     const pinnedToThisTree = /cwd\s*:\s*(?:ROOT|here|REPO|TEST_DIR)\b/u.test(options)
     const noCwd = !/cwd\s*:/u.test(options)
     if (pinnedToThisTree || noCwd) {
-      offenders.push({ at: match.index, options: options.trim().slice(0, 80) })
+      /**
+       * `args` is carried so an exemption can name THIS call. Comparing raw argument text is
+       * deliberately literal: it means editing the arguments of an exempted call invalidates the
+       * exemption, which is exactly the review we want to force.
+       */
+      offenders.push({ at: match.index, args, options: options.trim().slice(0, 80) })
     }
   }
   return { offenders, total }
@@ -113,26 +134,62 @@ test('v341 ①: the helper builds a REAL throwaway git repo (the thing under tes
   })
 })
 
-test('v341 ② (negative): no test may read THIS working tree through git', () => {
+test('v341 ② (negative): no test may let git\'s VOLATILE verdict decide its assertion', () => {
   /**
    * Scans every `test/*.mjs`. A git call inside a sandbox is fine; one against `ROOT`/`here`/no cwd
    * is the race — measured when `v136x` went green alone and red in the suite.
+   *
+   * Exemptions are keyed by CALL SITE (see `EXEMPT`), and a key that matches no call is an error:
+   * a stale exemption is a permission nobody re-reviewed.
    */
   const offenders = []
+  const staleExemptions = []
+  /** Call-site fingerprints that an exemption actually consumed, so leftovers can be detected. */
+  const consumed = new Set()
   let scanned = 0
   let gitCalls = 0
+
   for (const name of readdirSync(TEST_DIR).filter((n) => n.endsWith('.mjs')).sort()) {
     const source = readFileSync(join(TEST_DIR, name), 'utf8')
     if (!/execFileSync\(\s*['"]git['"]/u.test(source)) continue
     scanned += 1
-    const { offenders: found, total } = offendingGitCalls(source)
+    const { offenders: found, total, calls } = offendingGitCalls(source)
     gitCalls += total
-    if (EXEMPT.has(name)) continue
+
     for (const entry of found) {
       const line = source.slice(0, entry.at).split('\n').length
-      offenders.push(`${name}:${line}  execFileSync('git', …) 未指定沙箱 cwd —— 它读的是本工作树（${entry.options}）`)
+      const exemption = EXEMPT.get(name)
+      /** The exemption must name THIS call's arguments, not merely the file it happens to sit in. */
+      const exempt =
+        exemption !== undefined && entry.args.includes(exemption.args) && !consumed.has(name)
+      if (exempt) {
+        consumed.add(name)
+        continue
+      }
+      offenders.push(
+        `${name}:${line}  execFileSync('git', …) 让「树脏不脏」决定了断言 —— 它读的是本工作树` +
+          `\n      args = ${entry.args.trim().slice(0, 90)}` +
+          (exemption === undefined
+            ? ''
+            : `\n      已有一处豁免，但它指定的是 ${exemption.args} —— 豁免绑定调用点，不绑定文件`),
+      )
     }
   }
+
+  for (const [name] of EXEMPT) {
+    if (!consumed.has(name)) {
+      staleExemptions.push(
+        `${name} 的豁免没有匹配到任何调用点 —— 它保护的那个 git status 已经不在（或被改了参数）。` +
+          '过期豁免是一条没人复审过的许可，必须删掉。',
+      )
+    }
+  }
+
+  assert.deepEqual(
+    staleExemptions,
+    [],
+    `② 过期豁免：\n${staleExemptions.join('\n')}`,
+  )
   assert.deepEqual(
     offenders,
     [],
@@ -140,7 +197,7 @@ test('v341 ② (negative): no test may read THIS working tree through git', () =
       '修法：用 test/vacuous-repo.mjs 的 VacuousRepo / withVacuousRepo，在一次性仓库里构造场景。',
   )
   assert.ok(scanned > 0, '④ 扫描到 0 个用 git 的测试文件 —— 「什么都没扫」不是通过')
-  assert.ok(gitCalls > 0, '④ 扫描到 0 次 execFileSync(\'git\') 调用 —— 同上')
+  assert.ok(gitCalls > 0, "④ 扫描到 0 次 execFileSync('git') 调用 —— 同上")
 })
 
 test('v341 ③ (negative): the checker can actually fail — a sample reading ROOT is caught', () => {

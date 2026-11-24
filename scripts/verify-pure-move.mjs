@@ -32,13 +32,36 @@
  *   node scripts/verify-pure-move.mjs                    # compare working tree against HEAD
  *   node scripts/verify-pure-move.mjs --against HEAD~1   # against an arbitrary git ref
  *   node scripts/verify-pure-move.mjs --self-test        # prove the checker can fail
+ *
+ * The repository under test defaults to the one this file lives in; `GRAFT_PURE_MOVE_REPO` points it
+ * at a constructed sandbox (see the note on `REPO` below for why a test needs that).
  */
 import { execFileSync } from 'node:child_process'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const REPO = fileURLToPath(new URL('..', import.meta.url))
+/**
+ * ── THE REPO IS INJECTABLE, AND THAT IS A CRITERION FIX, NOT A CONVENIENCE ─────────────────────
+ *
+ * Measured: `test/v136-import-edges.test.mjs` (v136x) built a throwaway git repo with NO diff, ran
+ * this script with `cwd: sandbox`, and asserted exit 2 + VACUOUS. It passed — for the WRONG REASON.
+ * `REPO` above comes from `import.meta.url`, so the script never looked at the sandbox: it read THIS
+ * repository, found it clean, and printed VACUOUS about a tree the test never controlled.
+ *
+ * That is a DECORATIVE sandbox. The test's own copy of the reasoning was right (a criterion must only
+ * depend on inputs it constructs) but the instrument still depended on the working tree, so the
+ * assertion went red whenever a concurrent test dirtied `src/` — measured as a flaky red inside the
+ * full suite that passed on a direct run.
+ *
+ * `GRAFT_PURE_MOVE_REPO` is the same pattern as `GRAFT_CLOSURE_SRC` in `closure.mjs` and
+ * `GRAFT_CHECK_CYCLES_SRC` in `check-cycles.mjs`: point the instrument at a constructed tree and the
+ * test stops touching the real one. It is a REPO (not just `src/`) because this script runs `git` —
+ * the ref, the index and the working tree all have to belong to the same repository.
+ */
+const REPO = process.env.GRAFT_PURE_MOVE_REPO !== undefined && process.env.GRAFT_PURE_MOVE_REPO !== ''
+  ? resolve(process.env.GRAFT_PURE_MOVE_REPO)
+  : fileURLToPath(new URL('..', import.meta.url))
 const SRC = join(REPO, 'src')
 
 /** Is this line content, per the definition above? */
