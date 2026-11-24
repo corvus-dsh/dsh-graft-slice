@@ -41,6 +41,27 @@ const SRC = process.env.GRAFT_CLOSURE_SRC !== undefined && process.env.GRAFT_CLO
   ? resolve(process.env.GRAFT_CLOSURE_SRC)
   : join(REPO, 'src')
 
+/**
+ * ── THE ONE FORMATTER FOR A MUTABLE LABEL ─────────────────────────────────────────────────────
+ *
+ * `closureOf`（`--cluster <name>`）与 `subBlockClosureOf`（`--block`）都产出一个
+ * `name (label)` 字符串数组，且都从带 `mutableKind` / `kind` 的 declaration 对象来。
+ * 同一份源码里同一个可变绑定，两条路径必须给出一模一样的标签 —— 否则 `--cluster name`
+ * 与 `--block 覆盖同一段` 会互相矛盾，而那个矛盾只有看输出时才发现。
+ *
+ * 所以标签拼法集中到这一处，两条路径各只调一次 `filter(mutable).map(mutableLabel)`，
+ * "逐字符一致"因此是结构必然（memory 侧由测试 `v201-closure-label-consistency` 证明它存在）。
+ *
+ * 规则：只有 `const-mutated`（被变异方法调用但没整体重赋值，shapeCache 情形）
+ * 才把标签从裸 `(const)` 改成 `(const-mutated)`；reassigned / let-var 保持旧行为。
+ *
+ * 移植说明（B4-B/⑨）：这条与下面的 `MUTATING_METHODS` 是同一个半修复的两半，一起移植。
+ */
+const mutableLabel = (declaration) =>
+  declaration.mutableKind === 'const-mutated'
+    ? `${declaration.name} (const-mutated)`
+    : `${declaration.name} (${declaration.kind})`
+
 async function loadTypeScript() {
   for (const name of ['typescript', 'typescript/lib/typescript.js']) {
     try { return await import(name) } catch { /* next */ }
@@ -159,6 +180,47 @@ function measureWithTypeScript(ts) {
     }
     visitAssignments(sourceFile)
 
+    /**
+     * ── A `const` OBJECT MUTATED THROUGH A METHOD IS MUTABLE STATE TOO ───────────────────────────
+     *
+     * `rootIdentifierOf` catches reassignment (`cache = new Map()`), and `assignedSomewhere` catches
+     * that. But the commonest mutation of a module-level collection is NOT a reassignment — it is
+     * `cache.set(k, v)` / `cache.clear()` / `cache.delete(k)` / `arr.push(x)` / `set.add(x)`. Those are
+     * `PropertyAccessExpression` CALLS, not assignments; the identifier `cache` on the expression side
+     * NEVER becomes an assignment target, so a module const object that is freely mutated was reported
+     * `mutable: false`.
+     *
+     * Measured in dsh-memory (the `shapeCache` case in `store.ts`): a module-level
+     * `const shapeCache = new Map<...>()` is cleared and re-seeded through `.clear()` / `.set()` /
+     * `.delete()` on every write. Under the old rule `--cluster writeSkill` reported `mutable: none` —
+     * and a move of that closure would have carried the functions while leaving the one piece of
+     * shared state behind. Only a manual read flagged it, which is exactly the "const so it must be
+     * safe" trap.
+     *
+     * The set of method names is deliberately the mutating built-ins on Map / Set / Array: set, delete,
+     * clear, push, pop, shift, unshift, splice, add, remove, sort, reverse, fill, copyWithin.
+     * Everything else (`.get`, `.has`, `.size`) is read-only.
+     *
+     * 移植说明（B4-B/⑨）：与上面的 `mutableLabel` 是同一个半修复的两半。
+     */
+    const MUTATING_METHODS = new Set([
+      'set', 'delete', 'clear', 'push', 'pop', 'shift', 'unshift',
+      'splice', 'add', 'remove', 'sort', 'reverse', 'fill', 'copyWithin',
+    ])
+    const mutatedSomewhere = new Set()
+    const visitMutations = (node) => {
+      if (
+        ts.isCallExpression(node)
+        && ts.isPropertyAccessExpression(node.expression)
+        && ts.isIdentifier(node.expression.expression)
+        && MUTATING_METHODS.has(node.expression.name.text)
+      ) {
+        mutatedSomewhere.add(node.expression.expression.text)
+      }
+      ts.forEachChild(node, visitMutations)
+    }
+    visitMutations(sourceFile)
+
     const map = new Map()
     const span = (node) => ({
       start: sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1,
@@ -172,13 +234,30 @@ function measureWithTypeScript(ts) {
         for (const declaration of statement.declarationList.declarations) {
           if (!ts.isIdentifier(declaration.name)) continue // destructuring: not a module-scope NAME
           const name = declaration.name.text
+          const reassigned = assignedSomewhere.has(name)
+          const constMutated = mutatedSomewhere.has(name)
+          let mutable
+          let mutableKind
+          if (!isConst) {
+            mutable = true
+            mutableKind = 'let/var'
+          } else if (reassigned) {
+            mutable = true
+            mutableKind = 'reassigned'
+          } else if (constMutated) {
+            mutable = true
+            mutableKind = 'const-mutated'
+          } else {
+            mutable = false
+          }
           map.set(name, {
             name,
             file: sourceFile.fileName,
             start,
             end,
             lines: end - start + 1,
-            mutable: !isConst || assignedSomewhere.has(name),
+            mutable,
+            mutableKind,
             kind: isConst ? 'const' : 'let/var',
             node: statement,
           })
@@ -281,7 +360,7 @@ function measureWithTypeScript(ts) {
       lines += end - start + 1
     }
 
-    const mutable = [...included.values()].filter((d) => d.mutable).map((d) => `${d.name} (${d.kind})`).sort()
+    const mutable = [...included.values()].filter((d) => d.mutable).map(mutableLabel).sort()
     return {
       declarations: included.size,
       lines,
@@ -411,7 +490,7 @@ function measureWithTypeScript(ts) {
 
       const mutable = [...local.values(), ...outside.values()]
         .filter((declaration) => declaration.mutable)
-        .map((declaration) => `${declaration.name} (${declaration.kind})`)
+        .map(mutableLabel)
         .sort()
 
       // Lines: the range itself plus every outside declaration that must travel with it.

@@ -273,8 +273,43 @@ test('v138: B is the UNION of member closures, not the largest one', (t) => {
   assert.equal(single.B.measured.declarations, 5, '14 members originally, 5 after three steps')
 
   const gateSource = readFileSync(GATE, 'utf8')
-  assert.match(gateSource, /for \(const member of entry\.closure\.members\) unionNames\.add\(member\.name\)/u,
+  /**
+   * ── THE ASSERTION IS ABOUT THE SHAPE, NOT ONE SPELLING OF IT (B4-B/⑩ 移植) ──────────────────────
+   *
+   * This used to pin the literal `unionNames.add(member.name)`. The B4-B/⑩ port replaced that set with
+   * a Map keyed by `file:name`, because a bare name is ambiguous when the same declaration name exists
+   * in two files — `byName` is first-come-first-served, so the union silently resolved to the WRONG
+   * span (measured in dsh-memory: 495 lines by name vs 478 by `file:name`, at the SAME declaration
+   * count of 25 — an impossible pair that proved the ambiguity).
+   *
+   * The INTENT of the old line was "read the member's fields, do not regex over the object"
+   * (`String({}) === "[object Object]"` had made tier B report 0). That intent is preserved and
+   * strengthened: members must still be read as FIELDS, and they must now be resolved WITH their file.
+   * Pinning one spelling would have made the criterion oppose the fix it exists to protect.
+   *
+   * The behavioural half is asserted above and independently: `closureLines === 277` / `declarations
+   * === 5`. If the union stopped reading fields, those numbers would move — this text check is the
+   * supplement, not the proof.
+   */
+  assert.match(gateSource, /member\.name\b/u,
     'the union must read member.name, not match a regex over the object')
+  assert.match(gateSource, /resolveDeclaration\(member\.name, member\.file\)/u,
+    '⑩ 成员必须带文件解析 —— 裸名字在跨文件同名时会取到错的那一个')
+  /**
+   * COMMENTS ARE EXEMPT, and not for convenience: the file's own header has to QUOTE the failure mode
+   * it documents (`String({}) === "[object Object]"`). Measured on the first run of this very
+   * assertion — it failed on its own explanation. Same distinction as `v336 ①`
+   * (「允许被提及、不许被采纳」).
+   */
+  const gateCodeOnly = gateSource
+    .split('\n')
+    .filter((line) => {
+      const trimmed = line.trimStart()
+      return !(trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*'))
+    })
+    .join('\n')
+  assert.doesNotMatch(gateCodeOnly, /\[object Object\]/u,
+    'union 不得回到「把对象当字符串」的读法（注释里的引用不算）')
 })
 
 test('v138: the declaration parser reproduces independently-known spans', (t) => {
