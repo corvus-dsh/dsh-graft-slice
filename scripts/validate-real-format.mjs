@@ -28,6 +28,16 @@ if (!modules) {
   )
   process.exit(0)
 }
+/**
+ * ── 注入点必须自述（lead §五十三.2）─────────────────────────────────────────────────────────────
+ *
+ * 这个变量换掉的是**校验器所用的依赖**，也就是换掉了「按什么标准校验」这件事本身。原来只有一句
+ * skip 提示，而 skip 提示说的是「没设」，不是「设成了哪个」——**一个设错的目录与一个没设的目录
+ * 在日志里无法区分**，一个是「跳过了」，另一个是「用别人的标准跑完了还通过」。
+ *
+ * 走 stderr：这是关于产物怎么产生的说明，不是产物（§五十一 的 stdout 投毒教训）。
+ */
+console.error(`validate-real-format: validator modules = ${modules} (injected via DSH_VALIDATOR_NODE_MODULES)`)
 
 const { assertReleasedV4Relationships } = await import(
   pathToFileURL(join(modules, '@deepseek-ai/dsh-session-format-v3-to-v4/lib/index.js')).href

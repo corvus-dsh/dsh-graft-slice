@@ -377,6 +377,13 @@ if (surface !== undefined && !surface.includes('default')) {
   if (process.env.GRAFT_COMMIT_MESSAGE !== undefined && process.env.GRAFT_COMMIT_MESSAGE !== '') {
     console.error(`verify-bundle: commit message supplied from the environment, ${process.env.GRAFT_COMMIT_MESSAGE.length} char(s) (injected via GRAFT_COMMIT_MESSAGE)`)
   }
+  /**
+   * `GITHUB_HEAD_COMMIT_MESSAGE` 是同一个证据的**另一条通道**（CI 就是这样把提交消息交进来的）。
+   * 只公告自己那条、不公告这条，等于「同一条纪律，换一个名字就不在门内」——正是 §五十三.2 那个缺口。
+   */
+  if (process.env.GITHUB_HEAD_COMMIT_MESSAGE !== undefined && process.env.GITHUB_HEAD_COMMIT_MESSAGE !== '') {
+    console.error(`verify-bundle: commit message supplied from CI, ${process.env.GITHUB_HEAD_COMMIT_MESSAGE.length} char(s) (injected via GITHUB_HEAD_COMMIT_MESSAGE)`)
+  }
   const envDeclares = /\[export-change\]/u.test(envMessage)
   const fromEnvironment = envDeclares && (treeCleanOverMeasuredPaths || acceptDirtyTree)
   /** A commit-message declaration is honoured ONLY when the measured artifact IS that commit's. */
