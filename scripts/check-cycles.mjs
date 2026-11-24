@@ -41,7 +41,49 @@ function walk (dir, out = []) {
 }
 
 const files = walk(SRC)
-const IMP = /(?:^|\n)\s*(?:import|export)\s+(?:type\s+)?(?:[^'"\n]*?\sfrom\s+)?['"](\.[^'"]+)['"]/gu
+/**
+ * ── 捕获 clause，好判定这条 import 是不是「仅类型」 ─────────────────────────────────────────────
+ *
+ * §三十八.3 移植：memory / paradise 早已区分「值环」与「仅类型环」，而这里把两者算成同一件事。
+ * `import type` 在产出 JS 时**整条消失**，因此它构不成运行时环 —— 把它报成环会逼人去拆分合法的
+ * 类型互引。
+ *
+ * 第一组捕获是 spec 之前的那段 clause，用它判断 type-only。
+ */
+/**
+ * 两种合法的相对 import 形状，分开匹配 —— 一条正则同时覆盖它们会把 `import.meta` 也算进来。
+ *
+ * 实测（第一版移植）：一条宽松的 `(?:import|export)\b([^'"]*?)['"](...)` 把
+ * `import.meta.dirname` 之后几十个字符处的 `'.json'` 配成了依赖边，于是「未解析的 import」凭空多出 5 条
+ * —— 而那 5 条是**数据文件名**，不是模块。**一条正则宽一格，结论就错一片。**
+ *
+ *   A  带 from：`import { A } from './x'` / `export * from './x'` / `import type { T } from './x'`
+ *   B  副作用：  `import './x'`
+ */
+const IMP_FROM = /(?:^|\n)[ \t]*(?:import|export)\b(?!\s*[.(])([^'"]*?)\bfrom\s+['"](\.[^'"]+)['"]/gu
+const IMP_SIDE_EFFECT = /(?:^|\n)[ \t]*import\s+['"](\.[^'"]+)['"]/gu
+
+/**
+ * 这条 import / export 是否**只在类型位置**使用。
+ *
+ * 三种形状都是仅类型：
+ *   `import type { X } from`      `export type { X } from`
+ *   `import { type A, type B }`    —— 大括号里每一项都以 `type ` 开头
+ *   `import type X from`
+ *
+ * 一条边只要有一处**值**引用，就不是仅类型（保守方向：宁可把它算成运行时边）。
+ */
+function isTypeOnlyClause (clause) {
+  if (/\b(?:import|export)\s+type\b/u.test(clause)) return true
+  const braces = /\{([^}]*)\}/u.exec(clause)
+  if (braces === null) return false
+  const entries = braces[1]
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+  if (entries.length === 0) return false
+  return entries.every((entry) => /^type\s/u.test(entry))
+}
 
 /**
  * 解析相对 spec 到真实文件。
@@ -66,39 +108,59 @@ function target (fromFile, spec) {
   return undefined
 }
 
-const graph = new Map()
+const graph = new Map()      // 全部边（值 + 仅类型）—— 用来找「仅类型环」
+const valueGraph = new Map() // 只有值边 —— 用来判定真正的运行时环
 const missing = []
 for (const f of files) {
   const text = readFileSync(f, 'utf8')
   const outs = new Set()
-  for (const m of text.matchAll(IMP)) {
+  const valueOuts = new Set()
+  /** A: 带 from 的形状（clause 决定它是不是仅类型）。 */
+  for (const m of text.matchAll(IMP_FROM)) {
+    const t = target(f, m[2])
+    if (t === undefined) { missing.push(`${relative(SRC, f)} -> ${m[2]}`); continue }
+    if (t === f) continue
+    outs.add(t)
+    if (!isTypeOnlyClause(m[1])) valueOuts.add(t)
+  }
+  /** B: 副作用 import 永远是真值边（它为了副作用而存在）。 */
+  for (const m of text.matchAll(IMP_SIDE_EFFECT)) {
     const t = target(f, m[1])
     if (t === undefined) { missing.push(`${relative(SRC, f)} -> ${m[1]}`); continue }
-    if (t !== f) outs.add(t)
+    if (t === f) continue
+    outs.add(t)
+    valueOuts.add(t)
   }
   graph.set(f, outs)
+  valueGraph.set(f, valueOuts)
 }
 
 const rel = f => relative(SRC, f).replace(/\\/g, '/')
 
-// Tarjan 强连通分量：>1 的 SCC 就是环
-let index = 0
-const idx = new Map(); const low = new Map(); const onStack = new Set(); const stack = []; const sccs = []
-function strongconnect (v) {
-  idx.set(v, index); low.set(v, index); index += 1
-  stack.push(v); onStack.add(v)
-  for (const w of graph.get(v) ?? []) {
-    if (!idx.has(w)) { strongconnect(w); low.set(v, Math.min(low.get(v), low.get(w))) }
-    else if (onStack.has(w)) { low.set(v, Math.min(low.get(v), idx.get(w))) }
+/** Tarjan 强连通分量：>1 的 SCC 就是环。传哪张图就算哪张。 */
+function sccsOf (g) {
+  let index = 0
+  const idx = new Map(); const low = new Map(); const onStack = new Set(); const stack = []; const found = []
+  function strongconnect (v) {
+    idx.set(v, index); low.set(v, index); index += 1
+    stack.push(v); onStack.add(v)
+    for (const w of g.get(v) ?? []) {
+      if (!idx.has(w)) { strongconnect(w); low.set(v, Math.min(low.get(v), low.get(w))) }
+      else if (onStack.has(w)) { low.set(v, Math.min(low.get(v), idx.get(w))) }
+    }
+    if (low.get(v) === idx.get(v)) {
+      const comp = []
+      let w
+      do { w = stack.pop(); onStack.delete(w); comp.push(w) } while (w !== v)
+      if (comp.length > 1) found.push(comp)
+    }
   }
-  if (low.get(v) === idx.get(v)) {
-    const comp = []
-    let w
-    do { w = stack.pop(); onStack.delete(w); comp.push(w) } while (w !== v)
-    if (comp.length > 1) sccs.push(comp)
-  }
+  for (const f of files) if (!idx.has(f)) strongconnect(f)
+  return found
 }
-for (const f of files) if (!idx.has(f)) strongconnect(f)
+
+const sccs = sccsOf(valueGraph)
+const allSccs = sccsOf(graph)
 
 const edges = [...graph.values()].reduce((s, o) => s + o.size, 0)
 console.log(`nodes: ${files.length}  edges: ${edges}  unresolved: ${missing.length}`)
@@ -124,8 +186,24 @@ if (missing.length > 0) {
   process.exit(1)
 }
 
+/**
+ * ── 仅类型环：报出来，但**不阻断**（§三十八.3）───────────────────────────────────────────────────
+ *
+ * `import type` 在产出 JS 时整条消失，所以它构不成运行时环。把它报成失败会逼人去拆分合法的类型互引
+ * —— 那是「为了门禁变绿而改好代码」的反面：为了让门禁变绿去改**坏**代码。
+ *
+ * 但它必须**显形**：不报出来，读者就无法区分「没有环」与「有环但都是类型的」。所以它走 NOTE。
+ */
+const valueKeys = new Set(sccs.map((comp) => comp.map(rel).sort().join('|')))
+const typeOnlySccs = allSccs.filter((comp) => !valueKeys.has(comp.map(rel).sort().join('|')))
+
+if (typeOnlySccs.length > 0) {
+  console.log(`NOTE: ${typeOnlySccs.length} type-only cycle(s) — \`import type\` is erased at runtime, not a failure:`)
+  for (const comp of typeOnlySccs) console.log('  ' + comp.map(rel).join(' ⇄ '))
+}
+
 if (sccs.length === 0) {
-  console.log('ACYCLIC — no dependency cycle, and every relative import resolved to a file')
+  console.log('ACYCLIC — no RUNTIME dependency cycle, and every relative import resolved to a file')
 } else {
   console.log(`CYCLES: ${sccs.length}`)
   for (const c of sccs) console.log('  ' + c.map(rel).join(' ⇄ '))
