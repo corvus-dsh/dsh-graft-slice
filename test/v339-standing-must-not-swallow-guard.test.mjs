@@ -38,6 +38,7 @@ import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { fileURLToPath } from 'node:url'
 import { FakePersistence, dispatchPreStep, makeCtx, makeSourceLog } from './fake-harness.mjs'
+import { stripComments } from './source-assertion.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const plugin = await import(pathToFileURL(join(ROOT, 'index.js')).href)
@@ -151,13 +152,16 @@ test('v339 ③ (negative): the criterion can fail — removing `...guardMessages
    * file cannot satisfy it either.
    */
   const source = readFileSync(join(ROOT, 'src', 'index.ts'), 'utf8')
-  const code = source
-    .split('\n')
-    .filter((line) => {
-      const trimmed = line.trimStart()
-      return !(trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*'))
-    })
-    .join('\n')
+  /**
+   * MEASURED SELF-HARM (this assertion's first run): it stayed GREEN while the spread had been
+   * deleted, because the doc comment ABOVE it quotes `...guardMessages` as the thing v339 proves.
+   * A grep that does not strip comments measures the explanation, not the code.
+   *
+   * That was the THIRD such case in this batch (v336 ①, v337 ① were the others), which is why the
+   * fix is no longer a local line filter: it is `test/source-assertion.mjs`'s `stripComments()`,
+   * shared by every criterion and enforced by `check-source-assertions.mjs`.
+   */
+  const code = stripComments(source)
   const markerAt = code.indexOf('graft-standing-')
   assert.notEqual(markerAt, -1, '③ 必须在源码里找到 standing 分支的标记')
   /** Everything BEFORE the marker, up to the start of its message array — the guard belongs here. */

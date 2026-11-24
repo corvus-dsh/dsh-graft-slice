@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "未剥注释的源码文本断言基线 —— **计数只能减不能增**（lead §四十五.2）。",
+    "",
+    "为什么需要基线：实测当前树有 48 条这类断言，一次性改完是高风险改动，",
+    "而大部分是良性的（目标串不会出现在注释里）。所以存量登记、棘轮只管「不再变多」。",
+    "",
+    "减到 0 之后这个文件就是终态：maxRaw: 0 且 files: {}。",
+    "往这里加新条目 = 放宽门禁，判据 ③ 会拒绝（已修复的条目必须删掉，不许留虚高配额）。",
+    "",
+    "修法：把 readFileSync(...) 的结果过一遍 test/source-assertion.mjs 的 stripComments()。"
+  ],
+  "maxRaw": 53,
+  "files": {
+    "v028-global-mode.test.mjs": 20,
+    "v090-audit-handover-defaults.test.mjs": 1,
+    "v097-imperative-single-source.test.mjs": 1,
+    "v102-session-summary-guard.test.mjs": 1,
+    "v103-seam-inventory.test.mjs": 4,
+    "v117-acceptance-checklist.test.mjs": 1,
+    "v125-historical-evidence-guard.test.mjs": 1,
+    "v135-subblock-closure.test.mjs": 2,
+    "v139-closure-resource-guard.test.mjs": 1,
+    "v142-type-check-signal.test.mjs": 1,
+    "v143-type-budget.test.mjs": 9,
+    "v332-advisory-reaches-pre-step.test.mjs": 1,
+    "v334-build-cannot-hang.test.mjs": 9,
+    "v338-cache-must-not-reuse-failure.test.mjs": 1
+  }
+}

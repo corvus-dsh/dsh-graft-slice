@@ -202,6 +202,19 @@ jobs:
       - name: Comments do not claim what the manifest no longer says
         run: node scripts/check-doc-claims.mjs
 
+      # ── SOURCE-TEXT ASSERTIONS MUST STRIP COMMENTS FIRST ─────────────────────────────────────────
+      #
+      # Four times in one batch, a criterion that greps SOURCE TEXT went green (or red) on the
+      # EXPLANATION instead of the code: `check-doc-claims` scanning its own rules, `v329 ③`'s
+      # `/O/u` matching `a**o**uto is ON`, `v336 ①`/`v337 ①` failing on their own file headers, and
+      # `v339 ③` going green after the mechanism was deleted because the doc comment above quoted it.
+      #
+      # Three human discoveries ⇒ a criterion. `test/source-assertion.mjs` holds the one
+      # implementation; this gate refuses any NEW unstripped source-text assertion and ratchets the
+      # existing 53 down (never up) via `docs/source-assertions.json`.
+      - name: Source-text assertions strip comments first
+        run: node scripts/check-source-assertions.mjs
+
       # ── TEST NUMBERS ARE UNIQUE WITHIN A REPOSITORY ──────────────────────────────────────────────
       #
       # Measured 2026-11-21 (B4-0b-2 W5-1): this repository already shares 18 numbers between files

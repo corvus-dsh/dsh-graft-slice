@@ -196,6 +196,11 @@ const KINDS = new Map([
    */
   ['check-stability-registration.mjs', 'GATE'],
   /**
+   * §四十五.2：对源码文本做断言的判据必须先剥注释。断言型（新出现未剥注释的源码断言 ⇒ exit 1），
+   * 且必须有 ci.yml 步骤 —— 这条门禁的存在理由正是「三次靠人看出来、第四次还靠人」。
+   */
+  ['check-source-assertions.mjs', 'GATE'],
+  /**
    * `sync-shared.mjs` 是**工具**，不是门禁：它是基准仓的同步入口，默认会写文件，而 CI 是全新 checkout，
    * 没有可同步的分叉。它的自检（复制后跑 check-shared-sources）由它自己完成。
    */
