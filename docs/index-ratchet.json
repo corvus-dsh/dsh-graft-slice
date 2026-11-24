@@ -1,5 +1,12 @@
 {
-  "lines": 14874,
+  "lines": 14872,
   "functions": 191,
-  "history": []
+  "history": [
+    {
+      "at": "2026-11-24T04:36:51.307Z",
+      "field": "lines",
+      "from": 14874,
+      "to": 14872
+    }
+  ]
 }

@@ -381,6 +381,20 @@ export const forcedCutMarks = new Map<
 export const nudgeDeliveredAt = new Map<string, { ratio: number; resetAfter: boolean }>()
 
 /**
+ * ── N1/N2/N3 的两个新状态（lead §二十九/三十）────────────────────────────────────────────────────
+ *
+ * `compactionAdvisories`：宽限期内「压缩可能先到」的**只读**提示，等 pre-step 灌进消息数组。
+ * 与 nudge 分开存，因为它**不是**切片邀请 —— 混进同一个队列，就分不清「说了事实」与「叫它动手」。
+ *
+ * `invalidateGraceRequested`：宽限期让位的**请求**。存请求而不是直接改 `graftTargets`：
+ * 「何时作废」归 compaction（判据在 `compaction-observer.ts`），「怎么作废」归 chain（本文件旁的
+ * `invalidateGrace`）。两个所有者各管一半，才不会被一方的判据顺手改掉另一方的数据。
+ */
+export const compactionAdvisories = new Map<string, string>()
+
+export const invalidateGraceRequested = new Map<string, string>()
+
+/**
  * ── W0-2 layer 2: the growth predictor's per-session sample ring ─────────────────────────────────
  *
  * Each entry is one pre-step observation `{ seq, tokens }`. The delta between two entries is a step's

@@ -75,6 +75,8 @@ import type { GraftCostEstimate, GraftCostInput, SessionEventLike, TokenWatermar
  * it, so "slice before compaction" becomes geometry instead of configuration good faith.
  */
 import { alertCompactionMounts, applyCompactionCeiling, COMPACTION_BASIC, COMPACTION_WARN_MARGIN, readCompactionMounts } from './core/compaction-guard.js'
+import { observeCompaction } from './core/compaction-observer.js'
+import { requestGraceInvalidation, turnsInGeneration } from './core/chain-grace.js'
 import type { CompactionCeiling } from './core/compaction-guard.js'
 /**
  * ── W0-2 (B4-0b-2 §十二): the three-layer nudge defence ─────────────────────────────────────────
@@ -298,6 +300,8 @@ import {
   guardReasserted,
   ignitionAdmissions,
   inFlight,
+  compactionAdvisories,
+  invalidateGraceRequested,
   leftoverTargets,
   modelDrivenNudgeTurns,
   nudgeDeliveredAt,
@@ -12474,24 +12478,18 @@ async function appendTransitionCard(
         return isProtectedGraftTarget(agentId, events, settings.graftTargetGraceTurns)
       })()
 
-      // Evidence, not enforcement: the two branches below withhold the nudge and
-      // the forced cut for a protected target. Record WHY, so "it sat at 80% and
-      // nothing happened" is answerable from the audit file instead of empty.
+      // N1+N2+N3 (lead §二十九/三十): 宽限期保护的是「不被自己再切」，不是免于宿主压缩。
+      // 判定在 core/compaction-observer.ts，chain 侧接口在 core/chain-grace.ts；这里只接线。
       if (chainProtected && (autoGraftStates.get(agentId) ?? 'idle') === 'idle') {
         const watermark = await readTokenWatermark(stableCtx, agentId, settings)
         watermarkForNudge = watermark
-        const thresholds =
-          watermark === undefined
-            ? undefined
-            : await governedWatermarks(stableCtx, settings, agentId, watermark, ctx.logger)
-        if (watermark !== undefined && thresholds !== undefined && watermark.ratio >= thresholds.warnAt) {
-          appendGraftAudit({
-            at: new Date().toISOString(),
-            kind: 'chain-guard',
-            sessionId: agentId,
-            ratio: Number(watermark.ratio.toFixed(4)),
-            detail: `fresh target (generation ${graftGenerationOf(agentId)}): nudge and autoGraft withheld inside the ${settings.graftTargetGraceTurns}-turn grace window`,
-          })
+        const thresholds = watermark === undefined ? undefined : await governedWatermarks(stableCtx, settings, agentId, watermark, ctx.logger)
+        if (watermark !== undefined && thresholds !== undefined) {
+          const turns = turnsInGeneration((stableCtx.sessions.get(agentId) as any)?.snapshotEvents?.(0) as never)
+          const observed = observeCompaction({ chainProtected, graceTurnsRemaining: settings.graftTargetGraceTurns, turnsSinceBirth: turns, ratio: watermark.ratio, warnAt: thresholds.warnAt, hardAt: thresholds.hardAt, compactionLine: thresholds.compaction?.thresholdRatio })
+          if (observed.kind !== 'none') appendGraftAudit({ at: new Date().toISOString(), kind: observed.kind === 'advisory' ? 'chain-guard' : observed.audit.kind, sessionId: agentId, ratio: observed.ratio, detail: observed.kind === 'advisory' ? observed.message : `${observed.kind} (generation ${graftGenerationOf(agentId)}, turns ${observed.audit.turnsSinceBirth})` })
+          if (observed.kind === 'advisory') compactionAdvisories.set(agentId, observed.message)
+          if (observed.kind === 'yield') requestGraceInvalidation(invalidateGraceRequested, agentId, 'worked-then-crossed')
         }
       }
 

@@ -25,6 +25,15 @@ export interface GraftAuditEntry {
     | 'lock-reclaimed'
     | 'command-blocked'
     | 'chain-guard'
+    /**
+     * ── N1/N2/N3 (lead §二十九/三十) ──────────────────────────────────────────────────────────────
+     *
+     * `grace-yielded`：宽限期**让位**给宿主压缩（这一代已经工作过，压力是它自己长出来的）。
+     * `graft-seed-too-large`：这一代**一出生**就越过硬切线 —— 那是继承的种子太大，属 RESOURCE。
+     * 靠反复切片消化它只会切出同样大的新种子，所以它必须显形，而不是被当成「该切了」。
+     */
+    | 'grace-yielded'
+    | 'graft-seed-too-large'
     | 'model-nudge'
     | 'nudge-escalation'
     | 'force-graft'
