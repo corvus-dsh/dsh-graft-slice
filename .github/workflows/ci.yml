@@ -188,6 +188,12 @@ jobs:
       - name: Runtime dependencies are empty and dev tooling is allowlisted
         run: node scripts/check-runtime-deps.mjs
 
+      - name: CI checkout layout matches what the mv steps assume
+        run: node scripts/check-ci-layout.mjs
+
+      - name: Comments do not claim what the manifest no longer says
+        run: node scripts/check-doc-claims.mjs
+
       # ── TEST NUMBERS ARE UNIQUE WITHIN A REPOSITORY ──────────────────────────────────────────────
       #
       # Measured 2026-11-21 (B4-0b-2 W5-1): this repository already shares 18 numbers between files

@@ -177,6 +177,16 @@ const KINDS = new Map([
    * 有自己的步骤 —— 它在 `npm run check` 里跑不代表 CI 会跑到它（本仓已经因为「门禁没人跑」红过一次）。
    */
   ['check-runtime-deps.mjs', 'GATE'],
+  /**
+   * §35.3：注释与 manifest 的一致性。它断言（`devDependencies` 非空时禁止无保留的
+   * 「declares no dependencies」/「installs nothing」），所以是 GATE，且必须有 ci.yml 步骤。
+   */
+  ['check-doc-claims.mjs', 'GATE'],
+  /**
+   * §35.2：`mv ../dsh-*` 的前提（自家 checkout 在 workspace 根）必须是**判据**，不是注释。
+   * 注释不执行，下一位加 `path:` 的人不会读到它，CI 也不会红。
+   */
+  ['check-ci-layout.mjs', 'GATE'],
   ['families.mjs', 'INSTRUMENT'],
 
   // ── OPS: needs a live store/host, or is a drill ──

@@ -19,8 +19,11 @@
  *   node scripts/type-check.mjs --grep NAME    # only diagnostics whose message mentions NAME
  *   node scripts/type-check.mjs --json
  *
- * It reads typescript from the workspace root (this package declares no dependencies, exactly like
- * closure.mjs) and exits 2 with a named reason when the compiler is unavailable — never a silent zero.
+ * It resolves typescript like everything else here: THIS package first (`devDependencies.typescript`,
+ * exact-pinned — see `check-runtime-deps.mjs`), then the workspace root as a fallback so a checkout that
+ * predates the declaration still works. RUNTIME `dependencies` remain empty on purpose; a compiler is dev
+ * tooling, not something a host should install. It exits 2 with a named reason when neither resolves —
+ * never a silent zero.
  */
 import { createRequire } from 'node:module'
 import { readdirSync, statSync } from 'node:fs'
@@ -252,7 +255,7 @@ if (onlyCode === undefined && onlyGrep === undefined && envRows.length > 0) {
     const n = envRows.filter((row) => row.code === code).length
     if (n > 0) console.log(`  ${String(code).padEnd(6)} ${String(n).padStart(3)}  ${why}`)
   }
-  console.log('  (do NOT "fix" these by editing code: package.json declares no dependencies, deliberately)')
+  console.log('  (do NOT "fix" these by editing code: package.json declares no RUNTIME dependencies, deliberately)')
   if (artifactRows.length > 0) {
     console.log(`COMPILER ARTIFACT: ${artifactRows.length} diagnostic(s) — caused by strict:false, not by the code`)
     for (const row of artifactRows) {
