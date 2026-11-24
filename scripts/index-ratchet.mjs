@@ -19,7 +19,28 @@
  * They are derived from the CALL GRAPH, not invented:
  *
  *   responsibility = 「被 <caller1>、<caller2> … 调用」  (or 「entry：apply()/注册调用」 for leaves)
- *   why            = 「它的引用者仍在 index.ts —— 搬它必须先搬 <caller>」 / 「它是 entry，搬动等于改注册面」
+ *
+ * `why` used to say 「它的引用者仍在 index.ts —— 搬它必须先搬 <caller>」, and that was **an
+ * unsatisfiable instruction, not an ordering**. Measured (lead §五十七.2): 48 units said
+ * 「必须先搬 apply」 and 56 said 「必须先搬 (module scope)」 — 104 of 191. But `apply` is the
+ * CONTAINER (it is the registration surface and never moves), and `(module scope)` is not a movable
+ * object at all. Meanwhile the real rule is the opposite: `verify-pure-move.mjs` EXCLUDES import and
+ * export lines from the content multiset, so moving a unit that `apply` calls leaves `apply` with one
+ * extra import and an unchanged multiset — the pure-move check still prints IDENTICAL.
+ *
+ *   **An unsatisfiable prerequisite printed as an instruction is worse than no list**: the reader
+ *   starts by looking for 「how do I move apply」 and stops there.
+ *
+ * So `why` now has exactly the shapes an executor needs:
+ *
+ *   「无前置（搬动后容器只多一行 import）」        — nothing has to move before it
+ *   「与 <簇名> 同簇（必须一起搬）」              — it belongs to a cluster and travels with it
+ *   「容器（不搬动；随簇搬动只增加 import）」      — the container itself (`apply` only)
+ *
+ * The cluster is the CONNECTED COMPONENT of the caller graph once `apply` and `(module scope)` are
+ * removed as blockers — because those two are satisfied by an import, which is what the container
+ * already does. Cluster name = the member with the smallest line number, and every member names that
+ * same head, so `v347` can check the label exists AND the head agrees without recomputing the graph.
  *
  * Only 80 of 191 functions carry a doc comment, so a hand-written rationale for all 191 would be
  * 111 guesses. A call-graph fact is verifiable; a guessed rationale is not. The field is recorded as
@@ -94,7 +115,6 @@ function callersOf(fn, all) {
 
 const rows = functions.map((fn) => {
   const callers = callersOf(fn, functions)
-  const isEntry = fn.name === 'apply' || callers.length === 0
   return {
     name: fn.name,
     line: fn.line,
@@ -104,14 +124,119 @@ const rows = functions.map((fn) => {
       callers.length === 0
         ? 'entry：apply() 或注册面直接调用'
         : `被 ${callers.slice(0, 6).join('、')}${callers.length > 6 ? ` 等 ${callers.length} 处` : ''} 调用`,
-    why:
-      callers.length === 0
-        ? '它是入口（apply / 注册面），搬动等于改注册形状'
-        : `它的引用者仍在 index.ts —— 搬它必须先搬 ${callers[0]}`,
+    why: '',
     /** 标记字段来源，免得下一位读者把它当成人工判断。 */
     derivedFrom: 'call-graph',
   }
 })
+
+/**
+ * ── THE ORDERING AN EXECUTOR CAN ACTUALLY FOLLOW ────────────────────────────────────────────────
+ *
+ * The relation that matters is **callee**, not caller:
+ *
+ *   - a CALLER that stays behind is satisfied by an IMPORT — `index.ts` imports the new module's
+ *     symbol and nothing is cyclic. So `apply` calling a moved unit is NOT a prerequisite: it gains
+ *     one import line, which `verify-pure-move.mjs` excludes from the content multiset. Same for code
+ *     sitting at `(module scope)`.
+ *
+ *   - a CALLEE that stays behind CANNOT be satisfied: the new module would have to
+ *     `import { x } from './index.js'` while `index.ts` imports the new module — a cycle, which
+ *     `check-cycles` refuses. So `closure(U) = {U} ∪ callees(U) ∪ callees(callees(U)) …` is exactly
+ *     the set that has to travel together.
+ *
+ * Hence:
+ *
+ *   `closure(U) = {U}` ⇒ 「无前置（搬动后容器只多一行 import）」 — movable today, on its own
+ *   otherwise          ⇒ 「与 <锚点> 同簇（必须一起搬）」
+ *
+ * The 锚点 is the smallest-line unit INSIDE `closure(U)` that has no callees of its own — i.e. one
+ * that really is `无前置` today. That gives `v347` a claim it can check without recomputing the graph:
+ * **the unit a `why` names must itself be marked 无前置**. An invented or stale cluster name fails
+ * immediately.
+ *
+ * Measured before this change (lead §五十七.2): 48 units said 「必须先搬 apply」 and 56 said
+ * 「必须先搬 (module scope)」 — 104 of 191, every one an unsatisfiable instruction.
+ * **An unsatisfiable prerequisite printed as an instruction is worse than no list**: the reader starts
+ * by looking for 「how do I move apply」 and stops there.
+ */
+const CONTAINER_UNITS = new Set(['apply'])
+
+/** Callees of `fn` that are themselves units in this file (a call `name(` anywhere in its body). */
+function calleesOf (fn, all) {
+  const callees = new Set()
+  for (const other of all) {
+    if (other.name === fn.name) continue
+    /** The container is never a cluster member: it does not move, so it cannot be travelled WITH. */
+    if (CONTAINER_UNITS.has(other.name)) continue
+    const pattern = new RegExp(`(^|[^\\w$.])${other.name.replace(/\$/gu, '\\$')}\\s*\\(`, 'u')
+    for (let i = fn.line - 1; i < fn.end; i += 1) {
+      /** A mention inside a comment is not a call — measured: `/** Before apply() there is no layer …` */
+      const trimmed = lines[i].trim()
+      if (trimmed.startsWith('*') || trimmed.startsWith('//') || trimmed.startsWith('/*')) continue
+      if (pattern.test(lines[i])) {
+        callees.add(other.name)
+        break
+      }
+    }
+  }
+  return [...callees].sort()
+}
+
+const byUnitName = new Map(functions.map((fn) => [fn.name, fn]))
+const calleeCache = new Map()
+const calleesOfName = (name) => {
+  if (!calleeCache.has(name)) calleeCache.set(name, calleesOf(byUnitName.get(name), functions))
+  return calleeCache.get(name)
+}
+
+/** `{U} ∪ callees(U)` transitively — the set that must move together. */
+function closureOf (name) {
+  const seen = new Set([name])
+  const queue = [name]
+  while (queue.length > 0) {
+    const current = queue.pop()
+    for (const callee of calleesOfName(current)) {
+      if (seen.has(callee)) continue
+      seen.add(callee)
+      queue.push(callee)
+    }
+  }
+  return seen
+}
+
+/**
+ * The label is the LARGEST unit in `closure(U) \ {U}` — the biggest thing that has to travel with it.
+ *
+ * Two earlier shapes were wrong and the criterion caught both:
+ *
+ *   1. 「the largest member of the whole closure」 — for a leader that is ITSELF the largest, the
+ *      sentence degenerates to 「与 collectDebugStatus 同簇」 printed on `collectDebugStatus`;
+ *   2. 「the topmost of a chain」 — closure containment is not a partition, so units end up naming each
+ *      other in cycles and no group has a stable head.
+ *
+ * Naming the biggest thing you CALL is the fact an executor needs: 「this cannot move until that
+ * moves too, and they travel together」. The manifest is regenerated from the call graph and
+ * `index-ratchet` fails when the committed file differs from the regeneration, so these labels cannot
+ * be hand-edited into something the graph does not say.
+ */
+function labelOf (name) {
+  const others = [...closureOf(name)].filter((member) => member !== name).map((member) => byUnitName.get(member))
+  if (others.length === 0) return undefined
+  return others.sort((left, right) => (right.end - right.line) - (left.end - left.line) || left.line - right.line)[0].name
+}
+
+const whyOf = (fn) => {
+  if (CONTAINER_UNITS.has(fn.name)) return '容器（不搬动；随簇搬动只增加 import）'
+  const label = labelOf(fn.name)
+  if (label === undefined) return '无前置（搬动后容器只多一行 import）'
+  return `与 ${label} 同簇（必须一起搬）`
+}
+
+for (const row of rows) {
+  row.why = whyOf(byUnitName.get(row.name))
+}
+
 
 const measured = { lines: countLines(lines), functions: functions.length }
 const manifest = { generatedFrom: 'src/index.ts', derivedFrom: 'call-graph', measured, units: rows }
