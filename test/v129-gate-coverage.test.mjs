@@ -187,6 +187,15 @@ const KINDS = new Map([
    * 注释不执行，下一位加 `path:` 的人不会读到它，CI 也不会红。
    */
   ['check-ci-layout.mjs', 'GATE'],
+  /**
+   * §三十七：共享文件必须按【作用域】逐字节相同。它是断言型门禁，且必须有 ci.yml 步骤。
+   */
+  ['check-shared-sources.mjs', 'GATE'],
+  /**
+   * `sync-shared.mjs` 是**工具**，不是门禁：它是基准仓的同步入口，默认会写文件，而 CI 是全新 checkout，
+   * 没有可同步的分叉。它的自检（复制后跑 check-shared-sources）由它自己完成。
+   */
+  ['sync-shared.mjs', 'INSTRUMENT'],
   ['families.mjs', 'INSTRUMENT'],
 
   // ── OPS: needs a live store/host, or is a drill ──
@@ -232,6 +241,12 @@ const NOT_A_CI_STEP = new Map([
    * 而它会写临时目录、需要网络装依赖。它的用途是**在 CI 看不见时**抓「只在本地成立」的失败。
    */
   ['ci-fresh-clone.mjs', 'local proxy: clones the repo to a temp dir and runs the check chain there. Pointless as a CI step (CI IS a clean environment) and needs a registry; its job is to catch local-only failures while CI is unobserved'],
+  /**
+   * `sync-shared.mjs` 是**基准仓的同步入口**，默认会写文件。CI 是全新 checkout、没有可同步的分叉，
+   * 所以它没有 CI 步骤是正确的。它的自检（复制后立刻跑 check-shared-sources）由它自己完成，
+   * 而那条自检在 `npm run check` 里也已经作为独立门禁存在 —— 不会因为「工具不在 CI 跑」而漏检。
+   */
+  ['sync-shared.mjs', 'base-repo sync entry point: writes sibling copies from the declared base. CI is a fresh checkout with nothing to sync, and its self-check is the separate GATE `check-shared-sources.mjs` which DOES run in CI'],
   /**
    * ── W4-1: THE MODULE THAT RUNS THE SUITE ONCE FOR EVERY GATE ───────────────────────────────────
    *
