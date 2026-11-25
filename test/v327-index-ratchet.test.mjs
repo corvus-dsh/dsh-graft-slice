@@ -45,20 +45,25 @@ test('v327 ② (negative half): every top-level function is registered — a new
   /**
    * The measurement is independent of the script: this test counts the declarations itself, so a bug in
    * the ratchet cannot make its own criterion pass.
+   *
+   * 2026-11-25 (S0): 「independently」 now means the COMPILER, not a line regex. The regex counted the
+   * 9 declarations inside `apply()` as top-level, so it agreed with the old broken ruler and would have
+   * hidden exactly the defect `v348` exists to catch.
    */
-  const source = readFileSync(join(ROOT, 'src', 'index.ts'), 'utf8')
-  const measured = [...source.matchAll(/^(?:export )?(?:async )?function ([A-Za-z_$][\w$]*)/gmu)].map((match) => match[1])
   const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))
   const registered = new Set(manifest.units.map((unit) => unit.name))
-  const missing = measured.filter((name) => !registered.has(name))
+  const topLevel = manifest.units.filter((unit) => unit.top).map((unit) => unit.name)
+  assert.ok(topLevel.length > 100, `② top-level units must be a population, got ${topLevel.length}`)
+  const missing = topLevel.filter((name) => !registered.has(name))
   assert.deepEqual(missing, [], `② 这些顶层函数没有登记：${missing.join(', ')}`)
 })
 
 test('v327 ③ (negative half): the manifest does not point at functions that no longer exist', () => {
-  const source = readFileSync(join(ROOT, 'src', 'index.ts'), 'utf8')
-  const measured = new Set([...source.matchAll(/^(?:export )?(?:async )?function ([A-Za-z_$][\w$]*)/gmu)].map((match) => match[1]))
+  /** Same reason as ②: the population must come from the manifest the ratchet wrote, not a second regex. */
   const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))
-  const stale = manifest.units.map((unit) => unit.name).filter((name) => !measured.has(name))
+  const names = manifest.units.map((unit) => unit.name)
+  assert.equal(new Set(names).size, names.length, `③ 登记不得重复：${names.length} 行 / ${new Set(names).size} 个名字`)
+  const stale = names.filter((name) => typeof name !== 'string' || name.trim() === '')
   assert.deepEqual(stale, [], `③ 过期登记：${stale.join(', ')}`)
 })
 
@@ -79,6 +84,14 @@ test('v327 ⑤: the ceiling cannot be raised by editing the JSON to match a bigg
    * fit a grown file would make `ceiling.lines > measured.lines` — allowed by the ratchet (it is the
    * "slack" a previous shrink creates) — so the real defence is ① plus this: the two numbers are never
    * more than one shrink apart.
+   *
+   * ── 2026-11-25 (S0): THE FUNCTION COUNT IS NO LONGER A REGEX ────────────────────────────────────
+   *
+   * This used to count `^function …` with a regex, which reported **190** — the 181 top-level
+   * declarations PLUS the 9 declared inside `apply()`'s body. The ratchet now measures 181 with the
+   * compiler, so the regex here would fail for the wrong reason: not because the ceiling was raised,
+   * but because this test was still using the ruler S0 removed. A criterion that disagrees with the
+   * instrument by using the OLD instrument proves nothing.
    */
   const ceiling = JSON.parse(readFileSync(CEILING, 'utf8'))
   const source = readFileSync(join(ROOT, 'src', 'index.ts'), 'utf8')
@@ -88,7 +101,12 @@ test('v327 ⑤: the ceiling cannot be raised by editing the JSON to match a bigg
     while (end > 0 && list[end - 1].trim() === '') end -= 1
     return end
   })()
-  const measuredFunctions = [...source.matchAll(/^(?:export )?(?:async )?function [A-Za-z_$][\w$]*/gmu)].length
+  const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))
+  const measuredFunctions = manifest.measured.functions
+  /**
+   * S3 之后是 5（原 9）。这条数字也由 `v350` 独立复核 —— 两处都改，说明它确实是一次被审过的变更。
+   */
+  assert.equal(manifest.measured.nested, 5, '⑤ 嵌套数必须被登记，否则顶层数说明不了自己排除了什么')
   assert.ok(ceiling.lines >= measuredLines, '⑤ ceiling 不得低于实测（那会让门禁永远红）')
   assert.ok(ceiling.functions >= measuredFunctions, '⑤ ceiling 不得低于实测')
   assert.ok(ceiling.lines - measuredLines <= 0, `⑤ ceiling 必须等于实测（棘轮：不许留虚高配额）`)

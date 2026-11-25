@@ -27,6 +27,7 @@
  * identifiers, and its output is cross-checked against the compiler on known samples.
  */
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { describeTypeScript as describeTypeScriptFromCompiler } from './ts-compiler.mjs'
 import { join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -85,35 +86,7 @@ const mutableLabel = (declaration) =>
     ? `${declaration.name} (const-mutated)`
     : `${declaration.name} (${declaration.kind})`
 
-async function loadTypeScript() {
-  for (const name of ['typescript', 'typescript/lib/typescript.js']) {
-    try { return await import(name) } catch { /* next */ }
-  }
-  return undefined
-}
 
-/**
- * ── WHERE DID THE COMPILER COME FROM? ───────────────────────────────────────────────────────────
- *
- * The repo has NO `node_modules` of its own and NO `typescript` dependency (measured: `package.json`
- * declares none). So `import('typescript')` resolves UPWARDS — measured on this machine it landed in
- * `D:/持久层能力架构/node_modules/typescript`, i.e. the WORKSPACE root, not this package.
- *
- * That matters for anyone reading a report: a closure number is only reproducible if the reader can see
- * which compiler produced it. A fresh clone with no workspace-level install would find nothing and exit 2,
- * so the path must be printed rather than assumed.
- */
-async function describeTypeScript() {
-  const ts = await loadTypeScript()
-  if (ts === undefined) return { ts: undefined, path: undefined, version: undefined }
-  let path
-  try {
-    path = import.meta.resolve('typescript')
-  } catch {
-    path = undefined
-  }
-  return { ts, path, version: ts.version }
-}
 
 function sourceFiles() {
   const out = []
@@ -664,7 +637,7 @@ const blockRequest = (() => {
   }
   return { file, start, end }
 })()
-  const { ts, path: tsPath, version } = await describeTypeScript()
+  const { ts, path: tsPath, version } = await describeTypeScriptFromCompiler()
 
   if (ts !== undefined) {
     console.log(`typescript ${version} — measuring with the compiler API`)

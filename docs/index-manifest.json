@@ -1,9 +1,14 @@
 {
   "generatedFrom": "src/index.ts",
-  "derivedFrom": "call-graph",
+  "derivedFrom": "call-graph+typescript",
   "measured": {
-    "lines": 14732,
-    "functions": 190
+    "lines": 14736,
+    "functions": 185,
+    "nested": 5
+  },
+  "compiler": {
+    "version": "5.9.3",
+    "resolvedFrom": "file:///D:/%E6%8C%81%E4%B9%85%E5%B1%82%E8%83%BD%E5%8A%9B%E6%9E%B6%E6%9E%84/node_modules/typescript/lib/typescript.js"
   },
   "units": [
     {
@@ -11,6 +16,7 @@
       "line": 908,
       "end": 912,
       "exported": false,
+      "top": true,
       "responsibility": "被 normalizeConfig 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -20,7 +26,8 @@
       "line": 914,
       "end": 1037,
       "exported": true,
-      "responsibility": "被 (module scope)、apply、commitPreparedSlice、graftSliceAndInjectUnlocked、prepareSlice 调用",
+      "top": true,
+      "responsibility": "被 apply、buildInjectionPlan、commitPreparedSlice、graftSliceAndInjectUnlocked、prepareSlice 调用",
       "why": "与 asRatio 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -29,6 +36,7 @@
       "line": 1039,
       "end": 1045,
       "exported": false,
+      "top": true,
       "responsibility": "被 normalizeConfig 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -38,7 +46,8 @@
       "line": 1047,
       "end": 1049,
       "exported": false,
-      "responsibility": "被 (module scope)、apply 调用",
+      "top": true,
+      "responsibility": "被 apply、buildInjectionPlan 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -47,6 +56,7 @@
       "line": 1061,
       "end": 1077,
       "exported": false,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -56,6 +66,7 @@
       "line": 1079,
       "end": 1086,
       "exported": false,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -65,7 +76,8 @@
       "line": 1098,
       "end": 1100,
       "exported": false,
-      "responsibility": "被 (module scope)、collectReadbackIndex 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan、collectReadbackIndex 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -74,7 +86,8 @@
       "line": 1104,
       "end": 1106,
       "exported": false,
-      "responsibility": "被 (module scope)、apply、summaryWithConstraints 调用",
+      "top": true,
+      "responsibility": "被 apply、extractConstraintsDetailed、summaryWithConstraints 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -83,7 +96,8 @@
       "line": 1122,
       "end": 1125,
       "exported": false,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 extractConstraintsDetailed 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -92,7 +106,8 @@
       "line": 1191,
       "end": 1195,
       "exported": false,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 extractConstraintsDetailed 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -101,6 +116,7 @@
       "line": 1334,
       "end": 1349,
       "exported": false,
+      "top": true,
       "responsibility": "被 selectConstraints 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -110,25 +126,28 @@
       "line": 1352,
       "end": 1414,
       "exported": true,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan、extractConstraintsDetailed 调用",
       "why": "与 isRedline 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "filterRejectedConstraints",
       "line": 1480,
-      "end": 1487,
+      "end": 1520,
       "exported": true,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan、extractConstraintsDetailed 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "applyManualConstraints",
       "line": 1522,
-      "end": 1525,
+      "end": 1535,
       "exported": true,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan、extractConstraintsDetailed 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -137,7 +156,8 @@
       "line": 1540,
       "end": 1542,
       "exported": true,
-      "responsibility": "被 (module scope)、apply 调用",
+      "top": true,
+      "responsibility": "被 apply、buildInjectionPlan 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -146,7 +166,8 @@
       "line": 1549,
       "end": 1583,
       "exported": true,
-      "responsibility": "被 (module scope)、apply 调用",
+      "top": true,
+      "responsibility": "被 appendConstraintRejection、apply、buildInjectionPlan、removeConstraintRejection 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -155,8 +176,9 @@
       "line": 1589,
       "end": 1599,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "why": "与 readConstraintRejections 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
@@ -164,6 +186,7 @@
       "line": 1633,
       "end": 1635,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply、manualTextsForWorkspace 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -173,7 +196,8 @@
       "line": 1638,
       "end": 1671,
       "exported": true,
-      "responsibility": "被 (module scope)、appendManualConstraint、apply、manualTextsForWorkspace 调用",
+      "top": true,
+      "responsibility": "被 appendManualConstraint、apply、manualTextsForWorkspace、removeManualConstraint 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -182,6 +206,7 @@
       "line": 1673,
       "end": 1676,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -191,6 +216,7 @@
       "line": 1679,
       "end": 1693,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 readManualConstraints 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -198,19 +224,21 @@
     {
       "name": "removeManualConstraint",
       "line": 1695,
-      "end": 1697,
+      "end": 1710,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "why": "与 readManualConstraints 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "removeConstraintRejection",
       "line": 1717,
-      "end": 1719,
+      "end": 1732,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "why": "与 readConstraintRejections 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
@@ -218,7 +246,8 @@
       "line": 1739,
       "end": 1745,
       "exported": true,
-      "responsibility": "被 (module scope)、apply 调用",
+      "top": true,
+      "responsibility": "被 apply、buildInjectionPlan 调用",
       "why": "与 readManualConstraints 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -227,7 +256,8 @@
       "line": 1747,
       "end": 1760,
       "exported": true,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -236,17 +266,19 @@
       "line": 1772,
       "end": 1784,
       "exported": false,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 extractConstraintsDetailed 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "extractConstraintsDetailed",
       "line": 1811,
-      "end": 1814,
+      "end": 1990,
       "exported": true,
-      "responsibility": "被 (module scope)、extractConstraints 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan、extractConstraints 调用",
+      "why": "与 selectConstraints 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
@@ -254,7 +286,8 @@
       "line": 1997,
       "end": 1999,
       "exported": true,
-      "responsibility": "被 (module scope)、graftSliceAndInjectUnlocked、llmExtractConstraints、refineConstraintsInBackground 调用",
+      "top": true,
+      "responsibility": "被 apply、graftSliceAndInjectUnlocked、llmExtractConstraints、refineConstraintsInBackground 调用",
       "why": "与 extractConstraintsDetailed 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -263,8 +296,9 @@
       "line": 2029,
       "end": 2102,
       "exported": true,
-      "responsibility": "被 refineConstraintsInBackground 调用",
-      "why": "与 extractSourceTemplate 同簇（必须一起搬）",
+      "top": true,
+      "responsibility": "被 apply、refineConstraintsInBackground 调用",
+      "why": "与 extractConstraintsDetailed 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
@@ -272,6 +306,7 @@
       "line": 2147,
       "end": 2151,
       "exported": true,
+      "top": true,
       "responsibility": "被 takePlanNudge 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -281,7 +316,8 @@
       "line": 2154,
       "end": 2163,
       "exported": true,
-      "responsibility": "被 (module scope)、takePlanNudge 调用",
+      "top": true,
+      "responsibility": "被 extractPhaseRoadmap、takePlanNudge 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -290,7 +326,8 @@
       "line": 2166,
       "end": 2201,
       "exported": false,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 extractPhaseRoadmap 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -299,17 +336,19 @@
       "line": 2204,
       "end": 2214,
       "exported": false,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 extractPhaseRoadmap 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "extractPhaseRoadmap",
       "line": 2223,
-      "end": 2226,
+      "end": 2320,
       "exported": true,
-      "responsibility": "被 (module scope) 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan 调用",
+      "why": "与 planBlocksOf 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
@@ -317,7 +356,8 @@
       "line": 2323,
       "end": 2344,
       "exported": false,
-      "responsibility": "entry：apply() 或注册面直接调用",
+      "top": true,
+      "responsibility": "被 extractPhaseRoadmap 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -326,7 +366,8 @@
       "line": 2349,
       "end": 2374,
       "exported": true,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -335,7 +376,8 @@
       "line": 2376,
       "end": 2384,
       "exported": false,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
       "why": "与 isConstraintSentence 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -344,7 +386,8 @@
       "line": 2403,
       "end": 2465,
       "exported": true,
-      "responsibility": "被 (module scope)、commitPreparedSlice 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan、commitPreparedSlice 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -353,7 +396,8 @@
       "line": 2473,
       "end": 2475,
       "exported": true,
-      "responsibility": "被 (module scope)、apply、prepareSlice 调用",
+      "top": true,
+      "responsibility": "被 apply、autoGraftIfNeeded、prepareSlice 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -362,7 +406,8 @@
       "line": 2515,
       "end": 2587,
       "exported": true,
-      "responsibility": "被 (module scope)、buildTape 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan、buildTape 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -371,6 +416,7 @@
       "line": 2597,
       "end": 2611,
       "exported": true,
+      "top": true,
       "responsibility": "被 buildTape、llmExtractConstraints 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -380,7 +426,8 @@
       "line": 2643,
       "end": 2649,
       "exported": true,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 graftReadResult 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -389,6 +436,7 @@
       "line": 2750,
       "end": 2757,
       "exported": false,
+      "top": true,
       "responsibility": "被 extractLastStepScene、extractWorkspaceIndex 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -398,7 +446,8 @@
       "line": 2765,
       "end": 2839,
       "exported": true,
-      "responsibility": "被 (module scope)、extractWorkspaceState 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan、extractWorkspaceState 调用",
       "why": "与 pathFromToolArguments 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -407,6 +456,7 @@
       "line": 2841,
       "end": 2843,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "与 extractWorkspaceIndex 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -416,7 +466,8 @@
       "line": 2850,
       "end": 2870,
       "exported": true,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -425,6 +476,7 @@
       "line": 2880,
       "end": 2883,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -434,6 +486,7 @@
       "line": 2898,
       "end": 2916,
       "exported": true,
+      "top": true,
       "responsibility": "被 buildTape 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -443,7 +496,8 @@
       "line": 2932,
       "end": 3000,
       "exported": false,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan 调用",
       "why": "与 pointerSentences 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -452,7 +506,8 @@
       "line": 3023,
       "end": 3078,
       "exported": true,
-      "responsibility": "被 (module scope)、graftSliceAndInjectUnlocked 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan、graftSliceAndInjectUnlocked 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -461,7 +516,8 @@
       "line": 3087,
       "end": 3100,
       "exported": true,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -470,7 +526,8 @@
       "line": 3115,
       "end": 3133,
       "exported": false,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 extractConstraintsDetailed 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -479,7 +536,8 @@
       "line": 3162,
       "end": 3199,
       "exported": true,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -488,7 +546,8 @@
       "line": 3201,
       "end": 3208,
       "exported": false,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -497,7 +556,8 @@
       "line": 3210,
       "end": 3285,
       "exported": true,
-      "responsibility": "被 (module scope)、buildTape 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan、buildTape 调用",
       "why": "与 pathFromToolArguments 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -506,6 +566,7 @@
       "line": 3294,
       "end": 3299,
       "exported": true,
+      "top": true,
       "responsibility": "被 buildTape 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -515,6 +576,7 @@
       "line": 3331,
       "end": 3389,
       "exported": true,
+      "top": true,
       "responsibility": "被 buildTape 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -524,6 +586,7 @@
       "line": 3456,
       "end": 3458,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -533,6 +596,7 @@
       "line": 3482,
       "end": 3502,
       "exported": false,
+      "top": true,
       "responsibility": "被 buildTape 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -542,7 +606,8 @@
       "line": 3512,
       "end": 4007,
       "exported": true,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan 调用",
       "why": "与 extractLastStepScene 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -551,6 +616,7 @@
       "line": 4020,
       "end": 4040,
       "exported": false,
+      "top": true,
       "responsibility": "被 extractAttachmentPointers 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -560,6 +626,7 @@
       "line": 4043,
       "end": 4053,
       "exported": true,
+      "top": true,
       "responsibility": "被 buildTape 调用",
       "why": "与 attachmentPointer 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -569,17 +636,19 @@
       "line": 4091,
       "end": 4125,
       "exported": true,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "buildInjectionPlan",
       "line": 4154,
-      "end": 4192,
+      "end": 5084,
       "exported": true,
+      "top": true,
       "responsibility": "被 commitPreparedSlice、graftSliceAndInjectUnlocked、prepareSlice 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "why": "与 buildTape 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
@@ -587,8 +656,9 @@
       "line": 5155,
       "end": 5165,
       "exported": false,
+      "top": true,
       "responsibility": "被 (module scope)、acquireSourceLock、appendGraftAudit、apply、captureDraft、collectDebugStatus 等 30 处 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "why": "依赖 apply() 赋值的模块级状态 storeLayer（不可搬；搬迁须先注入）",
       "derivedFrom": "call-graph"
     },
     {
@@ -596,8 +666,9 @@
       "line": 5182,
       "end": 5184,
       "exported": false,
-      "responsibility": "被 (module scope) 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "top": true,
+      "responsibility": "被 buildInjectionPlan 调用",
+      "why": "依赖 apply() 赋值的模块级状态 storeLayer（不可搬；搬迁须先注入）",
       "derivedFrom": "call-graph"
     },
     {
@@ -605,8 +676,9 @@
       "line": 5187,
       "end": 5189,
       "exported": false,
+      "top": true,
       "responsibility": "被 (module scope)、appendPendingTransfer、apply、graftSliceAndInjectUnlocked、markGraftTarget、resumeSession 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "why": "依赖 apply() 赋值的模块级状态 storeLayer（不可搬；搬迁须先注入）",
       "derivedFrom": "call-graph"
     },
     {
@@ -614,8 +686,9 @@
       "line": 5201,
       "end": 5213,
       "exported": false,
+      "top": true,
       "responsibility": "被 graftSliceAndInjectUnlocked、markTransfersDelivered、pendingTransferMessage 调用",
-      "why": "与 storeCtxOf 同簇（必须一起搬）",
+      "why": "依赖 apply() 赋值的模块级状态 storeLayer（不可搬；搬迁须先注入）",
       "derivedFrom": "call-graph"
     },
     {
@@ -623,8 +696,9 @@
       "line": 5216,
       "end": 5237,
       "exported": false,
+      "top": true,
       "responsibility": "被 markTransfersDelivered、pendingTransferMessage 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "why": "依赖 apply() 赋值的模块级状态 storeLayer（不可搬；搬迁须先注入）",
       "derivedFrom": "call-graph"
     },
     {
@@ -632,8 +706,9 @@
       "line": 5252,
       "end": 5263,
       "exported": false,
+      "top": true,
       "responsibility": "被 pendingTransferMessage 调用",
-      "why": "与 readPendingTransfers 同簇（必须一起搬）",
+      "why": "依赖 apply() 赋值的模块级状态 storeLayer（不可搬；搬迁须先注入）",
       "derivedFrom": "call-graph"
     },
     {
@@ -641,6 +716,7 @@
       "line": 5275,
       "end": 5338,
       "exported": false,
+      "top": true,
       "responsibility": "被 pendingTransferMessagesFor 调用",
       "why": "与 readPendingTransfers 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -650,6 +726,7 @@
       "line": 5347,
       "end": 5353,
       "exported": false,
+      "top": true,
       "responsibility": "被 pendingTransferMessage 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -659,6 +736,7 @@
       "line": 5365,
       "end": 5386,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 pendingTransferMessage 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -668,8 +746,9 @@
       "line": 5389,
       "end": 5505,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
-      "why": "与 storePaths 同簇（必须一起搬）",
+      "why": "依赖 apply() 赋值的模块级状态 storeLayer（不可搬；搬迁须先注入）",
       "derivedFrom": "call-graph"
     },
     {
@@ -677,7 +756,8 @@
       "line": 5553,
       "end": 5570,
       "exported": true,
-      "responsibility": "被 refineConstraintsInBackground 调用",
+      "top": true,
+      "responsibility": "被 apply、refineConstraintsInBackground 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -686,6 +766,7 @@
       "line": 5657,
       "end": 5689,
       "exported": false,
+      "top": true,
       "responsibility": "被 appendGraftAudit 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -695,7 +776,8 @@
       "line": 5691,
       "end": 5708,
       "exported": true,
-      "responsibility": "被 (module scope)、apply、loadPrepared、reportForeignJournal、scanAndReclaimLocks、takeModelDrivenNudge 等 7 处 调用",
+      "top": true,
+      "responsibility": "被 (module scope)、apply、autoGraftIfNeeded、loadPrepared、reportForeignJournal、scanAndReclaimLocks 等 8 处 调用",
       "why": "与 rotateGraftAudit 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -704,6 +786,7 @@
       "line": 5728,
       "end": 5731,
       "exported": true,
+      "top": true,
       "responsibility": "被 commitPreparedSlice、graftSliceAndInject 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -713,6 +796,7 @@
       "line": 5781,
       "end": 5785,
       "exported": true,
+      "top": true,
       "responsibility": "被 configureRetiredStore 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -722,6 +806,7 @@
       "line": 5787,
       "end": 5791,
       "exported": false,
+      "top": true,
       "responsibility": "被 configureRetiredStore、persistRetiredStore、refreshMigrationLedgers 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -731,6 +816,7 @@
       "line": 5795,
       "end": 5802,
       "exported": false,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -740,6 +826,7 @@
       "line": 5806,
       "end": 5862,
       "exported": false,
+      "top": true,
       "responsibility": "被 graftSliceAndInjectUnlocked 调用",
       "why": "与 splitByShape 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -749,6 +836,7 @@
       "line": 5864,
       "end": 5888,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -758,7 +846,8 @@
       "line": 5904,
       "end": 5916,
       "exported": false,
-      "responsibility": "被 refineConstraintsInBackground、takePendingConstraintMessages 调用",
+      "top": true,
+      "responsibility": "被 apply、refineConstraintsInBackground、takePendingConstraintMessages 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -767,7 +856,8 @@
       "line": 5935,
       "end": 5948,
       "exported": false,
-      "responsibility": "被 (module scope) 调用",
+      "top": true,
+      "responsibility": "被 recordLeftover 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -776,6 +866,7 @@
       "line": 5950,
       "end": 5976,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -783,10 +874,11 @@
     {
       "name": "recordLeftover",
       "line": 5978,
-      "end": 5980,
+      "end": 5988,
       "exported": false,
-      "responsibility": "被 (module scope)、recoverGraftTransactions 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "top": true,
+      "responsibility": "被 markTargetBroken、recoverGraftTransactions 调用",
+      "why": "与 persistLeftovers 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
@@ -794,6 +886,7 @@
       "line": 5991,
       "end": 5999,
       "exported": true,
+      "top": true,
       "responsibility": "被 prepareSlice 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -803,7 +896,8 @@
       "line": 6001,
       "end": 6012,
       "exported": false,
-      "responsibility": "被 takeDraftMerge 调用",
+      "top": true,
+      "responsibility": "被 apply、takeDraftMerge 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -812,8 +906,9 @@
       "line": 6014,
       "end": 6040,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
-      "why": "与 storePaths 同簇（必须一起搬）",
+      "why": "依赖 apply() 赋值的模块级状态 draftsLoaded（不可搬；搬迁须先注入）",
       "derivedFrom": "call-graph"
     },
     {
@@ -821,6 +916,7 @@
       "line": 6043,
       "end": 6052,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply、captureDraft、takeDraftMerge、takePlanNudge 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -830,6 +926,7 @@
       "line": 6084,
       "end": 6088,
       "exported": false,
+      "top": true,
       "responsibility": "被 takePlanNudge 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -839,6 +936,7 @@
       "line": 6090,
       "end": 6154,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 phaseKeyOf 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -848,6 +946,7 @@
       "line": 6217,
       "end": 6226,
       "exported": false,
+      "top": true,
       "responsibility": "被 takeWatermarkEscalation 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -857,6 +956,7 @@
       "line": 6228,
       "end": 6264,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 rotateGraftAudit 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -866,6 +966,7 @@
       "line": 6283,
       "end": 6296,
       "exported": false,
+      "top": true,
       "responsibility": "被 buildTape 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -873,8 +974,9 @@
     {
       "name": "nudgePanelState",
       "line": 6317,
-      "end": 6320,
+      "end": 6375,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -884,6 +986,7 @@
       "line": 6388,
       "end": 6428,
       "exported": false,
+      "top": true,
       "responsibility": "被 takeModelDrivenNudge 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -893,6 +996,7 @@
       "line": 6431,
       "end": 6435,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -902,6 +1006,7 @@
       "line": 6449,
       "end": 6461,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -911,6 +1016,7 @@
       "line": 6463,
       "end": 6583,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 nudgePredictionFor 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -920,6 +1026,7 @@
       "line": 6585,
       "end": 6629,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 splitByShape 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -929,6 +1036,7 @@
       "line": 6632,
       "end": 6661,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply、commitRetirementAtomic、resumeSession 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -938,6 +1046,7 @@
       "line": 6674,
       "end": 6701,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply、commitRetirementAtomic、resumeSession 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -947,6 +1056,7 @@
       "line": 6714,
       "end": 6749,
       "exported": false,
+      "top": true,
       "responsibility": "被 graftSliceAndInjectUnlocked 调用",
       "why": "与 persistRetiredStore 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -956,6 +1066,7 @@
       "line": 6752,
       "end": 6754,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -965,6 +1076,7 @@
       "line": 6757,
       "end": 6759,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -974,6 +1086,7 @@
       "line": 6762,
       "end": 6835,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -983,6 +1096,7 @@
       "line": 6839,
       "end": 6841,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -992,6 +1106,7 @@
       "line": 6858,
       "end": 6864,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "与 isLegacyHandoverEntry 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1001,6 +1116,7 @@
       "line": 6866,
       "end": 6867,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1010,6 +1126,7 @@
       "line": 6902,
       "end": 6927,
       "exported": false,
+      "top": true,
       "responsibility": "被 resumeSession 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1019,6 +1136,7 @@
       "line": 6929,
       "end": 7003,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply、recoverGraftTransactions 调用",
       "why": "与 persistRetiredStore 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1028,6 +1146,7 @@
       "line": 7045,
       "end": 7047,
       "exported": true,
+      "top": true,
       "responsibility": "被 assertResliceAllowed、pendingTransferMessage 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1037,6 +1156,7 @@
       "line": 7061,
       "end": 7078,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply、commitPreparedSlice、graftSliceAndInject 调用",
       "why": "与 isRetired 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1046,6 +1166,7 @@
       "line": 7113,
       "end": 7121,
       "exported": false,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1055,6 +1176,7 @@
       "line": 7154,
       "end": 7156,
       "exported": true,
+      "top": true,
       "responsibility": "被 digestTextOfChunk 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1064,6 +1186,7 @@
       "line": 7158,
       "end": 7160,
       "exported": true,
+      "top": true,
       "responsibility": "被 digestTextOfChunk 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1073,6 +1196,7 @@
       "line": 7168,
       "end": 7171,
       "exported": true,
+      "top": true,
       "responsibility": "被 commitPreparedSlice、digestOfPlan 调用",
       "why": "与 isClockBearingChunkKind 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1082,6 +1206,7 @@
       "line": 7173,
       "end": 7198,
       "exported": false,
+      "top": true,
       "responsibility": "被 prepareSlice 调用",
       "why": "与 digestTextOfChunk 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1091,6 +1216,7 @@
       "line": 7200,
       "end": 7206,
       "exported": false,
+      "top": true,
       "responsibility": "被 commitPreparedSlice、prepareSlice 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1100,8 +1226,9 @@
       "line": 7208,
       "end": 7402,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
-      "why": "与 normalizeConfig 同簇（必须一起搬）",
+      "why": "与 buildInjectionPlan 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
@@ -1109,6 +1236,7 @@
       "line": 7420,
       "end": 7423,
       "exported": false,
+      "top": true,
       "responsibility": "被 commitPreparedSlice、isLegacyHandoverEntryForTest 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1118,6 +1246,7 @@
       "line": 7425,
       "end": 7764,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 graftSliceAndInjectUnlocked 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1127,6 +1256,7 @@
       "line": 7766,
       "end": 7879,
       "exported": false,
+      "top": true,
       "responsibility": "被 commitPreparedSlice 调用",
       "why": "与 rotateGraftAudit 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1136,6 +1266,7 @@
       "line": 7881,
       "end": 7909,
       "exported": false,
+      "top": true,
       "responsibility": "被 commitPreparedSlice、prepareSlice 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1145,6 +1276,7 @@
       "line": 7912,
       "end": 7940,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply、autoGraftSuppression、resumeSession 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1154,6 +1286,7 @@
       "line": 7942,
       "end": 7955,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1163,6 +1296,7 @@
       "line": 7966,
       "end": 7975,
       "exported": true,
+      "top": true,
       "responsibility": "被 commitPreparedSlice、graftSliceAndInject 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1172,7 +1306,8 @@
       "line": 8017,
       "end": 8033,
       "exported": true,
-      "responsibility": "被 (module scope)、apply 调用",
+      "top": true,
+      "responsibility": "被 apply、autoGraftIfNeeded 调用",
       "why": "与 graftSliceAndInjectUnlocked 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -1181,8 +1316,9 @@
       "line": 8035,
       "end": 9004,
       "exported": false,
+      "top": true,
       "responsibility": "被 commitPreparedSlice、graftSliceAndInject 调用",
-      "why": "与 normalizeConfig 同簇（必须一起搬）",
+      "why": "与 buildInjectionPlan 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
@@ -1190,7 +1326,8 @@
       "line": 9007,
       "end": 9019,
       "exported": true,
-      "responsibility": "被 (module scope)、graftSearchHistory 调用",
+      "top": true,
+      "responsibility": "被 graftReadResult、graftSearchHistory 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -1199,6 +1336,7 @@
       "line": 9050,
       "end": 9100,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1208,6 +1346,7 @@
       "line": 9163,
       "end": 9168,
       "exported": false,
+      "top": true,
       "responsibility": "被 graftSearchHistory 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1217,6 +1356,7 @@
       "line": 9170,
       "end": 9296,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 extractToolResultText 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1224,10 +1364,11 @@
     {
       "name": "graftReadResult",
       "line": 9302,
-      "end": 9307,
+      "end": 9374,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "why": "与 extractToolResultText 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
@@ -1235,7 +1376,8 @@
       "line": 9396,
       "end": 9399,
       "exported": false,
-      "responsibility": "被 (module scope)、apply、prepareSlice 调用",
+      "top": true,
+      "responsibility": "被 apply、autoGraftIfNeeded、prepareSlice 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -1244,6 +1386,7 @@
       "line": 9427,
       "end": 9432,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1253,6 +1396,7 @@
       "line": 9435,
       "end": 9438,
       "exported": false,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1262,6 +1406,7 @@
       "line": 9508,
       "end": 9516,
       "exported": false,
+      "top": true,
       "responsibility": "被 graftTxnOwner 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1271,6 +1416,7 @@
       "line": 9519,
       "end": 9532,
       "exported": true,
+      "top": true,
       "responsibility": "被 writeGraftTxn 调用",
       "why": "与 txnOwnerToken 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1280,6 +1426,7 @@
       "line": 9543,
       "end": 9565,
       "exported": true,
+      "top": true,
       "responsibility": "被 recoverGraftTransactions 调用",
       "why": "与 isProcessAlive 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1289,6 +1436,7 @@
       "line": 9580,
       "end": 9595,
       "exported": false,
+      "top": true,
       "responsibility": "被 clearGraftTxn、writeGraftTxn 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1298,6 +1446,7 @@
       "line": 9619,
       "end": 9631,
       "exported": false,
+      "top": true,
       "responsibility": "被 commitPreparedSlice、graftSliceAndInjectUnlocked、loadPrepared、prepareSlice 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1307,7 +1456,8 @@
       "line": 9656,
       "end": 9676,
       "exported": false,
-      "responsibility": "被 (module scope)、graftSliceAndInjectUnlocked 调用",
+      "top": true,
+      "responsibility": "被 graftSliceAndInjectUnlocked、markTargetBroken 调用",
       "why": "与 txnFileFor 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -1316,6 +1466,7 @@
       "line": 9678,
       "end": 9684,
       "exported": false,
+      "top": true,
       "responsibility": "被 graftSliceAndInjectUnlocked 调用",
       "why": "与 txnFileFor 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1323,10 +1474,11 @@
     {
       "name": "markTargetBroken",
       "line": 9693,
-      "end": 9697,
+      "end": 9728,
       "exported": false,
+      "top": true,
       "responsibility": "被 graftSliceAndInjectUnlocked、recoverGraftTransactions 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "why": "与 writeGraftTxn 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
@@ -1334,6 +1486,7 @@
       "line": 9751,
       "end": 9759,
       "exported": false,
+      "top": true,
       "responsibility": "被 recoverGraftTransactions 调用",
       "why": "与 rotateGraftAudit 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1343,6 +1496,7 @@
       "line": 9776,
       "end": 9948,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 resumeSession 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1352,6 +1506,7 @@
       "line": 9987,
       "end": 10016,
       "exported": false,
+      "top": true,
       "responsibility": "被 graftSliceAndInjectUnlocked 调用",
       "why": "与 discardPartialTarget 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1361,6 +1516,7 @@
       "line": 10018,
       "end": 10078,
       "exported": false,
+      "top": true,
       "responsibility": "被 recoverGraftTransactions、rollbackTargetViaLayer 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1370,7 +1526,8 @@
       "line": 10134,
       "end": 10136,
       "exported": false,
-      "responsibility": "被 (module scope)、apply、markGraftTarget、readTaskPosition 调用",
+      "top": true,
+      "responsibility": "被 apply、autoGraftIfNeeded、buildInjectionPlan、markGraftTarget、readTaskPosition 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -1379,6 +1536,7 @@
       "line": 10139,
       "end": 10147,
       "exported": false,
+      "top": true,
       "responsibility": "被 buildTape 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1388,6 +1546,7 @@
       "line": 10149,
       "end": 10168,
       "exported": false,
+      "top": true,
       "responsibility": "被 graftSliceAndInjectUnlocked 调用",
       "why": "与 persistGraftTargetStore 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1397,6 +1556,7 @@
       "line": 10176,
       "end": 10198,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply、markGraftTarget、resumeSession 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1406,6 +1566,7 @@
       "line": 10209,
       "end": 10235,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1415,7 +1576,8 @@
       "line": 10246,
       "end": 10257,
       "exported": false,
-      "responsibility": "被 (module scope)、apply 调用",
+      "top": true,
+      "responsibility": "被 apply、autoGraftIfNeeded 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
@@ -1424,6 +1586,7 @@
       "line": 10259,
       "end": 10263,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1433,7 +1596,8 @@
       "line": 10287,
       "end": 10301,
       "exported": false,
-      "responsibility": "被 (module scope)、isAutoGraftSuppressed 调用",
+      "top": true,
+      "responsibility": "被 autoGraftIfNeeded、isAutoGraftSuppressed 调用",
       "why": "与 persistAutoGraftSuppression 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -1442,6 +1606,7 @@
       "line": 10303,
       "end": 10305,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 persistAutoGraftSuppression 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1449,10 +1614,11 @@
     {
       "name": "autoGraftIfNeeded",
       "line": 10307,
-      "end": 10330,
+      "end": 10535,
       "exported": false,
-      "responsibility": "被 (module scope)、apply 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "top": true,
+      "responsibility": "被 apply 调用",
+      "why": "与 graftSliceAndInjectUnlocked 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
@@ -1460,6 +1626,7 @@
       "line": 10550,
       "end": 10571,
       "exported": false,
+      "top": true,
       "responsibility": "被 registerArchivedForks 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1469,6 +1636,7 @@
       "line": 10573,
       "end": 10645,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 attachSessionToWorkspace 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1478,6 +1646,7 @@
       "line": 10692,
       "end": 10703,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1487,6 +1656,7 @@
       "line": 10735,
       "end": 10797,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 rotateGraftAudit 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1496,6 +1666,7 @@
       "line": 10800,
       "end": 10809,
       "exported": true,
+      "top": true,
       "responsibility": "被 scanAndReclaimLocks、txnOwnerVerdict 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1505,6 +1676,7 @@
       "line": 10819,
       "end": 10836,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1514,7 +1686,8 @@
       "line": 10839,
       "end": 10843,
       "exported": false,
-      "responsibility": "被 (module scope)、apply、readTaskPosition 调用",
+      "top": true,
+      "responsibility": "被 apply、readTaskPosition 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
@@ -1523,6 +1696,7 @@
       "line": 10877,
       "end": 10957,
       "exported": false,
+      "top": true,
       "responsibility": "被 commitPreparedSlice、graftSliceAndInjectUnlocked、prepareSlice 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1532,24 +1706,27 @@
       "line": 10969,
       "end": 10989,
       "exported": false,
-      "responsibility": "被 (module scope)、apply 调用",
+      "top": true,
+      "responsibility": "被 apply、governedWatermarks 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "governedWatermarks",
       "line": 11000,
-      "end": 11004,
+      "end": 11054,
       "exported": false,
-      "responsibility": "被 (module scope)、apply 调用",
-      "why": "无前置（搬动后容器只多一行 import）",
+      "top": true,
+      "responsibility": "被 apply、autoGraftIfNeeded 调用",
+      "why": "与 readReservedOutputTokens 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "summariseThresholdReason",
       "line": 11089,
-      "end": 11090,
+      "end": 11115,
       "exported": false,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1559,6 +1736,7 @@
       "line": 11121,
       "end": 11261,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
@@ -1568,6 +1746,7 @@
       "line": 11330,
       "end": 11371,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1577,6 +1756,7 @@
       "line": 11378,
       "end": 11383,
       "exported": true,
+      "top": true,
       "responsibility": "被 apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
@@ -1586,132 +1766,147 @@
       "line": 11526,
       "end": 11541,
       "exported": false,
-      "responsibility": "被 loadPendingConstraints、persistConstraintSections、takePendingConstraintMessages 调用",
+      "top": true,
+      "responsibility": "被 apply、loadPendingConstraints、persistConstraintSections、takePendingConstraintMessages 调用",
       "why": "无前置（搬动后容器只多一行 import）",
-      "derivedFrom": "call-graph"
-    },
-    {
-      "name": "apply",
-      "line": 11543,
-      "end": 14604,
-      "exported": true,
-      "responsibility": "被 (module scope)、autoGraftIfNeeded、collectDebugStatus、normalizeConfig、storePaths 调用",
-      "why": "容器（不搬动；随簇搬动只增加 import）",
-      "derivedFrom": "call-graph"
-    },
-    {
-      "name": "refineConstraintsInBackground",
-      "line": 11664,
-      "end": 11729,
-      "exported": false,
-      "responsibility": "被 apply 调用",
-      "why": "与 llmExtractConstraints 同簇（必须一起搬）",
-      "derivedFrom": "call-graph"
-    },
-    {
-      "name": "captureDraft",
-      "line": 11736,
-      "end": 11773,
-      "exported": false,
-      "responsibility": "被 apply 调用",
-      "why": "与 storePaths 同簇（必须一起搬）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "isSteeringOnly",
-      "line": 11784,
-      "end": 11792,
+      "line": 11552,
+      "end": 11560,
       "exported": false,
-      "responsibility": "被 captureDraft 调用",
+      "top": true,
+      "responsibility": "被 apply、captureDraft 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
     {
-      "name": "takeDraftMerge",
-      "line": 11799,
-      "end": 11828,
-      "exported": false,
-      "responsibility": "被 apply 调用",
-      "why": "与 persistDrafts 同簇（必须一起搬）",
-      "derivedFrom": "call-graph"
-    },
-    {
-      "name": "takePendingConstraintMessages",
-      "line": 11851,
-      "end": 11897,
-      "exported": false,
-      "responsibility": "被 apply 调用",
-      "why": "与 splitByShape 同簇（必须一起搬）",
-      "derivedFrom": "call-graph"
-    },
-    {
       "name": "validateAppendIsLifecycleSafe",
-      "line": 11940,
-      "end": 11942,
+      "line": 11578,
+      "end": 11625,
       "exported": false,
-      "responsibility": "被 appendTransitionCard 调用",
+      "top": true,
+      "responsibility": "被 appendTransitionCard、apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "openStepOf",
-      "line": 11990,
-      "end": 12014,
+      "line": 11628,
+      "end": 11652,
       "exported": false,
-      "responsibility": "被 appendTransitionCard 调用",
+      "top": true,
+      "responsibility": "被 appendTransitionCard、apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "continuationTitle",
-      "line": 12024,
-      "end": 12028,
+      "line": 11662,
+      "end": 11666,
       "exported": false,
-      "responsibility": "被 appendTransitionCard 调用",
+      "top": true,
+      "responsibility": "被 appendTransitionCard、apply 调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
     {
-      "name": "appendTransitionCard",
-      "line": 12030,
-      "end": 12096,
+      "name": "apply",
+      "line": 11668,
+      "end": 14608,
+      "exported": true,
+      "top": true,
+      "responsibility": "entry：apply() 或注册面直接调用",
+      "why": "容器（不搬动；随簇搬动只增加 import）",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "refineConstraintsInBackground",
+      "line": 11789,
+      "end": 11854,
       "exported": false,
+      "top": false,
       "responsibility": "被 apply 调用",
-      "why": "与 openStepOf 同簇（必须一起搬）",
+      "why": "体内声明（须先提升到模块级，非纯移动）",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "captureDraft",
+      "line": 11861,
+      "end": 11898,
+      "exported": false,
+      "top": false,
+      "responsibility": "被 apply 调用",
+      "why": "体内声明（须先提升到模块级，非纯移动）",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "takeDraftMerge",
+      "line": 11906,
+      "end": 11935,
+      "exported": false,
+      "top": false,
+      "responsibility": "被 apply 调用",
+      "why": "体内声明（须先提升到模块级，非纯移动）",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "takePendingConstraintMessages",
+      "line": 11958,
+      "end": 12004,
+      "exported": false,
+      "top": false,
+      "responsibility": "被 apply 调用",
+      "why": "体内声明（须先提升到模块级，非纯移动）",
+      "derivedFrom": "call-graph"
+    },
+    {
+      "name": "appendTransitionCard",
+      "line": 12034,
+      "end": 12100,
+      "exported": false,
+      "top": false,
+      "responsibility": "被 apply 调用",
+      "why": "体内声明（须先提升到模块级，非纯移动）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "getPendingIgnitions",
-      "line": 14715,
-      "end": 14717,
+      "line": 14719,
+      "end": 14721,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "hasIgnitionAdmission",
-      "line": 14720,
-      "end": 14722,
+      "line": 14724,
+      "end": 14726,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "markIgnitionAdmission",
-      "line": 14725,
-      "end": 14727,
+      "line": 14729,
+      "end": 14731,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"
     },
     {
       "name": "getIgnitionAdmissions",
-      "line": 14730,
-      "end": 14732,
+      "line": 14734,
+      "end": 14736,
       "exported": true,
+      "top": true,
       "responsibility": "entry：apply() 或注册面直接调用",
       "why": "无前置（搬动后容器只多一行 import）",
       "derivedFrom": "call-graph"

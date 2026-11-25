@@ -1,6 +1,7 @@
 {
-  "lines": 14732,
-  "functions": 190,
+  "lines": 14736,
+  "functions": 185,
+  "nested": 5,
   "history": [
     {
       "at": "2026-11-24T04:36:51.307Z",
@@ -19,6 +20,26 @@
       "field": "functions",
       "from": 191,
       "to": 190
+    },
+    {
+      "at": "2026-11-25T09:17:56.097Z",
+      "field": "functions",
+      "from": 190,
+      "to": 181
+    },
+    {
+      "at": "2026-11-25T09:31:02.243Z",
+      "field": "lines",
+      "from": 14732,
+      "to": 14736,
+      "reason": "S3: 4 个体内声明(isSteeringOnly/validateAppendIsLifecycleSafe/openStepOf/continuationTitle)提升到模块级——顶层 181→185、嵌套 9→5。这是唯一一次方向正确的增长：它们从「不可 import」变成「可搬」。"
+    },
+    {
+      "at": "2026-11-25T09:31:02.243Z",
+      "field": "functions",
+      "from": 181,
+      "to": 185,
+      "reason": "S3: 4 个体内声明(isSteeringOnly/validateAppendIsLifecycleSafe/openStepOf/continuationTitle)提升到模块级——顶层 181→185、嵌套 9→5。这是唯一一次方向正确的增长：它们从「不可 import」变成「可搬」。"
     }
   ]
 }

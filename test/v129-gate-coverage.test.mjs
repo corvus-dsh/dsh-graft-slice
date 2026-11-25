@@ -45,6 +45,12 @@ const EXEMPT = new Map([
   ['closure.mjs', 'needs the TypeScript compiler, which this package does not depend on; it exits 2 by design in CI'],
   ['verify-pure-move.mjs', 'compares the working tree to a git ref, which is IDENTICAL by construction in CI; its --self-test is run locally'],
   /**
+   * S0：唯一的编译器加载器。它是**库**，不是可执行步骤 —— 直接跑它什么也不做（没有 CLI 入口），
+   * 所以既不能当 CI 步骤，也没有自己的断言可跑。它的正确性由 `v348` 在 `node --test` 里断言
+   * （那是 CI 步骤）：两个脚本用的是同一个解析器、且没有第二处 `import('typescript')`。
+   */
+  ['ts-compiler.mjs', 'library: exports the one compiler resolver used by closure.mjs and index-ratchet.mjs; it has no CLI entry, and v348 asserts its behaviour inside node --test'],
+  /**
    * Phase A 的两个 GENERATOR：它们的默认模式**写文件**，在 CI 里跑就等于让流水线改仓库。
    * 它们的断言不因此缺席 —— `v325` / `v326` 在 `node --test`（= CI 步骤）里跑同一个脚本，
    * 后者会用 `--check`。所以「未登记」与「投影过期」在 CI 上仍然会红。
@@ -171,6 +177,14 @@ const KINDS = new Map([
   ['handler-inventory.mjs', 'INSTRUMENT'],
   ['emit-taxonomy.mjs', 'INSTRUMENT'],
   ['index-ratchet.mjs', 'INSTRUMENT'],
+  /**
+   * ── S0：**唯一**的编译器加载器 ────────────────────────────────────────────────────────────────
+   *
+   * 它不自己断言任何东西：它是一个库，`closure.mjs` 与 `index-ratchet.mjs` 都从它取编译器。
+   * 分类为 INSTRUMENT 的理由是「它是量具的一部分，不是门禁」——而它必须存在，正是为了让两把尺
+   * 变回一把（`v348` 断言没有第二个 `import('typescript')` 解析器）。
+   */
+  ['ts-compiler.mjs', 'INSTRUMENT'],
   ['ci-fresh-clone.mjs', 'INSTRUMENT'],
   /**
    * B4-A 的「依赖为空门禁」。它是 **GATE**（`dependencies` 非空 ⇒ exit 1），并且必须在 `ci.yml` 里
@@ -251,6 +265,12 @@ const NOT_A_CI_STEP = new Map([
    * 所以它不需要再作为独立 CI 步骤登记 —— 再登记一次只会让同一个断言在两个地方各跑一遍。
    */
   ['index-ratchet.mjs', 'asserting instrument whose criteria v327 already runs inside node --test (the last step of npm run check and a CI step); a separate CI step would run the same assertion twice'],
+  /**
+   * S0：**唯一的**编译器解析器。它是库而不是步骤（没有 CLI 入口，直接跑它什么也不做），
+   * 所以「是不是 CI 步骤」这个问题对它没有意义。它的行为由 `v348` 在 `node --test` 里断言
+   * —— 包括「没有第二个解析器」这一条，而那正是它存在的全部理由。
+   */
+  ['ts-compiler.mjs', 'library: the one compiler resolver, imported by closure.mjs and index-ratchet.mjs. No CLI entry, so it cannot be a step; v348 asserts it inside node --test (which IS a CI step)'],
   /**
    * 本地 CI 代理：**clone + install + check**。它在 CI 里跑没有意义（CI 本身就是全新环境），
    * 而它会写临时目录、需要网络装依赖。它的用途是**在 CI 看不见时**抓「只在本地成立」的失败。
