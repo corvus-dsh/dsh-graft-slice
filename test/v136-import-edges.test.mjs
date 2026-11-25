@@ -165,6 +165,32 @@ test('v136: a move may not add a dependency between two PRE-EXISTING modules', (
   const brandNew = addedPairs.filter((pair) => !removedPairs.includes(pair))
 
   /**
+   * ── INTENTIONAL WIRING, DECLARED BY NAME (added 2026-11-25, S7) ────────────────────────────────
+   *
+   * This rule is about MOVES. S7 is not a move: it is the deliberate wiring of a module that had ZERO
+   * production callers (`core/content-classifier.ts`, 296 lines, every D1–D5 discipline enforced only by
+   * its own tests). A wiring commit is SUPPOSED to add a dependency between two pre-existing modules —
+   * that is what "reach the production path" means.
+   *
+   * So this is not the rule being loosened for everyone: it is a named list of edges whose ADDITION is
+   * the point of a declared commit. Each entry must be re-justified, because the list is the only place
+   * where "I meant to add a dependency" is recorded. The alternative — deleting the rule, or marking the
+   * edge as "repaired" — would be a lie about what happened.
+   *
+   * Measured need: `core/goal-extraction.ts -> ./content-classifier` was reported as
+   * 「a NEW dependency between two PRE-EXISTING modules」 on the S7 commit, and it IS one.
+   */
+  /**
+   * Keys are exactly what `verify-import-edges` prints: `from` is repo-relative-to-`src`, `to` is the
+   * RAW specifier. Measured: writing `src/core/goal-extraction.ts -> ./content-classifier` (with a `src/`
+   * prefix) matched nothing, because the reporter omits it.
+   */
+  const DECLARED_WIRING = new Set([
+    'core/goal-extraction.ts -> ./content-classifier',
+    'index.ts -> ./core/content-classifier',
+  ])
+
+  /**
    * Symbols named on each added edge, so a "repaired" edge can be told from a new one.
    * `verify-import-edges` prints them: `  + src/core/host-shape.ts -> ../utils/serialize [a,b]`.
    */
@@ -202,8 +228,7 @@ test('v136: a move may not add a dependency between two PRE-EXISTING modules', (
 
   for (const pair of brandNew) {
     const [from, to] = pair.split(' -> ')
-    const fromStem = from.replace(/^src\//u, '').replace(/\.ts$/u, '')
-    /**
+    const fromStem = from.replace(/^src\//u, '').replace(/\.ts$/u, '')    /**
      * Resolve the specifier against the importer's directory before comparing it to a created stem.
      *
      * `verify-import-edges` prints the RAW SPECIFIER on the `to` side (`./ledger-restore`,
@@ -218,6 +243,8 @@ test('v136: a move may not add a dependency between two PRE-EXISTING modules', (
       .normalize(posix.join(posix.dirname(fromStem), to))
       .replace(/\.(?:d\.)?(?:ts|mts|cts|js|mjs|cjs)$/u, '')
     if (createdStems.has(toStem) || createdStems.has(fromStem)) continue
+    /** Declared intentional wiring (see `DECLARED_WIRING` above) — the pair itself must be listed. */
+    if (DECLARED_WIRING.has(pair) || DECLARED_WIRING.has(`${from} -> ${to}`)) continue
 
     /**
      * The file that holds the import statement is the `from` side.

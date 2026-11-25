@@ -268,8 +268,18 @@ test('v138: B is the UNION of member closures, not the largest one', (t) => {
    * That is the set step 4 is supposed to move as a unit, which is why step 4 can be a one-sentence
    * cluster while the original 14-member blob could not.
    */
+  /**
+   * ── 2026-11-25（S7 / N8）：277 → **306**，声明数仍是 5 ────────────────────────────────────────
+   *
+   * D2 把「转述不是需求」接进了这个函数：`classifyHumanText` 的调用、`humanNature` 的声明、
+   * `newestSubstantive` 里的那一跳，以及「整份日志里没有一句人写的话」时的指针分支。
+   * **闭包多了 29 行、没有多一个声明** —— 因为它只引用本文件里已经存在的东西，外加一个 import。
+   *
+   * 这正是这条判据该被改的时刻：它钉的是「搬移之后闭包比原来小」，而不是「永远是 277」。
+   * 台阶序列（341 → 322 → 283 → 277）仍然成立，只是这一步的终点前移了 29 行。
+   */
   const single = gateJson('extractGoal')
-  assert.equal(single.B.measured.closureLines, 277, 'extractGoal after steps 1, 2 and 3')
+  assert.equal(single.B.measured.closureLines, 306, 'extractGoal after steps 1, 2 and 3 + the S7/N8 D2 wiring')
   assert.equal(single.B.measured.declarations, 5, '14 members originally, 5 after three steps')
 
   const gateSource = readFileSync(GATE, 'utf8')

@@ -95,6 +95,76 @@ import {
   shouldNudge,
 } from './core/nudge-margin.js'
 import type { ForcedCutFacts, GrowthPrediction, NudgeSample, WarnMarginDerivation } from './core/nudge-margin.js'
+/**
+ * ── N8 (S7): the content classifier reaches the production path ─────────────────────────────────
+ *
+ * Until S7 this module was 296 lines with **zero imports in `src/`** — every one of the five D1–D5
+ * disciplines was enforced only by tests of the classifier itself, which is to say not enforced at all.
+ * The three importers below are the ingestion points each discipline belongs to:
+ *
+ *   · `classifyBySource`  → D1 (an injection is not a human instruction)
+ *   · `summarizeUnclassified` / `UNCLASSIFIED_WARNING` → D5 (a new kind must be visible)
+ *   · `continuationOf` / `POINTER_KINDS` → D3 (an async result keeps a pointer, never the body)
+ */
+import {
+  CONTENT_CLASSES,
+  classifyBySource,
+  summarizeUnclassified,
+} from './core/content-classifier.js'
+import type { ContentClass, Continuation } from './core/content-classifier.js'
+
+/**
+ * ── D3: 每一类内容在交接里怎么处置（表在合同里，这里只是查表）─────────────────────────────────
+ *
+ * `async-result` / `peer-message` 的 `continuation` 是 `pointer+first-line`：**留指针与首句**，
+ * 不整段搬运，也不整段丢弃。表的唯一所有者是 `content-classifier.ts` 的 `CONTENT_CLASSES`（它又由
+ * `src/contracts/content-taxonomy.v1.ts` 派生），所以这里不写第二份映射。
+ */
+const continuationOfClass = (cls: ContentClass): Continuation =>
+  CONTENT_CLASSES.find((entry) => entry.id === cls)?.continuation ?? 'drop'
+
+/**
+ * ── D3 的产出形状：`{ kind, seq, 首句 }` ─────────────────────────────────────────────────────────
+ *
+ * 系统提示词里写的是 `{kind, seq, 首句}`，这三个字段就是判据要断言的全部。`firstLine` 必须来自
+ * 正文的第一行，且必须**有长度上限** —— 首句不是「整段的第一段」。
+ */
+export interface AsyncResultPointer {
+  readonly kind: string
+  readonly seq: number
+  readonly firstLine: string
+}
+
+const FIRST_LINE_MAX_CHARS = 160
+
+/**
+ * ── D3 (N8): 异步结果必须留指针 ────────────────────────────────────────────────────────────────
+ *
+ * 子智能体结算、后台作业完成、同伴消息都是以 `user/message` 落进日志的（19 种 kind 里对应
+ * `async-result` / `peer-message`）。旧行为是把它们**整段**带进交接，或者在后处理里被当成噪音整段
+ * 丢掉。两者都不对：前者的代价是窗口，后者的代价是**目标不知道自己还欠着一件已完成的事**。
+ *
+ * 所以出口是 `{kind, seq, firstLine}`：足够让目标知道「这件事发生了」，也足够让它用一次
+ * `graft_read_result` 读回全文。
+ */
+export function extractAsyncResultPointers(events: readonly SessionEventLike[]): AsyncResultPointer[] {
+  const pointers: AsyncResultPointer[] = []
+  for (const event of events) {
+    if (event.type !== 'user/message') continue
+    const kind = event.data?.source?.kind
+    const classified = classifyBySource(kind)
+    if (continuationOfClass(classified.cls) !== 'pointer+first-line') continue
+    const text = textOfMessage(event.data).trim()
+    if (text.length === 0) continue
+    const firstLine = text.split(/\r?\n/u).map((line) => line.trim()).find((line) => line.length > 0) ?? ''
+    pointers.push({
+      kind: typeof kind === 'string' ? kind : '(no source.kind)',
+      seq: Number(event.seq),
+      firstLine: truncateEnd(firstLine, FIRST_LINE_MAX_CHARS).text,
+    })
+  }
+  return pointers
+}
 export {
   calculateSafeWatermark,
   deriveAutoTapeBudget,
@@ -752,6 +822,16 @@ export interface GraftPlan {
   pointerCount: number
   olderPointerCount: number
   olderToolNames: string[]
+  /**
+   * ── S7 / N8: the two numbers and the pointer list the disciplines produce ─────────────────────────
+   *
+   * `noiseDropped`      D4 — how many host-noise段落 this plan replaced (0 is a reading, not a gap)
+   * `unclassifiedKinds` D5 — every unregistered `source.kind` seen in the source log
+   * `asyncResultPointers` D3 — `{kind, seq, firstLine}` for each async result / peer message
+   */
+  noiseDropped: number
+  unclassifiedKinds: string[]
+  asyncResultPointers: AsyncResultPointer[]
   constraints: string[]
   constraintSource: 'llm' | 'regex-fallback'
   /**
@@ -1843,6 +1923,27 @@ export function extractConstraintsDetailed(
     // not the same as trusting a replay as user intent (that is P5, and it is
     // handled where replays are assembled, not here).
     if (isGraftAuthored(event.data?.source)) {
+      /**
+       * ── D1 (N8): 不许把注入当人类指令 ─────────────────────────────────────────────────────────
+       *
+       * 继承上一代记录的约束块**是允许的**（见上面的 v7.0 注释）。但先问一句：这条消息的
+       * `source.kind` 究竟是什么？如果 `classifyBySource` 说它不是 self-authored 的家系，那么
+       * 「这是我上一代写下的规则」这个前提本身就不成立 —— 那是**别人**塞进 user 壳的内容。
+       *
+       * 这条判据放在 `isGraftAuthored` 之内，不是之外：只有我们**自己**写的块才有资格被当成
+       * 规则继承；别的来源（含未登记 kind）在这里被显式记进 `droppedByShape`，不是静默跳过。
+       */
+      const graftClass = classifyBySource(event.data?.source?.kind)
+      if (graftClass.provenance !== 'self') {
+        droppedByShape.push({
+          text: `[D1] user/message seq ${String(event.seq)} 的 source.kind=${String(event.data?.source?.kind)} `
+            + `被判为 ${graftClass.cls}/${graftClass.provenance}，不是本插件自己写的；其中的约束块不得被继承为规则`,
+          code: 'D1_NOT_SELF',
+          why: 'D1：注入不是人类指令，也不是本插件写下的规则',
+          stage: 'inherit',
+        })
+        continue
+      }
       const recorded = constraintBlockOf(textOfMessage(event.data))
       if (recorded.length > 0) {
         for (const constraint of recorded) {
@@ -4730,6 +4831,21 @@ export function buildInjectionPlan(
     }
   }
 
+  /**
+   * ── D5 (N8): 未登记 kind 的聚合。**声明在这里、使用在下面**（两者中间隔着噪声清理）───────
+   *
+   * 第一版把「算数字 + push warning」整段写在这里，而 `noiseDropped` 在下面才声明 —— 构建通过、
+   * 运行时 `ReferenceError: Cannot access 'noiseDropped' before initialization`。
+   * `build.mjs` 用 `stripTypeScriptTypes`（纯擦除，不做检查），所以这类错误**只有运行时才现形**。
+   * 修法是**整块下移**（长期规则 29：依赖是链，不是一跳），不是把一个名字往上挪。
+   */
+  const unclassifiedKinds = summarizeUnclassified(
+    events
+      .filter((event) => event.type === 'user/message')
+      .map((event) => ({ source: event.data?.source })),
+  )
+
+
   // v7.0 P1: whatever the two budget passes removed must be declared.
   // The single-turn pass and the total-budget pass drop turns for different
   // reasons, but the reader only needs one answer: which turns are missing and
@@ -4781,7 +4897,41 @@ export function buildInjectionPlan(
   // enter by a path someone forgot to wrap. Patching each builder would have
   // guaranteed that the next builder forgets.
   const cleanedChunks = chunks.map((chunk) => ({ ...chunk, text: stripHostNoise(chunk.text, cwd) }))
+  /**
+   * ── D4 (N8): 噪音要记数，不许静默 ────────────────────────────────────────────────────────────
+   *
+   * `stripHostNoise` 把命中的段落替换成两个标记之一。**替换本身是正确的**（那段路径确实不该进磁带），
+   * 但它悄悄改变了目标看到的世界：目标不知道自己少看了 N 段。所以在这里数一次，并把数字带进交接。
+   *
+   * 判据是「被替换掉的段落数 > 0 时必须出现这个数字」，不是「必须出现某一句话」—— 数字来自实测。
+   */
+  const noiseDropped = cleanedChunks.reduce((total, chunk) => {
+    const host = chunk.text.split(HOST_NOISE_MARKER).length - 1
+    const folded = chunk.text.split(FOLDED_OUTPUT_MARKER).length - 1
+    return total + host + folded
+  }, 0)
   const filtered = cleanedChunks.filter((chunk) => chunk.text.length > 0)
+  /**
+   * ── D4 / D5 (N8): 两个数字必须被说出来 ───────────────────────────────────────────────────────
+   *
+   * ⚠️ 位置是承重的：这一段必须在 `const noiseDropped = …` **之后**。第一版把它写在上面（预算处理
+   * 那段附近），而 `noiseDropped` 在下面才声明 —— TypeScript 只在 tsc 里报 TDZ，而 `build.mjs` 用的是
+   * `stripTypeScriptTypes`（纯类型擦除，**不做检查**），于是构建 exit 0、运行时
+   * `ReferenceError: Cannot access 'noiseDropped' before initialization`。
+   * 与本仓长期规则 29（「上移一个」vs「上移整块」）是同一个坑：依赖是一条链，不是一跳。
+   *
+   * 只在实际发生时写：0 段噪音不写一行「丢弃了 0 段」（那是噪音里的噪音），但产物里**仍然**保留
+   * `noiseDropped: 0` —— 想核对的人读得到读数，不想读的人不会被一句废话打断。
+   */
+  if (noiseDropped > 0) {
+    warnings.push(`宿主环境噪音：本次交接替换掉 ${noiseDropped} 段（占位标记见 tape 原文）`)
+  }
+  if (unclassifiedKinds.length > 0) {
+    warnings.push(
+      `未登记的 source.kind：${unclassifiedKinds.join(', ')}`
+      + ' —— 它们被归入 host-noise 处理，但这里显形（D5：新 kind 不得静默丢弃）',
+    )
+  }
   // v0.14: the chain depth of the target this plan will create. Read from the
   // source's own mark, so generation 3 stays generation 3 across a restart.
   const sourceId = typeof (log as any)?.session?.id === 'string' ? String((log as any).session.id) : ''
@@ -4812,6 +4962,29 @@ export function buildInjectionPlan(
     pointerCount: tape.pointerCount,
     olderPointerCount,
     olderToolNames: [...olderToolNames],
+    /**
+     * ── D3 (N8): 异步结果留指针，不搬正文、也不整段丢掉 ──────────────────────────────────────────
+     *
+     * 子智能体结算 / 后台作业完成 / 同伴消息都是 `user/message`，kind 让分类器认出它们属于
+     * `async-result` / `peer-message`（`continuation: 'pointer+first-line'`）。产物里带的是
+     * `{kind, seq, firstLine}` 三条，正文留在日志里等一次 `graft_read_result`。
+     *
+     * 空数组也保留：那是一个读数（「这件事本会话没发生过」），不是缺字段。
+     */
+    asyncResultPointers: extractAsyncResultPointers(log.events),
+    /**
+     * ── D4 + D5 的两个数字，随交接一起走 ────────────────────────────────────────────────────────
+     *
+     * `noiseDropped`：本计划从产物里替换掉了几段宿主噪音（0 也写出来，因为「0」是一个读数）。
+     * `unclassifiedKinds`：本会话出现了哪些**未登记**的 `source.kind`（D5）——空数组表示全都认识。
+     * 两者都由 `bot` 渲染进 warning；判据断言「有值就必须被说出来」，而不是断言某一句话。
+     */
+    noiseDropped,
+    unclassifiedKinds: summarizeUnclassified(
+      log.events
+        .filter((event) => event.type === 'user/message')
+        .map((event) => ({ source: event.data?.source })),
+    ),
     constraints,
     constraintSource,
     constraintIntegrity: {

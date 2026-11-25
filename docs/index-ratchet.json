@@ -1,6 +1,6 @@
 {
-  "lines": 14151,
-  "functions": 175,
+  "lines": 14324,
+  "functions": 176,
   "nested": 5,
   "history": [
     {
@@ -137,6 +137,20 @@
       "field": "functions",
       "from": 176,
       "to": 175
+    },
+    {
+      "at": "2026-11-25T12:26:11.066Z",
+      "field": "lines",
+      "from": 14151,
+      "to": 14324,
+      "reason": "S7/N8: D1-D5 接线进 content-classifier —— 生产路径新增五条纪律的判据与三个产物字段（import 2 块、GraftPlan 3 字段、D4 计数、D5 聚合、D3 指针函数 + 类型）；这是一次功能接线，不是搬动，行数因此上升"
+    },
+    {
+      "at": "2026-11-25T12:26:11.066Z",
+      "field": "functions",
+      "from": 175,
+      "to": 176,
+      "reason": "S7/N8: D1-D5 接线进 content-classifier —— 生产路径新增五条纪律的判据与三个产物字段（import 2 块、GraftPlan 3 字段、D4 计数、D5 聚合、D3 指针函数 + 类型）；这是一次功能接线，不是搬动，行数因此上升"
     }
   ]
 }

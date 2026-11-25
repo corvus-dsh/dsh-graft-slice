@@ -5,6 +5,16 @@ import { isRecord, truncateEnd } from '../utils/serialize.js'
 import { textOfMessage } from './watermark.js'
 import type { GraftTape } from './tape-shape.js'
 import { SessionEventLike } from './watermark.js'
+/**
+ * ── N8 / D2: 转述不是需求 ────────────────────────────────────────────────────────────────────────
+ *
+ * `classifyHumanText` 回答的是「这堆字是谁写的」，与「壳是不是 user」是两件事。Q1 的原始事故：
+ * 用户**粘贴**进来的一份报告被渲染成「原始用户要求」，于是目标去回答一份它从没被问过的问题。
+ *
+ * 这条依赖是单向的：`content-classifier` 零 import（它自己的头注释第 3 条要求如此），所以从这里
+ * import 它不会成环。
+ */
+import { classifyHumanText } from './content-classifier.js'
 
 export interface GoalResult {
   goal: string
@@ -132,6 +142,19 @@ export function extractGoal(events: readonly SessionEventLike[], dagText?: strin
     (event) => event.type === 'user/message' && event.data?.source?.kind === 'user' && textOfMessage(event.data).length > 0,
   )
 
+  /**
+   * ── D2: 「转述不是需求」——粘贴进来的报告不得被渲染成「原始用户要求」────────────────────────────
+   *
+   * ⚠️ 声明位置是承重的：`newestSubstantive()` 在 layer 1 的冲突判定里被调用，而它在文件的**下面**；
+   * 第一版把这一行放在 `newestSubstantive` 旁边，于是 `Cannot access 'humanNature' before initialization`
+   * —— 与本文件头注释里记的 `humans` / `substantive` / `splitByShape` 是**同一个** TDZ 坑的第 4 次。
+   * 修法照长期规则 29：**整块上移到第一个使用者之前**，不是把调用点挪来挪去。
+   *
+   * 判定本身不在这里：`classifyHumanText` 已把「800 字以上 + 『以下是…报告』/『请你分析…』+ 报告结构」
+   * 写进四条判据，并由 `v219` 用 19 种 kind 的夹具驱动。这里只是把它接到「谁是需求」的选取上。
+   */
+  const humanNature = (text: string): 'human' | 'task-transcript' | 'legacy-injection' => classifyHumanText(text)
+
   const declared = objectiveOf(events)
   if (declared !== undefined) {
     /**
@@ -247,6 +270,8 @@ export function extractGoal(events: readonly SessionEventLike[], dagText?: strin
       if (isGraftAuthored(event.data?.source)) continue
       const text = textOfMessage(event.data)
       if (!substantive(text)) continue
+      /** D2: 转述不是需求 —— 它不能被当作「用户改变了方向」。 */
+      if (humanNature(text) !== 'human') continue
       const seq = Number(event.seq)
       return Number.isSafeInteger(seq) ? { text: normalizeText(text), seq } : { text: normalizeText(text) }
     }
@@ -269,13 +294,27 @@ export function extractGoal(events: readonly SessionEventLike[], dagText?: strin
       ...(newestSeq === undefined ? {} : { sourceSeq: newestSeq }),
     }
   }
-  const human = humans[0]
+  const human = humans.find((event) => humanNature(textOfMessage(event.data)) === 'human')
   if (human) {
     return { goal: truncateEnd(normalizeText(textOfMessage(human.data)), 4000).text, source: 'user', goalLayer: 'transcript' }
   }
-  const anyUser = events.find((event) => event.type === 'user/message' && textOfMessage(event.data).length > 0)
-  if (anyUser) {
-    return { goal: truncateEnd(normalizeText(textOfMessage(anyUser.data)), 4000).text, source: 'fallback-user', goalLayer: 'transcript' }
+  /**
+   * ── D2 的最后一段：只剩转述/假 user 时，不要说「用户要求」────────────────────────────────────
+   *
+   * 走到这里意味着整份日志里**没有一句人写的话**。旧代码会退到「第一条有内容的 user/message」——
+   * 而那正好是粘贴的报告或宿主注入。答案应该是**指针**：`sourceSeq` 加上一句说明，让目标知道
+   * 「这里只有材料，没有需求」，而不是拿材料冒充需求。
+   */
+  const transcriptOnly = events.find((event) => event.type === 'user/message' && textOfMessage(event.data).length > 0)
+  if (transcriptOnly) {
+    const seq = Number(transcriptOnly.seq)
+    return {
+      goal: '（本次迁移的来源会话里没有人类写的需求；最早的 user/message 是转述或宿主注入，'
+        + `正文在 seq ${Number.isSafeInteger(seq) ? seq : '?'}，需要时用 graft_read_result 读回）`,
+      source: 'transcript-pointer',
+      goalLayer: 'transcript',
+      ...(Number.isSafeInteger(seq) ? { sourceSeq: seq } : {}),
+    }
   }
   const assistant = events.find((event) => event.type === 'assistant/message' && textOfMessage(event.data?.message).length > 0)
   if (assistant) {

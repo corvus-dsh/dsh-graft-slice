@@ -32,7 +32,7 @@ export interface GraftTape {
   sourceTemplate: GraftSource
   turns: GraftTapeTurn[]
   goal: string
-  goalSource: 'user' | 'fallback-user' | 'assistant' | 'placeholder'
+  goalSource: 'user' | 'fallback-user' | 'assistant' | 'placeholder' | 'transcript-pointer'
   phase: string
   pendingStateText: string
   pointerCount: number
