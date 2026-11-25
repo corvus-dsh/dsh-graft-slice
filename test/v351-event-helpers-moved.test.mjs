@@ -53,12 +53,30 @@ test('v351 ③ (negative half): every line in the new module came from the moved
    * one of them a body line of a moved function). It has to be checked against the tree the move STARTED
    * from, which is what `verify-pure-move --against HEAD` uses too.
    *
-   * So the comparison set is `git show HEAD:src/index.ts` — the committed pre-move source. That makes the
-   * assertion the same fact `verify-pure-move` prints as `IDENTICAL`, expressed as "no line is new"
-   * rather than "the multiset size is equal": two different readings of one property, and this one names
-   * the offending line when it fails.
+   * ── Why this is NOT `HEAD` (measured 2026-11-25, S4's own commit) ────────────────────────────────
+   *
+   * The first version read `git show HEAD:src/index.ts`. It was correct for exactly as long as the move
+   * was uncommitted, and became **the opposite of correct** the moment S4 was committed: HEAD then IS the
+   * post-move tree, so every moved line "appeared" and the criterion reddened on the very commit it was
+   * written to accept. A baseline named by a moving pointer is not a baseline.
+   *
+   * So the revision is DERIVED from the history of the module itself: the parent of the commit that
+   * ADDED it. That is the tree the move started from, by construction, and it stays correct after the
+   * commit, after a rebase, and for the next module moved the same way. Before the module is committed
+   * (the move is still in the working tree) git reports no adding commit, and `HEAD` is that tree.
+   *
+   * That makes the assertion the same fact `verify-pure-move` prints as `IDENTICAL`, expressed as "no
+   * line is new" rather than "the multiset size is equal": two readings of one property, and this one
+   * names the offending line when it fails.
    */
-  const before = execFileSync('git', ['show', 'HEAD:src/index.ts'], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
+  const addingCommits = execFileSync(
+    'git',
+    ['log', '--diff-filter=A', '--format=%H', '--', 'src/registration/event-helpers.ts'],
+    { cwd: ROOT, encoding: 'utf8' },
+  ).split('\n').map((line) => line.trim()).filter((line) => line.length > 0)
+  const introducing = addingCommits.pop()
+  const baselineRev = introducing === undefined ? 'HEAD' : `${introducing}^`
+  const before = execFileSync('git', ['show', `${baselineRev}:src/index.ts`], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })
   const beforeCount = new Map()
   for (const line of before.split('\n').map((text) => text.trimEnd())) {
     beforeCount.set(line, (beforeCount.get(line) ?? 0) + 1)
@@ -96,7 +114,7 @@ test('v351 ③ (negative half): every line in the new module came from the moved
   }
 
   assert.deepEqual(appeared, [],
-    `③ 这些行在新模块里出现，但 HEAD 的 index.ts 里没有（＝新增内容，不是搬动）：\n  ${appeared.slice(0, 10).join('\n  ')}`)
+    `③ 这些行在新模块里出现，但 ${baselineRev} 的 index.ts 里没有（＝新增内容，不是搬动）：\n  ${appeared.slice(0, 10).join('\n  ')}`)
 })
 
 test('v351 ④: the module has behaviour tests of its own', () => {
