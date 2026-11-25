@@ -96,6 +96,7 @@
     "estimateTokensFromText",
     "evaluateCommandPolicy",
     "extractActiveGoalChange",
+    "extractAsyncResultPointers",
     "extractAttachmentPointers",
     "extractConstraints",
     "extractConstraintsDetailed",
@@ -224,6 +225,6 @@
     "writeLayoutManifest",
     "writeManualConstraints"
   ],
-  "count": 223,
-  "note": "baseline updated by a declared [export-change] (COMMIT 7567a2a \"S4：把 S3 提升的 4 个单元搬进 registration/event-helpers.ts（纯移动 IDENTICAL）[export-change]\" (tree clean over src, index.js))"
+  "count": 224,
+  "note": "baseline updated by a declared [export-change] (COMMIT 1bd4d1a \"S7 / N8：内容分类器接上生产路径 + D1–D5 五条纪律各一条判据 [export-change]\" (tree clean over src, index.js))"
 }
