@@ -1,12 +1,17 @@
 /**
  * ── v352：`event-helpers` 的**行为** ──────────────────────────────────────────────────────────────
  *
- * 这是「拆完就能单独测这个模块」的兑现。**加载方式说明**：本仓的测试一律 `import … from '../index.js'`
- * （构建产物），因为 Node 不能直接跑 `.ts` —— 实测过 `../src/registration/event-helpers.js` 会
- * `ERR_MODULE_NOT_FOUND`。所以这里也走 bundle。
+ * 这是「拆完就能单独测这个模块」的兑现。**加载方式说明（2026-11-25 更正）**：本文件的 v1 版走
+ * `import … from '../index.js'`（构建产物），理由是「Node 不能直接跑 `.ts`」——那句话**是错的**。
+ * Node 24 本身支持执行 `.ts`（`process.features.typescript === 'strip'`），当时实测到的
+ * `ERR_MODULE_NOT_FOUND` 是**解析**失败：源码里的相对 import 写成 `./x.js`，磁盘上是 `x.ts`。
+ * `test/source-module.mjs` 一条 resolve 钩子补上这一跳，于是本文件现在直接 import **模块本身**。
  *
- * 「不依赖 index.ts」这条**由 `v351 ②` 保证**（新模块 import 为零），而不是由本文件的 import 路径保证：
- * 一个模块能不能独立运行，取决于它 import 什么，不取决于测试怎么加载它。
+ * ── 为什么要换成源码 ─────────────────────────────────────────────────────────────────────────────
+ *
+ * 构建产物把 42 个模块内联进**一个作用域**：在那里，「模块边界」已经不存在了。用产物测，测到的是
+ * 整个插件，不是这个模块；「搬动是否真的把依赖断开」在那一层根本看不出来。**独立性由 import 什么
+ * 决定**（`v351 ②` 仍然管这一条），但**能不能测**由加载方式决定——两者都要对。
  *
  * ── 这些值是**读实现读出来的**，不是猜的 ────────────────────────────────────────────────────────
  *
@@ -17,12 +22,16 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {
+import { registerSourceModules } from './source-module.mjs'
+
+registerSourceModules()
+
+const {
   continuationTitle,
   isSteeringOnly,
   openStepOf,
   validateAppendIsLifecycleSafe,
-} from '../index.js'
+} = await import('../src/registration/event-helpers.ts')
 
 test('v352 isSteeringOnly: short acknowledgements are steering, anything substantive is not', () => {
   /** Real corpus shapes this function was written for. */

@@ -20,7 +20,8 @@
  * 判据：
  *   ① 抽查 17 个单元的跨度必须与编译器一致（正是旧量具错的那批）
  *   ② **负向** 合成源码：参数里塞对象类型字面量 ⇒ 花括号口径必然错、编译器口径必然对
- *   ③**负向** 顶层 = 181、嵌套 = 9；数字变了要人审，不允许自动跟随
+ *   ③**负向** 体内声明必须恰好是那五个**名字**（人审过）；顶层数与 manifest 必须由两套独立实现给出同一个值。
+ *      绝对顶层数已经不再钉常数——它随每次合法搬动改变，钉它会让判据在正确的工作上变红（见 ③ 的函数体注释）
  *   ④ **负向** 无编译器 ⇒ `exit 2` 且打印 `VACUOUS`，绝不 `exit 0`、绝不静默回退
  */
 import test from 'node:test'
@@ -146,36 +147,55 @@ test('v348 ② (negative half): an object literal in the parameter list breaks t
     '两种口径必须给出不同答案——这正是本判据存在的理由')
 })
 
-test('v348 ③ (negative half): top-level = 181 and nested = 5 — a change to either is a human decision', () => {
+test('v348 ③ (negative half): the compiler sees EXACTLY these five nested declarations, and the two rulers agree', () => {
   /**
-   * Not `assert(measured === manifest.measured)`: that would compare the instrument with itself. The
-   * numbers are pinned HERE, so a refactor that changes them has to come through this file and say why.
+   * ── What is pinned here, and what is no longer ──────────────────────────────────────────────────
+   *
+   * The instrument's defect was a RULER defect in two halves, and both are still pinned:
+   *
+   *   (a) the declarations that need `apply()`'s scope are named EXACTLY. If the ruler starts calling
+   *       one of them top-level again (the brace counter's 190), `nested` loses it and the list changes;
+   *   (b) the test's own compiler walk must agree with the script's manifest — two implementations, one
+   *       number. Comparing the manifest with itself would prove nothing, which is why ① exists too.
+   *
+   * ── Why the absolute top-level count is NOT pinned any more (2026-11-25, S5) ────────────────────
+   *
+   * It was pinned through S3 (185) and S4 (181), and every edit was a legitimate 段一 step, not a ruler
+   * change — the pin was reddening on correct work. That is exactly what `v349 ②` documents:
+   * 「钉常数会让判据在每次正确的搬动后变红，而人是会把它改宽的」.
+   *
+   * The number that carries the HUMAN decision is the nested list: moving a unit out of the file does
+   * not answer "may this declaration leave `apply()`?", while promoting one does. So that list is
+   * pinned by name, and the top count is checked as an agreement between two independent rulers.
+   *
+   * History: 181 / 9 (first compiler measurement) → 185 / 5 (S3 promoted four) → 181 / 5 (S4 moved them
+   * out) → 180 / 5 (S5 moved the first cluster out). The old brace ruler said 190 / 0.
    */
   const functions = measureWithCompiler(readFileSync(SOURCE, 'utf8'), SOURCE)
   const top = functions.filter((fn) => fn.top)
   const nested = functions.filter((fn) => !fn.top)
 
-  /**
-   * 2026-11-25（S3）：181 / 9 → **185 / 5**。4 个零外部依赖的体内声明被提升到模块级 —— 那是唯一一次
-   * 方向正确的增长（它们从「不可 import」变成「可搬」），并且是**人审过的决定**，不是自动跟随。
-   * 这条判据因此必须被改：它钉的是「数字变了要人来看」，而这次人来了、看了、改了。
-   *
-   * 2026-11-25（S4）：185 / 5 → **181 / 5**。S3 提升的那 4 个**搬出了 index.ts**
-   * （`registration/event-helpers.ts`），所以它们不再计入**这个文件**的顶层数；嵌套数不变。
-   * 判据钉的仍是同一件事：数字再变一次要人来 —— 搬走第 5 个、或再提升一个，都会红。
-   */
-  assert.equal(top.length, 181, `顶层函数 = 181（实测 ${top.length}）—— 变了要人审：` +
-    `S3 之后是 185；S3 之前是 181；旧量具把体内声明算成顶层时是 190`)
-  assert.equal(nested.length, 5, `体内声明 = 5（实测 ${nested.length}）—— S3 之前是 9`)
+  const NESTED = [
+    'refineConstraintsInBackground',
+    'captureDraft',
+    'takeDraftMerge',
+    'takePendingConstraintMessages',
+    'appendTransitionCard',
+  ]
+  assert.deepEqual(nested.map((fn) => fn.name).sort(), [...NESTED].sort(),
+    `体内声明必须恰好是这五个（实测 ${nested.map((fn) => fn.name).join(', ')}）` +
+    '—— 提升一个、或把某个塞回体内，都要人来看')
 
   const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))
-  assert.equal(manifest.measured.functions, 181, 'manifest 的 measured.functions 必须是顶层数（S4 之后 181）')
+  assert.equal(top.length, manifest.measured.functions,
+    `两条独立实现必须给出同一个顶层数：测试的编译器遍历 ${top.length} vs 脚本 ${manifest.measured.functions}`)
   assert.equal(manifest.measured.nested, 5, 'manifest 必须登记嵌套数，否则顶层数说明不了自己排除了什么')
-  assert.equal(manifest.units.filter((unit) => unit.top).length, 181, '清单里 top=true 的必须是 181 条')
+  assert.equal(manifest.units.filter((unit) => unit.top).length, top.length,
+    '清单里 top=true 的条数必须等于实测顶层数')
   assert.equal(manifest.units.filter((unit) => !unit.top).length, 5, '清单里 top=false 的必须是 5 条')
   /** The nested ones must say so in their own line — a reader must not have to infer it from `top`. */
   for (const unit of manifest.units.filter((candidate) => !candidate.top)) {
-    assert.match(unit.why, /体内声明/u, `${unit.name}: 体内声明必须在 why 里说明（否则它读起来像可搬单元）`)
+    assert.ok(unit.why.includes('体内声明'), `${unit.name}: 体内声明必须在 why 里说明（否则它读起来像可搬单元）`)
   }
 })
 

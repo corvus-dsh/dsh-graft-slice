@@ -117,23 +117,28 @@ test('v351 ③ (negative half): every line in the new module came from the moved
     `③ 这些行在新模块里出现，但 ${baselineRev} 的 index.ts 里没有（＝新增内容，不是搬动）：\n  ${appeared.slice(0, 10).join('\n  ')}`)
 })
 
-test('v351 ④: the module has behaviour tests of its own', () => {
+test('v351 ④: the module has behaviour tests of its own, and they load the MODULE (not the bundle)', () => {
   /**
-   * 「拆完就能单独测这个模块」是这次拆解的目的之一。这条判据不断言行为（v352 在做），它断言**存在性**：
-   * 如果没有一条测试覆盖这四个函数的行为，「可独立测试」就只是说法。
+   * 「拆完就能单独测这个模块」是这次拆解的目的之一。这条判据不断言行为（v352 在做），它断言**存在性
+   * 与加载方式**：如果没有一条测试覆盖这四个函数、或者那条测试只能通过 bundle 间接摸到它们，
+   * 「可独立测试」就只是说法。
    *
-   * ── 为什么测不了 `src/registration/event-helpers.js` ────────────────────────────────────────────
+   * ── 更正（2026-11-25，S5）──────────────────────────────────────────────────────────────────────
    *
-   * 实测：本仓的测试一律 `import … from '../index.js'`（**构建产物**），因为 Node 不能直接跑 `.ts`。
-   * 所以「不经 index.ts 就能测」在这里不可能——而那不是缺陷，是构建形态。**独立性真正的载体是 ②**：
-   * 新模块不 import 任何东西，因此它不依赖 `index.ts`，搬去哪儿都能跑。
+   * 这条判据的 v1 断言的是 `from '../index.js'`，理由写着「Node 不能直接跑 `.ts`」。**那句话是错的**：
+   * Node 24 支持执行 `.ts`（`process.features.typescript === 'strip'`），当时实测到的
+   * `ERR_MODULE_NOT_FOUND` 是**解析**失败（源码写 `./x.js`，磁盘是 `x.ts`），不是执行不支持。
+   * `test/source-module.mjs` 一条 resolve 钩子补上那一跳。所以判据**反向**了：它当时禁止的正是
+   * 现在正确的写法，并会把下一个人推回 bundle。
    *
-   * 把这条判据写成「测试必须 import src 路径」，会逼着下一个人去做一件 Node 不支持的事——那正是
-   * 「宽一格的判据会惩罚正确代码」的样子。所以它断言的是：行为测试存在、且覆盖了四个名字。
+   * **独立性真正的载体仍然是 ②**（新模块不 import 任何东西），但「能不能测」由加载方式决定：
+   * 构建产物把 42 个模块内联成一个作用域，模块边界在那里不存在。
    */
   const behaviour = readFileSync(join(ROOT, 'test', 'v352-event-helpers-behaviour.test.mjs'), 'utf8')
-  assert.match(behaviour, /from '\.\.\/index\.js'/u,
-    '④ 行为测试必须从构建产物 import（本仓唯一的测试加载方式）')
+  assert.ok(behaviour.includes("from './source-module.mjs'"),
+    '④ 行为测试必须先装解析钩子（test/source-module.mjs），否则它只能退回 bundle')
+  assert.ok(behaviour.includes("'../src/registration/event-helpers.ts'"),
+    '④ 行为测试必须直接 import **模块源码**，而不是构建产物')
   for (const name of MOVED) {
     assert.ok(behaviour.includes(name), `④ 行为测试必须覆盖 ${name}`)
   }
