@@ -146,7 +146,7 @@ test('v348 ② (negative half): an object literal in the parameter list breaks t
     '两种口径必须给出不同答案——这正是本判据存在的理由')
 })
 
-test('v348 ③ (negative half): top-level = 181 and nested = 9 — a change to either is a human decision', () => {
+test('v348 ③ (negative half): top-level = 181 and nested = 5 — a change to either is a human decision', () => {
   /**
    * Not `assert(measured === manifest.measured)`: that would compare the instrument with itself. The
    * numbers are pinned HERE, so a refactor that changes them has to come through this file and say why.
@@ -159,15 +159,19 @@ test('v348 ③ (negative half): top-level = 181 and nested = 9 — a change to e
    * 2026-11-25（S3）：181 / 9 → **185 / 5**。4 个零外部依赖的体内声明被提升到模块级 —— 那是唯一一次
    * 方向正确的增长（它们从「不可 import」变成「可搬」），并且是**人审过的决定**，不是自动跟随。
    * 这条判据因此必须被改：它钉的是「数字变了要人来看」，而这次人来了、看了、改了。
+   *
+   * 2026-11-25（S4）：185 / 5 → **181 / 5**。S3 提升的那 4 个**搬出了 index.ts**
+   * （`registration/event-helpers.ts`），所以它们不再计入**这个文件**的顶层数；嵌套数不变。
+   * 判据钉的仍是同一件事：数字再变一次要人来 —— 搬走第 5 个、或再提升一个，都会红。
    */
-  assert.equal(top.length, 185, `顶层函数 = 185（实测 ${top.length}）—— 变了要人审：` +
-    `S3 之前是 181；旧量具把体内声明算成顶层时是 190`)
+  assert.equal(top.length, 181, `顶层函数 = 181（实测 ${top.length}）—— 变了要人审：` +
+    `S3 之后是 185；S3 之前是 181；旧量具把体内声明算成顶层时是 190`)
   assert.equal(nested.length, 5, `体内声明 = 5（实测 ${nested.length}）—— S3 之前是 9`)
 
   const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))
-  assert.equal(manifest.measured.functions, 185, 'manifest 的 measured.functions 必须是顶层数（S3 之后 185）')
+  assert.equal(manifest.measured.functions, 181, 'manifest 的 measured.functions 必须是顶层数（S4 之后 181）')
   assert.equal(manifest.measured.nested, 5, 'manifest 必须登记嵌套数，否则顶层数说明不了自己排除了什么')
-  assert.equal(manifest.units.filter((unit) => unit.top).length, 185, '清单里 top=true 的必须是 185 条')
+  assert.equal(manifest.units.filter((unit) => unit.top).length, 181, '清单里 top=true 的必须是 181 条')
   assert.equal(manifest.units.filter((unit) => !unit.top).length, 5, '清单里 top=false 的必须是 5 条')
   /** The nested ones must say so in their own line — a reader must not have to infer it from `top`. */
   for (const unit of manifest.units.filter((candidate) => !candidate.top)) {

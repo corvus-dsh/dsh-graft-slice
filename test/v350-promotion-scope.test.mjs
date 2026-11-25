@@ -25,6 +25,8 @@ import { describeTypeScript } from '../scripts/ts-compiler.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const SOURCE = join(ROOT, 'src', 'index.ts')
+/** S4 moved the four into this module; S3's claim is about SCOPE, and that is still what ① checks. */
+const MOVED_MODULE = join(ROOT, 'src', 'registration', 'event-helpers.ts')
 const MANIFEST = join(ROOT, 'docs', 'index-manifest.json')
 
 const PROMOTED = ['isSteeringOnly', 'validateAppendIsLifecycleSafe', 'openStepOf', 'continuationTitle']
@@ -41,6 +43,9 @@ assert.ok(ts !== undefined, 'v350 需要编译器：缩进不是作用域的证�
 
 const text = readFileSync(SOURCE, 'utf8')
 const sourceFile = ts.createSourceFile(SOURCE, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+/** The moved module's own declarations — counted with the same compiler, in the same way. */
+const movedText = readFileSync(MOVED_MODULE, 'utf8')
+const movedFile = ts.createSourceFile(MOVED_MODULE, movedText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
 
 const declarations = []
 const visit = (node, owner) => {
@@ -53,12 +58,32 @@ const visit = (node, owner) => {
 }
 for (const statement of sourceFile.statements) visit(statement, undefined)
 
-test('v350 ①: the four promoted declarations are top-level today', () => {
+/** Declarations of the moved module (all top-level there by construction). */
+const movedDeclarations = []
+const visitMoved = (node, owner) => {
+  if (ts.isFunctionDeclaration(node) && node.name !== undefined) {
+    movedDeclarations.push({ name: node.name.text, top: owner === undefined, owner: owner ?? null })
+    for (const child of node.body?.statements ?? []) visitMoved(child, node.name.text)
+    return
+  }
+  ts.forEachChild(node, (child) => visitMoved(child, owner))
+}
+for (const statement of movedFile.statements) visitMoved(statement, undefined)
+
+test('v350 ①: the four promoted declarations are top-level, and S4 gave them a module of their own', () => {
   for (const name of PROMOTED) {
-    const entries = declarations.filter((declaration) => declaration.name === name)
-    assert.equal(entries.length, 1, `① ${name} 必须恰好声明一次（实测 ${entries.length}）`)
-    assert.equal(entries[0].top, true,
-      `① ${name} 必须已提升到模块级；实测仍在 ${entries[0].owner} 体内 —— 那样它仍不可 import`)
+    /**
+     * S4 之后它们**不在 index.ts 里了** —— 所以这条判据必须换对象，而不是被删掉：
+     * S3 的命题是「不再嵌在 apply() 体内」，S4 把它推到了更强的形态（不在 index.ts 里）。
+     * 判据仍要能红：若有人把其中一个塞回 apply() 体内，下面的 moved 断言会失败。
+     */
+    const inIndex = declarations.filter((declaration) => declaration.name === name)
+    assert.equal(inIndex.length, 0,
+      `① ${name} 已被 S4 搬出 index.ts；但 index.ts 里仍有 ${inIndex.length} 个同名声明`)
+    const inModule = movedDeclarations.filter((declaration) => declaration.name === name)
+    assert.equal(inModule.length, 1, `① ${name} 必须在新模块里恰好声明一次（实测 ${inModule.length}）`)
+    assert.equal(inModule[0].top, true,
+      `① ${name} 在新模块里必须是顶层；实测仍在 ${inModule[0].owner} 体内 —— 那样它仍不可 import`)
   }
 })
 
@@ -87,15 +112,16 @@ test('v350 ③ (negative half): no duplicate executable declaration of a promote
   assert.deepEqual(duplicated, [], `③ 同名声明出现多次（后者静默覆盖前者）：${duplicated.map(([name, count]) => `${name}×${count}`).join('、')}`)
 })
 
-test('v350 ④: the manifest records the promotion, so the numbers in it are not stale', () => {
+test('v350 ④: the manifest no longer lists the moved units, and still lists the nested five', () => {
   const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))
   assert.equal(manifest.measured.nested, 5, '④ manifest 的嵌套数必须是 5')
-  assert.equal(manifest.measured.functions, 185, '④ manifest 的顶层数必须是 185（S3 之后）')
+  /**
+   * S4 之后 manifest 只登记 `index.ts` 里的声明（它是那个文件的清单），所以四个已搬走的不再出现。
+   * **负向仍然成立**：如果有人把它们塞回 index.ts，`--write` 会让它们重新出现，而 v351 ① 会同时红。
+   */
   for (const name of PROMOTED) {
     const unit = manifest.units.find((candidate) => candidate.name === name)
-    assert.ok(unit !== undefined, `④ ${name} 必须在清单里`)
-    assert.equal(unit.top, true, `④ ${name} 在清单里必须 top=true`)
-    assert.doesNotMatch(String(unit.why), /体内声明/u, `④ ${name} 已提升，why 不得再写「体内声明」`)
+    assert.equal(unit, undefined, `④ ${name} 已搬出 index.ts，不应再登记在它的清单里`)
   }
   /** The five that remain nested must still say so — otherwise the label would hide a real obstacle. */
   for (const name of STILL_NESTED) {

@@ -1,6 +1,6 @@
 {
-  "lines": 14736,
-  "functions": 185,
+  "lines": 14617,
+  "functions": 181,
   "nested": 5,
   "history": [
     {
@@ -40,6 +40,25 @@
       "from": 181,
       "to": 185,
       "reason": "S3: 4 个体内声明(isSteeringOnly/validateAppendIsLifecycleSafe/openStepOf/continuationTitle)提升到模块级——顶层 181→185、嵌套 9→5。这是唯一一次方向正确的增长：它们从「不可 import」变成「可搬」。"
+    },
+    {
+      "at": "2026-11-25T09:39:24.838Z",
+      "field": "lines",
+      "from": 14736,
+      "to": 14616
+    },
+    {
+      "at": "2026-11-25T09:39:24.839Z",
+      "field": "functions",
+      "from": 185,
+      "to": 181
+    },
+    {
+      "at": "2026-11-25T09:51:09.894Z",
+      "field": "lines",
+      "from": 14616,
+      "to": 14617,
+      "reason": "S4: 搬走 121 行后需要 +1 行 export 再导出——四个符号仍被 index.ts 内部调用（各 1 处），且测试经 bundle 加载，缺这行它们会从公共面消失。净变化 14736→14617。"
     }
   ]
 }

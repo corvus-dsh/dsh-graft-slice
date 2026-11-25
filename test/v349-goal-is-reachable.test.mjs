@@ -105,7 +105,7 @@ test('v349 ③ (negative half): no UNQUALIFIED `< 4,000` goal may remain', () =>
 
 test('v349 ④: the instrument is named, so the floor is reproducible', () => {
   assert.match(arch, /index-ratchet\.mjs/u, '④ TD-1 必须点名量具')
-  assert.match(arch, new RegExp(`顶层 ?\\*{0,2}${manifest.measured.functions}\\*{0,2}`, 'u'),
+  assert.match(arch, new RegExp(`顶层 ?\\*{0,2}${manifest.measured.functions}(?![0-9])`, 'u'),
     `④ 顶层函数数（${manifest.measured.functions}）必须写出来`)
   assert.match(arch, new RegExp(`嵌套 ?\\*{0,2}${manifest.measured.nested}\\*{0,2}|${manifest.measured.nested} 个体内声明`, 'u'),
     `④ 嵌套数（${manifest.measured.nested}）必须写出来，否则顶层数说明不了自己排除了什么`)
