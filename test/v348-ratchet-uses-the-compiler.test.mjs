@@ -88,10 +88,15 @@ test('v348 ①: the 17 spot-checked spans agree with the compiler', () => {
   /**
    * These are the units whose brace-measured span was wrong by more than three lines. If any one of
    * them disagrees with the compiler, the manifest is carrying a number no other tool would reproduce.
+   *
+   * `nudgePanelState` was on this list until S6 moved it into `core/nudge-panel.ts`: the list is about
+   * units **in this file**, so a moved unit has to be replaced, not kept as a permanent failure.
+   * (Measured: keeping it produced `nudgePanelState: 编译器找不到它` in a suite that was otherwise green —
+   * a genuine prompt to update the list, not a regression.)
    */
   const SPOT_CHECK = [
     'buildInjectionPlan', 'autoGraftIfNeeded', 'extractConstraintsDetailed', 'extractPhaseRoadmap',
-    'graftReadResult', 'nudgePanelState', 'governedWatermarks', 'filterRejectedConstraints',
+    'graftReadResult', 'collectDebugStatus', 'governedWatermarks', 'filterRejectedConstraints',
     'markTargetBroken', 'summariseThresholdReason', 'removeManualConstraint', 'removeConstraintRejection',
     'applyManualConstraints', 'recordLeftover', 'graftSliceAndInjectUnlocked', 'buildTape', 'apply',
   ]
