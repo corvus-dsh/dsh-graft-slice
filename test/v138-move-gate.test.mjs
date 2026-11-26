@@ -89,6 +89,36 @@ const SANDBOX_DIGEST = () => {
 }
 
 const gateCache = new Map()
+/**
+ * ── WHERE DOES THIS DECLARATION LIVE *TODAY*? ────────────────────────────────────────────────
+ *
+ * S16: `noteForcedCut` moved to `core/nudge-sampling.ts`, and this test failed while the compiler
+ * span table was exactly right — it was reading `src/index.ts` unconditionally.
+ *
+ * The criterion protects 「the reported span really is that declaration」, which is location-
+ * independent. So the file is RESOLVED (index.ts first, then any other src/*.ts), and the assertion
+ * compares the span against whichever file actually holds it.
+ *
+ * If no file holds it, that IS a failure — a declaration that vanished is not a moved declaration.
+ */
+function locateDeclarationFile(name) {
+  const candidates = [join(ROOT, 'src', 'index.ts')]
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) walk(full)
+      else if (entry.name.endsWith('.ts') && full !== candidates[0]) candidates.push(full)
+    }
+  }
+  walk(join(ROOT, 'src'))
+  const pattern = new RegExp(`^(?:export\\s+)?function\\s+${name}\\b`, 'mu')
+  for (const file of candidates) {
+    const text = readFileSync(file, 'utf8')
+    if (pattern.test(text)) return file
+  }
+  return undefined
+}
+
 const gateJson = (cluster) => {
   const key = `${cluster}\u0000${SANDBOX_DIGEST()}`
   const cached = gateCache.get(key)
@@ -175,9 +205,11 @@ test('v138: spans come from the COMPILER, not from a second parser', (t) => {
   const container = report.A.measured.declarations.find((entry) => entry.name === 'buildTape')
   assert.equal(container.lines, 496, 'buildTape is 496 lines')
   {
-    const lines = readFileSync(SRC, 'utf8').split('\n')
+    const file = locateDeclarationFile('buildTape')
+    assert.ok(file !== undefined, 'buildTape must exist somewhere under src/')
+    const lines = readFileSync(file, 'utf8').split('\n')
     assert.equal(lines[container.start - 1], 'export function buildTape(',
-      'the reported start must be the declaration')
+      `the reported start must be the declaration (file: ${file})`)
     assert.equal(lines[container.end - 1], '}', 'the reported end must close it')
   }
 
@@ -196,9 +228,17 @@ test('v138: spans come from the COMPILER, not from a second parser', (t) => {
    */
   const forcedSpan = forced.A.measured.declarations[0]
   {
-    const lines = readFileSync(SRC, 'utf8').split('\n')
-    assert.equal(lines[forcedSpan.start - 1], 'function noteForcedCut(sourceSessionId?: string): string | undefined {',
-      'the reported start must be the declaration')
+    const file = locateDeclarationFile('noteForcedCut')
+    assert.ok(file !== undefined, 'noteForcedCut must exist somewhere under src/')
+    const lines = readFileSync(file, 'utf8').split('\n')
+    /**
+     * A moved function gains `export ` (index.ts must import it). That prefix is part of the move,
+     * not part of the claim — the claim is 「this line really declares it」. Accept both spellings,
+     * and keep the exact signature so a rewrite is still caught.
+     */
+    assert.match(String(lines[forcedSpan.start - 1]),
+      /^(?:export\s+)?function noteForcedCut\(sourceSessionId\?: string\): string \| undefined \{$/u,
+      `the reported start must be the declaration (file: ${file})`)
     assert.equal(lines[forcedSpan.end - 1], '}', 'the reported end must close it')
   }
   assert.ok(forcedSpan.lines <= 40,
