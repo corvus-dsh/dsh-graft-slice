@@ -413,7 +413,7 @@ UI 与命令共用一份实现，而且在客户端 bundle 尚未加载时，命
 
 | 项 | 结果 | 证据 |
 |---|---|---|
-| 全量测试 | graft **1275 / 1277**（**2 条 skipped，不是 failed**：`v112 D2 control`（TD-17 已裁定保留该行为）/ `v113 C1`（goal 语义待裁定））、memory **836 / 836** | `node --test test/*.test.mjs`（两仓库） |
+| 全量测试 | graft **1279 / 1281**（**2 条 skipped，不是 failed**：`v112 D2 control`（TD-17 已裁定保留该行为）/ `v113 C1`（goal 语义待裁定））、memory **836 / 836** | `node --test test/*.test.mjs`（两仓库） |
 
 > **「本地全绿 ⇒ CI 全绿」不再成立（lead §三十三.3）。** `ci.yml` 现在把 `dsh-paradise` /
 > `dsh-memory` / `dsh-observer` 三个兄弟仓 checkout 到同一工作区，用的**是它们默认分支的 HEAD**，
@@ -1509,7 +1509,7 @@ cd <plugin-dir>
 # 1) 构建 index.js（Node >= 22.6 才带 stripTypeScriptTypes；运行时只需 Node >= 20）
 node scripts/build.mjs
 
-# 2) 1277 个测试
+# 2) 1281 个测试
 node --test test/*.test.mjs
 
 # 2b) 文档与代码一致性（版本、构建新鲜度、工具清单、测试计数、功能状态）

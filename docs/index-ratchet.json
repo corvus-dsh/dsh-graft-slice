@@ -1,6 +1,6 @@
 {
-  "lines": 14137,
-  "functions": 173,
+  "lines": 14067,
+  "functions": 171,
   "nested": 5,
   "history": [
     {
@@ -223,6 +223,20 @@
       "field": "lines",
       "from": 14162,
       "to": 14137,
+      "raised": false
+    },
+    {
+      "at": "2026-11-26T14:58:14.502Z",
+      "field": "lines",
+      "from": 14137,
+      "to": 14067,
+      "raised": false
+    },
+    {
+      "at": "2026-11-26T14:58:14.502Z",
+      "field": "functions",
+      "from": 173,
+      "to": 171,
       "raised": false
     }
   ]
