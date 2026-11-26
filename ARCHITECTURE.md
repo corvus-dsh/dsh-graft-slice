@@ -126,7 +126,7 @@
 | `buildTape` | **48 / 1,750** | none | index.ts | **容器**（> 800 行上限，不是候选） |
 | `buildInjectionPlan` | **108 / 3,693** | none | index.ts | **容器**（> 800 行上限，不是候选） |
 
-**搬完 N7 之后，`buildTape` 从 83 / 2,445 掉到 48 / 1,750，`buildInjectionPlan` 从 145 / 4,400 掉到 110 / 3,705** —— 因为 `buildPendingState` 那 19 个声明从它们两人的闭包里退出去成了导入。**P0 之后 `buildInjectionPlan` 再降到 108 / 3,693**（7 个结构性会话类型搬进 `core/gateway-types.ts`）。两个仍然**远超 800 行上限**，按硬上限仍不是候选。
+**（**当时**（2026-11-10 N7 实测，同一口径）搬完 N7 之后，`buildTape` 从 83 / 2,445 掉到 48 / 1,750，`buildInjectionPlan` 从 145 / 4,400 掉到 110 / 3,705** —— 因为 `buildPendingState` 那 19 个声明从它们两人的闭包里退出去成了导入。**P0 之后 `buildInjectionPlan` 再降到 108 / 3,693**（7 个结构性会话类型搬进 `core/gateway-types.ts`）。两个仍然**远超 800 行上限**，按硬上限仍不是候选。
 
 > **订正（2026-11-11，逐提交实测）**：上表 `buildInjectionPlan` 一度写作 110 / 3,705，那是 **N7 时的快照**。P0 `fd5b6e1` 之后是 **108 / 3,693**，P4 / P5 / HEAD 未再变。实测序列：N6 129/3,934 → N7 110/3,705 → **P0 108/3,693** → P4 = P5 = HEAD 108/3,693。数字陈旧了 12 行 / 2 声明，原因是「被搬走 7 个类型」这件事没有回写到容器表。
 
@@ -185,7 +185,7 @@ scanAndReclaimLocks([dirname(storePaths().retired), PLUGIN_DIR])
 | **实际类型闭包** | **7 个**（`SessionStoreLike` 与 `SessionLogSnapshotLike` 还引用 `PreparedSessionLike` / `SessionHeaderLike`，两者也在 index.ts） |
 | 只搬 5 个会怎样 | `gateway-types.ts` 必须 `import type … from '../index.js'`；`orderModules` **跟每一个本地 specifier（含 type-only）** → **构建直接 throw**，且 `node --check` 抓不到 |
 | `verify-pure-move` | **IDENTICAL（19098 = 19098）** |
-| 测试 / 导出面 | **724 / 722 / 0 / 2**；**182 不变** |
+| 测试 / 导出面 | **724 / 722 / 0 / 2**（**当时**快照，2026-11 的那次运行；当前值见 README 与 `check-readme-counts`）；**182 不变** |
 
 **「`index.js` 逐字节不变」这条判据被实测推翻**：`stripTypeScriptTypes(…, { mode: 'strip' })`
 **不是删除 interface，而是用空白替换它**，所以搬动 interface 会把那片空白搬到另一个内联模块的位置上。
@@ -303,7 +303,7 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 
 | 仪器 | 看起来在测 | 实际测的 | 实测证据 |
 |---|---|---|---|
-| `(Get-Content $f).Count` | 行数 | 少了约 **28%** 的系统性偏低 | 四个样本比值 0.716 / 0.702 / 0.734 / 0.712 |
+| `(Get-Content $f).Count` | 行数 | 少了约 **28%** 的系统性偏低 | 四个样本比值 0.716 / 0.702 / 0.734 / 0.712（来源：`scripts/check-utf8-no-bom.mjs` 的编码探针，四个真实文件的实测读数） |
 | 缩进（列 0） | 作用域 | 什么也不说明 | `appendTransitionCard` 在列 0 却在 `apply()` 体内 |
 | 变异 `src/` + 不重建 | 判据能否红 | 旧产物的行为 | v131 两次「未红」，补重建后 `2/2` |
 | `stripTypeScriptTypes`（`mode:'strip'`） | 删除类型声明 | **用空白替换它们** | P0 搬 7 个 interface：产物 **871,072 → 869,965**（−1,107 字节），「逐字节不变」物理不可行；token 行 16,372 = 16,372 |
@@ -483,7 +483,7 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 
 | 项 | 内容 |
 |---|---|
-| 现状 | `src/index.ts` 约 1,300 行，含工具注册、控制台命令、注入 pre-step、harvest 编排、配置解析 |
+| 现状 | **`dsh-memory/src/index.ts`** **2,890 行 / 2,824 非空**（来源：`wc -l` 口径实测，2026-11-27；该数字长期写作「约 1,300」，差一倍多 —— 见 §六十九 记录），含工具注册、控制台命令、注入 pre-step、harvest 编排、配置解析 |
 | 影响 | 比 TD-1 轻；主要问题是 `applyInner` 一个函数承担了注册与运行两件事，阅读时需要来回跳 |
 | 为什么现在不动 | 同上：刚加完 LLM 警告 / 归档 pass / 负知识时效三处行为，先让它们被测试固定 |
 | 退出条件 | 按 `tools.ts` / `console.ts` / `retrieve-path.ts` / `harvest-path.ts` 拆分，`applyInner` 只做装配；测试数与全绿状态不变 |
