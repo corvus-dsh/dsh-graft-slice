@@ -115,7 +115,24 @@ test('v347 ①: every `why` is an executable ordering or a stated fact, and no p
   assert.ok(counts.fresh > 0, 'expected at least one unit to be movable today')
   assert.ok(counts.clustered > 0, 'expected at least one unit to belong to a cluster')
   assert.equal(counts.container, 1, `exactly one unit is the container, measured ${counts.container}`)
-  assert.ok(counts.inBody >= 1, 'the 9 in-body declarations must be labelled as such')
+  assert.ok(counts.inBody >= 1,
+    `the ${counts.inBody} in-body declarations must be labelled as such (measured, not hardcoded)`)
+  /**
+   * ── F6（S13）：这行的消息曾经写死「9」，而 S3 把 4 个体内声明提到模块级后实测是 **5** ────────────
+   *
+   * 消息里的常数是**文档里的数字**，它不会因为现实变化而失败——断言用的是 `>= 1`，所以「9」是错的
+   * 也照常绿。**一个写进消息的常数，等于一个永不参与判定的陈述**：它唯一的效果是让读到红的人
+   * 被一个不存在的口径误导。
+   *
+   * 所以不再写死：**先与清单自己登记的 `measured.nested` 对上**（两处必须一致，否则清单与判据
+   * 各说各话），再把**实测值**打进消息。两侧都由数据说话，下一刀再提升体内声明时，这条消息
+   * 会自动跟着变成真实数字，而不是又一处过期的陈述。
+   */
+  assert.equal(
+    counts.inBody,
+    manifest.measured.nested,
+    `the in-body count (${counts.inBody}) must equal the manifest's own measured.nested (${manifest.measured.nested}) — 两者各说各话会让这份清单失去意义`,
+  )
   assert.ok(counts.mutable >= 1, 'the units reading apply()-assigned state must be labelled as such')
   assert.equal(units.filter((unit) => /必须先搬/u.test(String(unit.why))).length, 0,
     'no `why` may still say 「必须先搬」 — apply and (module scope) are not movable objects')

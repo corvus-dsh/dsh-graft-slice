@@ -305,11 +305,11 @@ if (process.argv.includes('--raise-ceiling')) {
   }
   const next = { ...ceiling, history: [...(ceiling.history ?? [])] }
   if (measured.lines > ceiling.lines) {
-    next.history.push({ at: new Date().toISOString(), field: 'lines', from: ceiling.lines, to: measured.lines, reason })
+    next.history.push({ at: new Date().toISOString(), field: 'lines', from: ceiling.lines, to: measured.lines, reason, raised: true })
     next.lines = measured.lines
   }
   if (measured.functions > ceiling.functions) {
-    next.history.push({ at: new Date().toISOString(), field: 'functions', from: ceiling.functions, to: measured.functions, reason })
+    next.history.push({ at: new Date().toISOString(), field: 'functions', from: ceiling.functions, to: measured.functions, reason, raised: true })
     next.functions = measured.functions
   }
   writeFileSync(MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
@@ -325,11 +325,11 @@ if (process.argv.includes('--write')) {
   const next = { ...ceiling }
   if (measured.lines < ceiling.lines) {
     next.lines = measured.lines
-    next.history = [...(ceiling.history ?? []), { at: new Date().toISOString(), field: 'lines', from: ceiling.lines, to: measured.lines }]
+    next.history = [...(ceiling.history ?? []), { at: new Date().toISOString(), field: 'lines', from: ceiling.lines, to: measured.lines, raised: false }]
   }
   if (measured.functions < ceiling.functions) {
     next.functions = measured.functions
-    next.history = [...(next.history ?? []), { at: new Date().toISOString(), field: 'functions', from: ceiling.functions, to: measured.functions }]
+    next.history = [...(next.history ?? []), { at: new Date().toISOString(), field: 'functions', from: ceiling.functions, to: measured.functions, raised: false }]
   }
   writeFileSync(MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
   writeFileSync(CEILING, `${JSON.stringify({ lines: next.lines, functions: next.functions, nested: measured.nested, history: next.history ?? [] }, null, 2)}\n`, 'utf8')
