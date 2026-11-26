@@ -204,6 +204,15 @@ jobs:
       - name: Comments do not claim what the manifest no longer says
         run: node scripts/check-doc-claims.mjs
 
+      # ── TWO COPIES OF ONE DOCUMENT MUST NOT DIVERGE ─────────────────────────────────────────────
+      #
+      # Measured 2026-11-26: a whole section was appended to one copy of `B4-B-派工单.md` and not the
+      # other, while the previous round had REPORTED 「两份 sha 一致」. A one-off check is true when
+      # written and stops being true at the next append; this is the standing version. A missing copy
+      # exits 2 with VACUOUS — 「nothing to compare」 is not 「they agree」.
+      - name: The two copies of the dispatch order stay identical
+        run: node scripts/check-doc-copies.mjs
+
       # ── SOURCE-TEXT ASSERTIONS MUST STRIP COMMENTS FIRST ─────────────────────────────────────────
       #
       # Four times in one batch, a criterion that greps SOURCE TEXT went green (or red) on the

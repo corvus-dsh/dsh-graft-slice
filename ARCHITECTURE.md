@@ -444,6 +444,10 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 | `core/discard-target.ts` | 清理失败的目标：三种后端各试一个方法、每步记账（含失败），删不掉时明说 id 仍被占用（S6 纯移动，模块私有） | `discardPartialTarget`（不扩公开面） | `core/gateway-types.ts` |
 | `core/open-background-work.ts` | 从事件流里取出**不会跟着用户迁移**的后台作业与子代理（标签给人读、ID 给台账看） | `extractOpenBackgroundWork` | `core/pending-transfers.ts`, `utils/serialize.ts` |
 
+**段一 · 第 1 簇的行数账（N3）**：搬 77 行（`OpenBackgroundWork` 接口 + `extractOpenBackgroundWork`，含文档注释）；
+`index.ts` 14,324 → 14,252，**净 −72**。差额 5 行 = 1（新模块的 import 行）+ 4（`index.ts` 里一句空行与两行 re-export）。
+**两个数字并置而不解释，会让读者以为丢了 5 行** —— 那 5 行不是丢失，是搬动必然产生的管线。
+
 **依赖方向**：表里读出的箭头一律指向更底层（`utils` → `contracts` → `core` 内的下层模块），
 `v145` 的第三条断言就是「光凭这张表也不成环」。
 

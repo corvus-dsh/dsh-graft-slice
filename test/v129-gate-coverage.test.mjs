@@ -196,6 +196,8 @@ const KINDS = new Map([
    * 「declares no dependencies」/「installs nothing」），所以是 GATE，且必须有 ci.yml 步骤。
    */
   ['check-doc-claims.mjs', 'GATE'],
+  /** S14: two copies of `B4-B-派工单.md` diverged by a whole section while a previous round REPORTED「两份 sha 一致」. A one-off check stops being true at the next append; this is the standing gate. It needs no compiler, no network and no session store — it compares two committed documents and names the first diverging line. `--self-test` proves the comparison can say NO. */
+  ['check-doc-copies.mjs', 'GATE'],
   /**
    * §35.2：`mv ../dsh-*` 的前提（自家 checkout 在 workspace 根）必须是**判据**，不是注释。
    * 注释不执行，下一位加 `path:` 的人不会读到它，CI 也不会红。
