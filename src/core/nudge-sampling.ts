@@ -2,6 +2,7 @@ import type { ForcedCutFacts, GrowthPrediction } from './nudge-margin.js'
 import { forcedCutSentence } from './nudge-margin.js'
 import { isResetEventType, nudgeDeltas, predictGrowthTokens, recordNudgeSample } from './nudge-margin.js'
 import { forcedCutMarks, nudgeDeliveredAt, nudgeSamples } from './state.js'
+import type { PluginContextLike } from './gateway-types.js'
 import type { SessionEventLike, TokenWatermark } from './watermark.js'
 
 export function noteForcedCut(sourceSessionId?: string): string | undefined {
