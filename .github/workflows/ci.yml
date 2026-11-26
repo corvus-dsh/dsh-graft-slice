@@ -213,6 +213,14 @@ jobs:
       - name: The two copies of the dispatch order stay identical
         run: node scripts/check-doc-copies.mjs
 
+      # ── ONE DOCUMENT MUST NOT NUMBER THE SAME SECTION TWICE ─────────────────────────────────────
+      #
+      # Measured: the dispatch order carried TWO `## 六十四、` sections and duplicate `64.x` subsections,
+      # while check-doc-copies was green — 「the copies match」 is a different question from 「the document
+      # says it once」. Two identical copies can be identically wrong.
+      - name: Section numbers in the dispatch order are unique and monotonic
+        run: node scripts/check-section-numbers.mjs 'D:/持久层能力架构/B4-B-派工单.md'
+
       # ── SOURCE-TEXT ASSERTIONS MUST STRIP COMMENTS FIRST ─────────────────────────────────────────
       #
       # Four times in one batch, a criterion that greps SOURCE TEXT went green (or red) on the
