@@ -221,6 +221,16 @@ jobs:
       - name: Section numbers in the dispatch order are unique and monotonic
         run: node scripts/check-section-numbers.mjs 'D:/持久层能力架构/B4-B-派工单.md'
 
+      # ── KEY NUMBERS MUST CARRY THEIR SOURCE ─────────────────────────────────────────────────────
+      #
+      # Three rounds running, a report quoted a number nobody had read from a file (509/509 that was
+      # 508; a floor of 6,762 where the document and the manifest both said 6,732; cluster ordinals
+      # off by one). The defect is arithmetic only incidentally — the real one is that the number had
+      # no stated origin, so nobody could check it cheaply. Four kinds only, on purpose: a rule
+      # demanding a source for EVERY number goes red on its first paragraph and gets switched off.
+      - name: Key numbers in the architecture doc name their source
+        run: node scripts/check-reported-numbers.mjs ARCHITECTURE.md
+
       # ── SOURCE-TEXT ASSERTIONS MUST STRIP COMMENTS FIRST ─────────────────────────────────────────
       #
       # Four times in one batch, a criterion that greps SOURCE TEXT went green (or red) on the

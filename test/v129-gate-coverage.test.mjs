@@ -200,6 +200,14 @@ const KINDS = new Map([
   ['check-doc-copies.mjs', 'GATE'],
   /** S15/R2: the dispatch order numbered `六十四` twice (an acceptance review and an execution record) while check-doc-copies was green — 「the copies match」 answers a different question. This gate extracts the SECTION NUMBER (not the whole heading, and not `^##\s+(\S+)` which yields two different tokens for the two `六十四`s) and requires uniqueness + monotonicity. `--self-test` proves it can find two same-numbered headings whose titles differ, which is the only shape that actually occurred. */
   ['check-section-numbers.mjs', 'GATE'],
+  /** S16/N5: three rounds running, a report quoted a number nobody had read from a file.
+   *  Covers ONLY test counts, line counts, floors/ceilings and cluster ordinals — a rule demanding a
+   *  source for EVERY number would be red on its first paragraph and then switched off. Two
+   *  exemptions are explicit and reasoned: a DATED line (「当时」/historical) is not a claim about
+   *  today, and an account paragraph's numbers are its own subject (v378/v381 already hold those to
+   *  a gap-naming standard). The self-test is two-sided: it must catch the uncited AND stay silent
+   *  on cited lines. */
+  ['check-reported-numbers.mjs', 'GATE'],
   /**
    * §35.2：`mv ../dsh-*` 的前提（自家 checkout 在 workspace 根）必须是**判据**，不是注释。
    * 注释不执行，下一位加 `path:` 的人不会读到它，CI 也不会红。

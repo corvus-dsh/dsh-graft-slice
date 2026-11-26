@@ -22,6 +22,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -57,6 +58,33 @@ export function accountParagraphs(text) {
  * Judge ONE paragraph. Exported so the negative half exercises the same rules as the positive half —
  * a second implementation in the test would be a second source of truth.
  */
+/**
+ * HOW MANY CLUSTERS HAVE MOVED — from EVIDENCE, not from a constant.
+ *
+ * `git log --diff-filter=A -- src/core/*.ts` gives one added module per move, and each of those
+ * commits names its cluster (`第 N 簇`). That is the only definition here that cannot drift: a
+ * constant would need editing on every move, and the whole defect (N4) was a constant that was not
+ * edited — `>= 3` while 4 had moved, so deleting one account still passed.
+ *
+ * Returns the sorted cluster numbers. Empty when git is unavailable — the caller treats an empty
+ * set as MEASUREMENT-BROKEN, never as 「zero clusters」 (they plainly exist).
+ */
+export function clusterNumbersFromGit(repo) {
+  try {
+    const out = execFileSync('git', ['log', '--diff-filter=A', '--format=%s', '--', 'src/core'], {
+      cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const numbers = new Set()
+    for (const line of out.split(/\r?\n/u)) {
+      const match = /第\s*(\d+)\s*簇/u.exec(line)
+      if (match !== null) numbers.add(Number(match[1]))
+    }
+    return [...numbers].sort((a, b) => a - b)
+  } catch {
+    return []
+  }
+}
+
 export function judgeAccount(paragraph) {
   const problems = []
   const body = String(paragraph.body ?? paragraph)
@@ -84,8 +112,35 @@ test('v378 ①: EVERY cluster has an account paragraph (a population, not "at le
   /** The count of registered `core/` modules added by moves is the yardstick for how many accounts. */
   const registeredRows = lines.filter((line) => /^\| `core\/[a-z-]+\.ts`/u.test(line)).length
   assert.ok(registeredRows > 10, `① 登记表必须是一个有人口的表，实测 ${registeredRows} 行`)
-  assert.ok(paragraphs.length >= 3,
-    `① 每次搬动都要留账，实测只找到 ${paragraphs.length} 段 —— 少于已搬的簇数`)
+
+  /**
+   * ── N4（S16）：门槛必须来自证据，且必须是**完整区间** ─────────────────────────────────────────
+   *
+   * 旧断言是 `paragraphs.length >= 3`，而实测已搬 4 簇 —— **删掉一整簇的账目仍然全绿**。
+   * 标题写着「a population, not at least one」，那句话当时只是口号。
+   *
+   * 现在：已搬簇号从 git 算；账目段里的簇号必须**恰好**是 1..N。多一段、少一段都红，
+   * 而缺的那一段会被**点名**（`缺第 2 簇`），不是一句「少于已搬的簇数」让读者自己找。
+   */
+  const moved = clusterNumbersFromGit(join(ROOT))
+  assert.ok(moved.length > 0,
+    '① 已搬簇数必须可测（MEASUREMENT-BROKEN）：git 里找不到任何「第 N 簇」提交 —— 不是「0 簇」，是这个量具坏了')
+
+  const documented = paragraphs
+    .map((paragraph) => {
+      const match = /第\s*(\d+)\s*簇的行数账/u.exec(paragraph.title)
+      return match === null ? undefined : Number(match[1])
+    })
+    .filter((value) => value !== undefined)
+    .sort((a, b) => a - b)
+
+  /** A gap is the actionable failure: name the cluster, do not describe the count. */
+  const missing = moved.filter((number) => !documented.includes(number))
+  const extra = documented.filter((number) => !moved.includes(number))
+  assert.deepEqual(missing, [], `① 这些簇已搬但**没有账目段**：缺第 ${missing.join(' / 第 ')} 簇`)
+  assert.deepEqual(extra, [], `① 这些账目段声称的簇**并不存在**（git 里没有对应的第 N 簇提交）：第 ${extra.join(' / 第 ')} 簇`)
+  assert.equal(documented.length, moved.length,
+    `① 账目段数（${documented.length}）必须等于已搬簇数（${moved.length}）`)
 
   /** And every paragraph must close its own account. */
   const failures = []

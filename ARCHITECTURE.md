@@ -276,7 +276,7 @@ B 管「它牵动了多少」，决定**动手之前要先搬什么**。两者�
 
 **用户提出的假设已被证实**：`renderTaskBoard ∈ renderInstructionCard 的闭包 = true`，反向 `= false`；共享成员 12 个（即 `renderTaskBoard` 的全部成员，含 `BOARD_COLUMNS` / `BOARD_TRAILER` / `sameTextHead` / `truncateForDisplay` / `wrapTruncated` 等）。
 
-**两条规则在这里给出不同答案，必须说清**：按**声明数**升序 → `renderTaskBoard`（12）先；按**行数**升序 → `buildPendingState`（229）先。**度量已定死为声明数**（理由见上：声明数 = 耦合面），因此**没有平局**：12 < 19，规则 ② 与 ③ 指向同一个目标 —— **N5 = `renderTaskBoard`（12 / 348）**。上一轮那场「② 有歧义」是度量未定死造成的伪问题。
+**两条规则在这里给出不同答案，必须说清**：按**声明数**升序 → `renderTaskBoard`（12）先；按**行数**升序 → `buildPendingState`（229）先。**度量已定死为声明数**（理由见上：声明数 = 耦合面），因此**没有平局**：12 < 19，规则 ② 与 ③ 指向同一个目标 —— **N5 = `renderTaskBoard`（12 / 348，来源：`scripts/closure.mjs` 2026-11-10 实测的闭包跨度）**。上一轮那场「② 有歧义」是度量未定死造成的伪问题。
 
 **队列（**当时**（2026-11-10））**：~~N5 = `renderTaskBoard`（12 / 348）~~ **已搬** → ~~N6 = `renderInstructionCard`（4 / 118）~~ **已搬**（N6 之后 `buildPendingState` 仍为 19 / 229，同一口径实测）→ ~~N7 = `buildPendingState`（19 / 229）~~ **已搬** → 全表重测。`buildTape` / `buildInjectionPlan` **不在队列**（闭包行数 > 800 硬上限，属容器）。**N6 / N7 的边界必须实测**：lattice 每搬一次都在移动，上一行的 4 / 118 是 N5 之后的结果，不是计划的输入。
 
@@ -446,18 +446,20 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 | `core/log-visibility.ts` | 判定「这次日志回读合法吗」：自己 / 上游链 / 无身份放行但标注 | `graftLogVisibility` | `core/state.ts` |
 | `core/memory-context.ts` | 把记忆命中渲染成一段带优先级的文本；空集返回 undefined 而非空标题 | `renderMemoryContext`、`MemoryContextInput` | — |
 | `core/constraint-provenance.ts` | 找出最早那条带 HARD CONSTRAINTS 的回放消息，并渲染成一句溯源 | `findConstraintProvenance`、`ConstraintProvenance` | `core/watermark.ts`, `core/message-source.ts` |
-**段一 · 第 4 簇的行数账**：搬 74 行 = `ConstraintProvenance`（接口 + 文档）+ `findConstraintProvenance` + `renderConstraintProvenance`，三件一起；
-`index.ts` 14,137 → 14,067，**净 −70**。差额 4 = 1（值 import）+ 1（类型 import）+ 1（finder re-export）+ 1（type re-export）。
-**三件必须一起搬**：接口若留下，新模块就要反向 `import type`，而上一簇已实测 `build.mjs` 拒绝那个形状。渲染器不 re-export —— 它原本就不是公开面。
+**段一 · 第 1 簇的行数账（N3）**：搬 77 行（`OpenBackgroundWork` 接口 + `extractOpenBackgroundWork`，含文档注释）；
+`index.ts` 14,324 → 14,252，**净 −72**。差额 5 行 = 1（新模块的 import 行）+ 4（`index.ts` 里一句空行与两行 re-export）。
+**两个数字并置而不解释，会让读者以为丢了 5 行** —— 那 5 行不是丢失，是搬动必然产生的管线。
+
+**段一 · 第 2 簇的行数账**：搬 51 行（`graftLogVisibility`）；`index.ts` 14,253 → 14,203，**净 −50**。差额 1 行 = 新模块的 import 行。**它没有 re-export** —— 这个函数原本就不在公开面上，加进导出面不算纯移动。
+
 **段一 · 第 3 簇的行数账**：搬 69 行 = 42（`renderMemoryContext` + 文档注释）+ 27（`MemoryContextInput` + 文档注释）；
 `index.ts` 14,203 → 14,137，**净 −66**。差额 3 = 1（import 行）+ 2（函数与类型的 re-export 各一行）。
 **类型也搬了**：第一版把它留在 `index.ts` 并用 `import type` 反向引入，`check-cycles` 接受（type-only 环被显式允许），
 但 `build.mjs` 拒绝无法在打包时解析的相对 import —— 两侧对同一形状给了不同答案，而打包器是更硬的那一侧。
-**段一 · 第 2 簇的行数账**：搬 51 行（`graftLogVisibility`）；`index.ts` 14,253 → 14,203，**净 −50**。差额 1 行 = 新模块的 import 行。**它没有 re-export** —— 这个函数原本就不在公开面上，加进导出面不算纯移动。
 
-**段一 · 第 1 簇的行数账（N3）**：搬 77 行（`OpenBackgroundWork` 接口 + `extractOpenBackgroundWork`，含文档注释）；
-`index.ts` 14,324 → 14,252，**净 −72**。差额 5 行 = 1（新模块的 import 行）+ 4（`index.ts` 里一句空行与两行 re-export）。
-**两个数字并置而不解释，会让读者以为丢了 5 行** —— 那 5 行不是丢失，是搬动必然产生的管线。
+**段一 · 第 4 簇的行数账**：搬 74 行 = `ConstraintProvenance`（接口 + 文档）+ `findConstraintProvenance` + `renderConstraintProvenance`，三件一起；
+`index.ts` 14,137 → 14,067，**净 −70**。差额 4 = 1（值 import）+ 1（类型 import）+ 1（finder re-export）+ 1（type re-export）。
+**三件必须一起搬**：接口若留下，新模块就要反向 `import type`，而上一簇已实测 `build.mjs` 拒绝那个形状。渲染器不 re-export —— 它原本就不是公开面。
 
 **依赖方向**：表里读出的箭头一律指向更底层（`utils` → `contracts` → `core` 内的下层模块），
 `v145` 的第三条断言就是「光凭这张表也不成环」。
@@ -603,7 +605,7 @@ v128（import 门禁脚本本身）、以及只改数据文件的证明。**受�
 
 而且这条样本检查本身第一版**也是装饰品**：把样本里一条真约束改成词表，测试仍然全绿——因为断言只要求「非 KEPT 条目被拒且有已知 code」，改后的文本照样被拒（换了原因）。现在两条回归句按**内容**钉住（必须在样本里逐字存在、且必须 KEPT），改样本即红。 |
 | 退出条件 | ① 任何新增或修改的结构判据，必须配一条**能走到该分支**的 nearMiss——原来的 S1 nearMiss 是 `必须 在提交前检查 "U+FFFD" 为 0。`，**没有冒号**，根本进不了第三分支，这是缺陷能活下来的直接原因；② 语料测量脚本必须断言「实际检查条数 > 0」并打印分母，否则空集绿会再次发生。 |
-## TD-21 `apply()` 是 2,344 行，TD-1 的「≤ 300 行」退出条件从未对齐过（P2，2026-11-10 登记）
+## TD-21 `apply()` 是 2,344 行（来源：`node scripts/index-ratchet.mjs` 2026-11-10 实测；当前值见 TD-1 量具行），TD-1 的「≤ 300 行」退出条件从未对齐过（P2，2026-11-10 登记）
 
 | 项 | 内容 |
 |---|---|
