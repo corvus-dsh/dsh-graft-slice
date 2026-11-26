@@ -73,11 +73,27 @@ test('v252 ②: 渲染器仍然可用，且它的输入契约没被降级声称�
   /**
    * Downgrading the CLAIM must not delete the CAPABILITY. `renderMemoryContext` + the `memory-context`
    * chunk stay: the moment a producer appears, nothing but the description has to change.
+   *
+   * ── S14 修订：判据绑在「在哪个文件」上，而它真正要守的是「能力还在」────────────────────────
+   *
+   * 这一条原本写 `assert.match(index, /export function renderMemoryContext/)`。S14 段一把函数搬进
+   * `src/core/memory-context.ts`（纯移动、`IDENTICAL`），于是判据红了 —— **而能力一点没少**：
+   * `index.ts` 仍然 `export { renderMemoryContext }`，公开面 `check-export-baseline` 报 unchanged。
+   *
+   * 这正是本批记录过三次的形状：**把「一个具体的名字/位置」当成了「一个性质」**。
+   * 判据改成读**两侧**：函数定义在新模块，`index.ts` 再导出它。这样下一次搬动它也不会误伤，
+   * 而「能力被删」仍然红（两处都找不到）。
    */
   const index = readFileSync(join(SRC, 'index.ts'), 'utf8')
-  assert.match(index, /export function renderMemoryContext/u)
+  const moved = readFileSync(join(SRC, 'core', 'memory-context.ts'), 'utf8')
+
+  assert.match(moved, /export function renderMemoryContext/u,
+    '② 渲染器必须仍然被导出（定义现在在 core/memory-context.ts）')
+  assert.match(index, /export \{ renderMemoryContext \}/u,
+    '② index.ts 必须再导出它 —— 公开面不许因为搬动而缩小')
   assert.match(index, /kind: 'memory-context'/u, 'chunk 种类必须还在 —— 否则接上生产者时七段顺序要重排')
-  assert.match(index, /memoryContext\?: MemoryContextInput/u)
+  assert.match(index, /memoryContext\?: MemoryContextInput/u,
+    '② 输入契约必须仍被引用（类型随函数搬走，index.ts 以类型导入名义引用它）')
 })
 
 test('v252 ③: 空集合 ⇒ 不产块（「没查到」与「没查」必须是两句话）', async () => {
